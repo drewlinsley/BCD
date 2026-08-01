@@ -1,0 +1,23 @@
+id: wikidata
+name: Wikidata / DBpedia
+tier: A
+categories:
+- all
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: cc0
+legal_basis: open_license
+provides:
+- producer
+- ownership
+refresh: monthly
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.wikidata.org
+notes: 'Brand/producer entities, aliases, ownership graphs. Entity-resolution backbone (who owns whom:
+  ABI, Constellation, Diageo).'

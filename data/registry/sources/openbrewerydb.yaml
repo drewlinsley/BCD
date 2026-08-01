@@ -1,0 +1,25 @@
+id: openbrewerydb
+name: Open Brewery DB
+tier: A
+categories:
+- beer
+- venues
+access:
+  method: api
+  auth: none
+  robots_allows: true
+  rate_limit_rps: null
+license: open-database-license
+legal_basis: open_license
+provides:
+- producer
+- venue
+refresh: weekly
+est_records: 8000
+priority: 1
+status: active
+urls:
+  home: https://www.openbrewerydb.org
+  data: https://api.openbrewerydb.org/v1/breweries
+  docs: https://www.openbrewerydb.org/documentation
+notes: No auth, no rate limit. Producer + venue spine, day one. Connector implemented.

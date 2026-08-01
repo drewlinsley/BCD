@@ -1,0 +1,23 @@
+id: mcauley-datasets
+name: McAuley UCSD recommender datasets
+tier: B
+categories:
+- beer
+- spirits
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: academic-research-only
+legal_basis: academic_release
+provides:
+- review
+- rating
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://cseweb.ucsd.edu/~jmcauley/datasets.html
+notes: Canonical source for the SNAP beer corpora + more.

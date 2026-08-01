@@ -1,0 +1,55 @@
+# Parallel FindAll jobs — discover NEW sources to add to the registry.
+# Rate limit 25/hour, so these run as a scheduled NIGHTLY job, never interactively.
+# Cost: base $0.25 + $0.03/match; pro $10 + $1/match. Loaded by services/sentinel.
+#
+# Output is triaged into data/registry/sources/*.yaml as status: planned, then reviewed.
+
+version: 1
+defaults:
+  api: findall
+  generator: base
+  match_limit: 200
+  schedule: nightly
+
+find_all:
+  - id: us-taplist-sites
+    objective: >
+      Websites and apps that publish current draft/tap lists for US bars and taprooms
+      (digital beer menus). Exclude the venues themselves; find the aggregators/platforms.
+    match_conditions:
+      - publishes structured tap lists
+      - covers US venues
+    generator: core
+
+  - id: distilleries-publishing-mashbills
+    objective: >
+      US craft distillery websites that publish their mash bills, barrel/cooperage details,
+      or entry proof for their whiskeys.
+    match_conditions:
+      - is a distillery producer site
+      - states mash bill or barrel program
+    match_limit: 500
+
+  - id: regional-beer-blogs
+    objective: Regional US craft-beer blogs and news sites that announce local releases.
+    match_conditions:
+      - covers craft beer releases
+      - regularly updated
+    generator: base
+
+  - id: bottle-shops-with-inventory
+    objective: >
+      US bottle shops and liquor stores that publish live online inventory for beer and
+      allocated spirits.
+    match_conditions:
+      - publishes online inventory
+      - sells craft beer or allocated whiskey
+    generator: core
+    match_limit: 500
+
+  - id: eu-wine-elabel-platforms
+    objective: >
+      Platforms hosting EU wine e-labels (QR -> ingredient/nutrition pages) beyond U-label,
+      wine-elabels.eu, eWinetag.
+    match_conditions:
+      - hosts EU-compliant wine e-labels

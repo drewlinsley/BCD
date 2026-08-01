@@ -1,0 +1,23 @@
+id: reddit-beer
+name: Reddit r/beer, r/craftbeer, r/beertrade
+tier: D
+categories:
+- beer
+access:
+  method: api
+  auth: oauth
+  robots_allows: null
+  rate_limit_rps: 1.0
+license: reddit-api-terms
+legal_basis: public_web
+provides:
+- review
+- release
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.reddit.com/r/craftbeer
+sentinel: true
+notes: Official API (OAuth). Trade + hype signal.

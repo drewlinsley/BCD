@@ -1,0 +1,23 @@
+id: beerxml-archives
+name: BeerXML recipe archives / Compubeer
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: mixed-open
+legal_basis: academic_release
+provides:
+- recipe
+- ingredients
+- process
+refresh: static
+est_records: 400000
+priority: 3
+status: planned
+urls:
+  home: https://compubeer.net
+notes: Assembled from 400k+ BeerXML files.

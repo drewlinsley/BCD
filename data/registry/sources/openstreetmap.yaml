@@ -1,0 +1,21 @@
+id: openstreetmap
+name: OpenStreetMap + Overture
+tier: A
+categories:
+- venues
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: odbl
+legal_basis: open_license
+provides:
+- venue
+refresh: weekly
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.openstreetmap.org
+notes: amenity=bar|pub, craft=brewery, shop=alcohol. Free venue spine w/ geo, no POI vendor bill.

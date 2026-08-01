@@ -1,0 +1,26 @@
+id: provi-sevenfifty
+name: Provi / SevenFifty
+tier: C
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: license
+  auth: account
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-account
+legal_basis: contract
+provides:
+- product
+- price
+- inventory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+jurisdiction: US
+urls:
+  home: https://www.provi.com
+notes: B2B marketplace, distributor portfolios + pricing. Buyer-side; needs a licensed retail account.

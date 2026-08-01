@@ -1,0 +1,79 @@
+[project]
+name = "bcd"
+version = "0.1.0"
+description = "Bottles, Cans & Draft — camera-first, verifiable alcohol discovery"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "arq>=0.26",
+    "pyyaml>=6.0",
+    "jsonschema>=4.22",
+    "orjson>=3.10",
+    "structlog>=24.1",
+    "tenacity>=8.4",
+    "protego>=0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "respx>=0.21",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "packages/schema/bcd_schema",
+    "packages/crawler/bcd_crawler",
+    "services/ingest/bcd_ingest",
+    "services/api/bcd_api",
+    "services/enrich/bcd_enrich",
+    "services/sentinel/bcd_sentinel",
+    "services/telemetry/bcd_telemetry",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# generated_events.py is codegen output — must match scripts/codegen_events.py byte-for-byte
+extend-exclude = ["**/generated_events.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# UP042: we deliberately use `str, Enum` (not StrEnum) — pydantic v2 serializes it
+# cleanly and it stays compatible with tooling that predates StrEnum.
+ignore = ["UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]  # test fixtures read better unwrapped
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "packages", "services"]
+pythonpath = [
+    "packages/schema",
+    "packages/crawler",
+    "services/ingest",
+    "services/api",
+    "services/enrich",
+    "services/sentinel",
+    "services/telemetry",
+]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true

@@ -1,0 +1,25 @@
+id: circana-iri
+name: Circana (IRI) / NielsenIQ
+tier: C
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: license
+  auth: contract
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-license
+legal_basis: contract
+provides:
+- inventory
+- price
+refresh: static
+est_records: null
+priority: 4
+status: planned
+jurisdiction: US
+urls:
+  home: https://www.circana.com
+notes: Off-premise retail scan/panel. Expensive; market-sizing not per-SKU discovery.

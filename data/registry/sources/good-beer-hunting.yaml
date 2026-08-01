@@ -1,0 +1,21 @@
+id: good-beer-hunting
+name: Good Beer Hunting
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- release
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.goodbeerhunting.com
+sentinel: true

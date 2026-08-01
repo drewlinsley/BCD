@@ -1,0 +1,22 @@
+id: morebeer-kits
+name: MoreBeer / Northern Brewer clone kits
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- recipe
+- ingredients
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://www.morebeer.com
+notes: Kit pages list grain bills for named commercial clones.

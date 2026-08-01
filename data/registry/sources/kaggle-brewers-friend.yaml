@@ -1,0 +1,23 @@
+id: kaggle-brewers-friend
+name: Kaggle Brewer's Friend recipes
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: account
+  robots_allows: null
+  rate_limit_rps: null
+license: kaggle-dataset-terms
+legal_basis: academic_release
+provides:
+- recipe
+- ingredients
+- process
+refresh: static
+est_records: 75000
+priority: 2
+status: planned
+urls:
+  home: https://www.kaggle.com/datasets/jtrofe/beer-recipes
+notes: ~75k homebrew recipes; angeredsquid variant has 180k+.

@@ -1,0 +1,21 @@
+id: beeradvocate
+name: BeerAdvocate + forums
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.2
+license: public_web
+legal_basis: public_web
+provides:
+- review
+- rating
+- product
+refresh: static
+est_records: null
+priority: 2
+status: blocked
+notes: ToS forbids scraping. Historical corpus available via SNAP (Tier B) legally.

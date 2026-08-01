@@ -1,0 +1,24 @@
+id: untappd-business
+name: Untappd for Business API
+tier: C
+categories:
+- beer
+access:
+  method: api
+  auth: contract
+  robots_allows: null
+  rate_limit_rps: null
+license: untappd-business-terms
+legal_basis: contract
+provides:
+- menu
+- venue
+- product
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://docs.business.untappd.com
+notes: Venue menus by menu ID, premium tier; Toast POS integration since Mar 2026. Licensed path to live
+  draft lists.

@@ -1,0 +1,26 @@
+id: binnys
+name: Binny's Beverage Depot
+tier: D
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- price
+- inventory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.binnys.com
+sentinel: true
+notes: Allocated bourbon inventory — drop sentinel.

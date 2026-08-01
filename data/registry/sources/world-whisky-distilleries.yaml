@@ -1,0 +1,20 @@
+id: world-whisky-distilleries
+name: World Whisky Distilleries (Kaggle)
+tier: B
+categories:
+- spirits
+access:
+  method: bulk
+  auth: account
+  robots_allows: null
+  rate_limit_rps: null
+license: kaggle-dataset-terms
+legal_basis: academic_release
+provides:
+- producer
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.kaggle.com/datasets/koki25ando/world-whisky-distilleries-brands-dataset

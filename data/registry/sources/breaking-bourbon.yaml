@@ -1,0 +1,24 @@
+id: breaking-bourbon
+name: Breaking Bourbon
+tier: D
+categories:
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- review
+- release
+- process
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.breakingbourbon.com
+sentinel: true
+notes: Mash bills, reviews, and release calendar — allocated-drop sentinel.

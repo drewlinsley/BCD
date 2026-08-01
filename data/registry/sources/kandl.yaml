@@ -1,0 +1,25 @@
+id: kandl
+name: K&L Wine Merchants
+tier: D
+categories:
+- spirits
+- wine
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- price
+- release
+refresh: daily
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://www.klwines.com
+sentinel: true
+notes: Barrel picks + allocations.

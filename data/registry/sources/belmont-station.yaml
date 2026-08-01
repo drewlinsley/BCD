@@ -1,0 +1,21 @@
+id: belmont-station
+name: Belmont Station
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- price
+refresh: static
+est_records: null
+priority: 5
+status: planned
+urls:
+  home: https://www.belmont-station.com

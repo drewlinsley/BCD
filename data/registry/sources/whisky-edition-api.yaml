@@ -1,0 +1,20 @@
+id: whisky-edition-api
+name: WHISKY:EDITION dev API
+tier: C
+categories:
+- spirits
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-api
+legal_basis: contract
+provides:
+- product
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://thewhiskyedition.com/developer

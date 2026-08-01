@@ -1,0 +1,27 @@
+id: lcbo
+name: LCBO Catalog
+tier: A
+categories:
+- beer
+- wine
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- abv
+- price
+- sku
+refresh: static
+est_records: null
+priority: 3
+status: planned
+jurisdiction: CA
+urls:
+  home: https://www.lcbo.com
+notes: lcboapi.com is dead — scrape LCBO directly. Provincial pricing.

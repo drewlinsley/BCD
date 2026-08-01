@@ -1,0 +1,21 @@
+id: barthhaas
+name: BarthHaas hop varieties
+tier: D
+categories:
+- ingredients
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+- sensory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.barthhaas.com

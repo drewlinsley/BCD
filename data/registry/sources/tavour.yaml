@@ -1,0 +1,24 @@
+id: tavour
+name: Tavour
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- price
+- release
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://tavour.com
+sentinel: true
+notes: Curated craft drops — release sentinel.

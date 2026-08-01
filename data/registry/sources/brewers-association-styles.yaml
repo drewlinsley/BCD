@@ -1,0 +1,21 @@
+id: brewers-association-styles
+name: Brewers Association Style Guidelines
+tier: A
+categories:
+- beer
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: ba-terms
+legal_basis: open_license
+provides:
+- style
+- sensory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.brewersassociation.org

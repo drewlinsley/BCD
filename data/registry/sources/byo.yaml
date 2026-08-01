@@ -1,0 +1,21 @@
+id: byo
+name: Brew Your Own (BYO)
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- recipe
+- process
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://byo.com

@@ -1,0 +1,22 @@
+id: the-whisky-exchange
+name: The Whisky Exchange
+tier: D
+categories:
+- spirits
+- wine
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- price
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.thewhiskyexchange.com

@@ -1,0 +1,23 @@
+id: untappd
+name: Untappd (consumer)
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.2
+license: public_web
+legal_basis: public_web
+provides:
+- review
+- rating
+- product
+- venue
+refresh: static
+est_records: null
+priority: 2
+status: blocked
+notes: 'ToS forbids scraping. BLOCKED in registry: catalogued, not crawled, pending a decision. Licensed
+  path is Untappd for Business.'

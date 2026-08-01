@@ -1,0 +1,25 @@
+id: parallel-monitor
+name: Parallel Monitor (release/menu sentinels)
+tier: A
+categories:
+- all
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: parallel-terms
+legal_basis: contract
+provides:
+- release
+- menu
+refresh: event
+est_records: null
+priority: 1
+status: planned
+urls:
+  home: https://parallel.ai
+  docs: https://docs.parallel.ai
+sentinel: true
+notes: event_stream for releases/collabs/allocated drops; snapshot for menu drift. Webhook -> /v1/hooks/parallel.
+  lite $3/1k, base $10/1k.

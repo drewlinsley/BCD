@@ -1,0 +1,25 @@
+id: ttb-open-data
+name: TTB Open Data
+tier: A
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: us-gov-public-domain
+legal_basis: public_domain
+provides:
+- producer
+- ownership
+refresh: monthly
+est_records: null
+priority: 2
+status: planned
+jurisdiction: US
+urls:
+  home: https://www.ttb.gov/data
+notes: Permittee lists + monthly brewery/DSP statistical reports. Producer registry and market sizing.

@@ -1,0 +1,22 @@
+id: brewing-malt-suppliers
+name: Malt supplier spec sheets (Weyermann, Briess, Crisp)
+tier: D
+categories:
+- ingredients
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+- sensory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.weyermann.de
+notes: Color, extract, diastatic power, descriptors per malt.

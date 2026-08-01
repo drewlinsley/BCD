@@ -1,0 +1,28 @@
+id: vinmonopolet
+name: Vinmonopolet API
+tier: A
+categories:
+- wine
+- spirits
+- beer
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: official-api-terms
+legal_basis: open_license
+provides:
+- product
+- abv
+- price
+- style
+refresh: daily
+est_records: null
+priority: 2
+status: planned
+jurisdiction: 'NO'
+urls:
+  home: https://www.vinmonopolet.no
+  docs: https://api.vinmonopolet.no
+notes: Norwegian monopoly catalog, keyed. Clean structured product data incl. spirits.

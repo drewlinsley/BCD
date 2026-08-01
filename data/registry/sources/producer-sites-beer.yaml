@@ -1,0 +1,23 @@
+id: producer-sites-beer
+name: US brewery websites (aggregate crawl)
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.5
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+- recipe
+- process
+- product
+refresh: weekly
+est_records: 9900
+priority: 1
+status: planned
+notes: ~9,900 US breweries publishing STATED hop bills, ingredients. First-party fact, not inference.
+  Highest-value crawl. Discovered via Parallel FindAll.

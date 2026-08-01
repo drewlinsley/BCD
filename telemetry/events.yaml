@@ -1,0 +1,179 @@
+# BCD telemetry event spec — the SINGLE SOURCE OF TRUTH.
+#
+# `make codegen` emits from this file:
+#   - ios/BCDKit/Sources/BCDKit/Generated/TelemetryEvent.swift  (Swift enum + payloads)
+#   - services/telemetry/bcd_telemetry/generated_events.py       (Python allowlist + schema)
+# Client and warehouse therefore cannot drift. Append events at the END; never renumber.
+#
+# Privacy tiers gate what is allowed to be collected/uploaded:
+#   analytics       — always on if the user consented to analytics
+#   personalization — requires the personalization opt-in
+#   data_sharing    — requires the (separate) data-sharing opt-in; feeds licensing/ads
+#
+# `pii: none` is asserted per event and checked in review. Raw camera frames are NEVER
+# an event field — only derived OCR strings, and only under the stated tier.
+
+version: 1
+
+properties_common:
+  - {name: event_id, type: uuid, desc: client-generated idempotency key}
+  - {name: ts, type: iso8601, desc: client event time}
+  - {name: session_id, type: uuid}
+  - {name: install_id, type: uuid, desc: pseudonymous on-device id, rotatable}
+  - {name: app_version, type: string}
+  - {name: os_version, type: string}
+  - {name: consent_tier, type: enum, values: [analytics, personalization, data_sharing]}
+
+events:
+  # ---- session ----
+  - name: session_start
+    tier: analytics
+    pii: none
+    properties: []
+  - name: session_end
+    tier: analytics
+    pii: none
+    properties:
+      - {name: duration_s, type: float}
+
+  # ---- scan funnel (the core flywheel) ----
+  - name: scan_session_start
+    tier: analytics
+    pii: none
+    properties:
+      - {name: venue_id, type: string, optional: true}
+      - {name: entry_point, type: enum, values: [app, visual_intelligence, widget, shortcut]}
+  - name: scan_frame_batch
+    tier: personalization
+    pii: none
+    desc: derived OCR strings + latency + resolution outcome. Self-labeling training data.
+    properties:
+      - {name: ocr_strings, type: string_list}
+      - {name: barcode_values, type: string_list}
+      - {name: n_detections, type: int}
+      - {name: on_device_latency_ms, type: float}
+      - {name: server_latency_ms, type: float, optional: true}
+      - {name: n_resolved, type: int}
+  - name: scan_candidate_shown
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: match_score, type: float}
+      - {name: personal_score, type: float, optional: true}
+      - {name: cold_start, type: bool}
+      - {name: rank, type: int}
+  - name: scan_resolved
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: source, type: enum, values: [barcode, ocr_match, cold_llm]}
+  - name: scan_corrected_by_user
+    tier: personalization
+    pii: none
+    desc: user overrode our resolution. THE highest-value label — instrument first.
+    properties:
+      - {name: shown_product_id, type: string, optional: true}
+      - {name: corrected_product_id, type: string, optional: true}
+      - {name: raw_text, type: string}
+
+  # ---- overlays / detail ----
+  - name: overlay_impression
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: dwell_ms, type: float}
+  - name: overlay_tap
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+  - name: product_view
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: referrer, type: enum, values: [scan, search, alert, recommend, list]}
+  - name: provenance_expanded
+    tier: analytics
+    pii: none
+    desc: user tapped a provenance chip — signal that verifiability matters to them.
+    properties:
+      - {name: product_id, type: string}
+      - {name: field, type: string}
+      - {name: method, type: string}
+
+  # ---- ratings / lists ----
+  - name: rating_submitted
+    tier: personalization
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: rating, type: float}
+      - {name: aspects, type: json, optional: true}
+  - name: list_add
+    tier: personalization
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: list_kind, type: enum, values: [cellar, wishlist, had_it, want_to_try]}
+
+  # ---- alerts / agents ----
+  - name: alert_fired
+    tier: analytics
+    pii: none
+    properties:
+      - {name: alert_id, type: string}
+      - {name: product_id, type: string, optional: true}
+      - {name: sentinel_kind, type: enum, values: [release, collab, allocated_drop, menu_change]}
+  - name: alert_converted
+    tier: analytics
+    pii: none
+    properties:
+      - {name: alert_id, type: string}
+      - {name: action, type: enum, values: [opened, wishlisted, deeplink_checkout, dismissed]}
+  - name: agent_task_created
+    tier: data_sharing
+    pii: none
+    properties:
+      - {name: task_id, type: string}
+      - {name: agent_kind, type: enum, values: [deeplink, reserve_form, call_draft]}
+      - {name: product_id, type: string, optional: true}
+  - name: agent_task_completed
+    tier: data_sharing
+    pii: none
+    properties:
+      - {name: task_id, type: string}
+      - {name: status, type: enum, values: [succeeded, failed, cancelled, needs_user]}
+
+  # ---- commerce / monetization ----
+  - name: purchase_intent
+    tier: data_sharing
+    pii: none
+    desc: the monetizable signal. data_sharing tier + working opt-out required (CPRA).
+    properties:
+      - {name: product_id, type: string}
+      - {name: venue_id, type: string, optional: true}
+      - {name: price, type: float, optional: true}
+  - name: paywall_shown
+    tier: analytics
+    pii: none
+    properties:
+      - {name: placement, type: string}
+  - name: paywall_converted
+    tier: analytics
+    pii: none
+    properties:
+      - {name: placement, type: string}
+      - {name: plan, type: enum, values: [monthly, annual]}
+
+  # ---- weekly evolution ----
+  - name: weekly_profile_delta_shown
+    tier: personalization
+    pii: none
+    properties:
+      - {name: from_version, type: int}
+      - {name: to_version, type: int}
+      - {name: n_predictions, type: int}

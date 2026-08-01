@@ -1,0 +1,31 @@
+id: colacloud
+name: COLA Cloud
+tier: A
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: api
+  auth: contract
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-redistribution-of-public-data
+legal_basis: contract
+provides:
+- product
+- producer
+- sku
+- upc
+- abv
+- label_image
+refresh: daily
+est_records: 2600000
+priority: 1
+status: planned
+jurisdiction: US
+urls:
+  home: https://colacloud.us
+  docs: https://docs.colacloud.us
+notes: 'TTB COLA pre-parsed: barcodes decoded, ABV OCR''d, 100+ fields, REST/Snowflake/MCP/bulk. Buys
+  back ~2 months of scraping. Quote in week 1.'

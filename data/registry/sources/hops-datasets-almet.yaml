@@ -1,0 +1,22 @@
+id: hops-datasets-almet
+name: hops-datasets (almet)
+tier: B
+categories:
+- ingredients
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: open-source-repo
+legal_basis: open_license
+provides:
+- ingredients
+- sensory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://github.com/almet/hops-datasets
+notes: Oils, lineage, age per variety.

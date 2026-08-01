@@ -1,0 +1,21 @@
+id: producer-sites-spirits
+name: US distillery websites (aggregate crawl)
+tier: D
+categories:
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.5
+license: public_web
+legal_basis: public_web
+provides:
+- process
+- ingredients
+- product
+refresh: weekly
+est_records: 3000
+priority: 1
+status: planned
+notes: ~3,000 US distilleries publishing mash bills, barrel programs, proofs.

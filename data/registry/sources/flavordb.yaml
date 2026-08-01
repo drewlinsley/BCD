@@ -1,0 +1,21 @@
+id: flavordb
+name: FlavorDB / VCF
+tier: B
+categories:
+- ingredients
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: check-per-use
+legal_basis: academic_release
+provides:
+- sensory
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://cosylab.iiitd.edu.in/flavordb
+notes: Compound->descriptor mappings. Check licensing per use.

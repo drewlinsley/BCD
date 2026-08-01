@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/drewlinsley/BCD/data/registry/schema.json",
+  "title": "BCD source registry entry",
+  "description": "One data source BCD ingests or monitors. `make validate-registry` checks every sources/*.yaml against this. Missing license or legal_basis is a hard failure.",
+  "type": "object",
+  "required": ["id", "name", "tier", "categories", "access", "license", "legal_basis", "provides", "status", "priority"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "name": {"type": "string"},
+    "tier": {"type": "string", "enum": ["A", "B", "C", "D"],
+      "description": "A=open/gov, B=academic, C=commercial/licensable, D=consumer-web/crawl"},
+    "categories": {"type": "array", "items": {"type": "string",
+      "enum": ["beer", "cider", "wine", "spirits", "rtd", "mead", "sake", "all", "ingredients", "venues"]}},
+    "jurisdiction": {"type": "string"},
+    "urls": {"type": "object", "properties": {
+      "home": {"type": "string"}, "data": {"type": "string"}, "docs": {"type": "string"},
+      "robots": {"type": "string"}}, "additionalProperties": true},
+    "access": {
+      "type": "object",
+      "required": ["method", "auth"],
+      "properties": {
+        "method": {"type": "string", "enum": ["bulk", "api", "scrape", "license", "manual"]},
+        "auth": {"type": "string", "enum": ["none", "key", "oauth", "contract", "account"]},
+        "robots_allows": {"type": ["boolean", "null"]},
+        "rate_limit_rps": {"type": ["number", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "license": {"type": "string"},
+    "legal_basis": {"type": "string",
+      "enum": ["public_domain", "open_license", "academic_release", "contract", "public_web", "user_contributed"]},
+    "provides": {"type": "array", "minItems": 1, "items": {"type": "string",
+      "enum": ["product", "producer", "sku", "upc", "abv", "label_image", "recipe",
+               "ingredients", "process", "review", "rating", "venue", "menu", "price",
+               "release", "inventory", "sensory", "style", "ownership"]}},
+    "refresh": {"type": "string", "enum": ["daily", "weekly", "monthly", "quarterly", "event", "static"]},
+    "est_records": {"type": ["integer", "null"]},
+    "priority": {"type": "integer", "minimum": 1, "maximum": 5},
+    "status": {"type": "string", "enum": ["planned", "active", "blocked", "dead"]},
+    "notes": {"type": "string"},
+    "sentinel": {"type": "boolean", "description": "true if a Parallel Monitor watches this"}
+  }
+}

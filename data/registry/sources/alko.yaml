@@ -1,0 +1,26 @@
+id: alko
+name: Alko Product API
+tier: A
+categories:
+- beer
+- wine
+- spirits
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: community-mirror-open
+legal_basis: open_license
+provides:
+- product
+- abv
+- price
+refresh: weekly
+est_records: null
+priority: 4
+status: planned
+jurisdiction: FI
+urls:
+  home: https://github.com/villeristi/alko-product-api
+notes: Finnish catalog + official price-list XLSX.

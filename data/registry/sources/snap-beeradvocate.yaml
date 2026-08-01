@@ -1,0 +1,24 @@
+id: snap-beeradvocate
+name: SNAP BeerAdvocate reviews
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: academic-research-only
+legal_basis: academic_release
+provides:
+- review
+- rating
+- sensory
+refresh: static
+est_records: 1500000
+priority: 1
+status: planned
+urls:
+  home: https://snap.stanford.edu/data/web-BeerAdvocate.html
+notes: 1.5M reviews, 264K beers, 33K users, 5 aspect ratings (appearance/aroma/palate/taste/overall) to
+  Nov 2011. THE labeled ingredient->sensory bridge.

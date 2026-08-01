@@ -1,0 +1,24 @@
+id: beermenus
+name: BeerMenus
+tier: C
+categories:
+- beer
+access:
+  method: license
+  auth: contract
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-license
+legal_basis: contract
+provides:
+- menu
+- venue
+- product
+- price
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.beermenus.com
+notes: On/off-premise lists + analytics. Discovery-oriented.

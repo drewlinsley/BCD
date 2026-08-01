@@ -1,0 +1,22 @@
+id: yakima-chief
+name: Yakima Chief Hops (public specs)
+tier: D
+categories:
+- ingredients
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+- sensory
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.yakimachief.com/commercial/hop-varieties.html
+notes: Alpha/beta/oil per variety + descriptors.

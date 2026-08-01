@@ -1,0 +1,20 @@
+id: malt-review
+name: Malt Review
+tier: D
+categories:
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- review
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://maltreview.com

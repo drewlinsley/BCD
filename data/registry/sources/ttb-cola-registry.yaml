@@ -1,0 +1,31 @@
+id: ttb-cola-registry
+name: TTB Public COLA Registry
+tier: A
+categories:
+- beer
+- spirits
+- wine
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: us-gov-public-domain
+legal_basis: public_domain
+provides:
+- product
+- producer
+- sku
+- abv
+- label_image
+- style
+refresh: daily
+est_records: 2600000
+priority: 1
+status: active
+jurisdiction: US
+urls:
+  home: https://www.ttb.gov/regulated-commodities/labeling/cola-public-registry
+  data: https://www.ttbonline.gov/colasonline/publicSearchColasBasic.do
+notes: 'The US SKU universe: every label approval since 1999. Form-driven; scrape or license COLA Cloud.
+  Highest-authority provenance (regulatory_filing).'

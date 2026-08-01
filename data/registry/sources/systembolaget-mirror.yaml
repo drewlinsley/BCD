@@ -1,0 +1,27 @@
+id: systembolaget-mirror
+name: Systembolaget (community mirror)
+tier: A
+categories:
+- beer
+- wine
+- spirits
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: community-mirror-open
+legal_basis: open_license
+provides:
+- product
+- abv
+- price
+- style
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+jurisdiction: SE
+urls:
+  home: https://github.com/AlexGustafsson/systembolaget-api-data
+notes: Official product API withdrawn; AlexGustafsson + C4illin mirrors are current.

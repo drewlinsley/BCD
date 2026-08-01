@@ -1,0 +1,22 @@
+id: taphunter
+name: TapHunter / Evergreen / Sippo / RaspberryPints
+tier: C
+categories:
+- beer
+access:
+  method: license
+  auth: contract
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-license
+legal_basis: contract
+provides:
+- menu
+- inventory
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://www.evergreenhq.com
+notes: Digital taplist platforms; each a live draft feed if licensed.

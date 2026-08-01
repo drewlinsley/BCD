@@ -1,0 +1,24 @@
+id: parallel-task
+name: Parallel Task (recipe recovery)
+tier: A
+categories:
+- all
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: parallel-terms
+legal_basis: contract
+provides:
+- recipe
+- ingredients
+- process
+refresh: event
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://parallel.ai
+notes: Structured extraction w/ PER-FIELD CITATIONS — the verifiability story. core $25/1k, pro $100/1k,
+  ultra8x $2.4k/1k.

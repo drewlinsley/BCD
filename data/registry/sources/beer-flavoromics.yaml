@@ -1,0 +1,20 @@
+id: beer-flavoromics
+name: Lager flavoromics + malt sensory lexicon
+tier: B
+categories:
+- beer
+- ingredients
+access:
+  method: manual
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: literature-citation
+legal_basis: academic_release
+provides:
+- sensory
+refresh: static
+est_records: null
+priority: 3
+status: planned
+notes: 594 volatiles, 71 with OAV>=1; brewing-malt sensory lexicon.

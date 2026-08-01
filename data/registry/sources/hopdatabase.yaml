@@ -1,0 +1,22 @@
+id: hopdatabase
+name: HopDatabase (kasperg3)
+tier: B
+categories:
+- ingredients
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: open-source-repo
+legal_basis: open_license
+provides:
+- ingredients
+- sensory
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://github.com/kasperg3/HopDatabase
+notes: Alpha/beta acids, oil fractions scraped from merchants.

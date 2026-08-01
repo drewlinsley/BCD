@@ -1,0 +1,22 @@
+id: brewbound
+name: Brewbound
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- release
+refresh: daily
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.brewbound.com
+sentinel: true
+notes: Industry news; release/collab sentinel target.

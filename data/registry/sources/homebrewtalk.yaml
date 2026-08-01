@@ -1,0 +1,24 @@
+id: homebrewtalk
+name: HomebrewTalk (clone recipes)
+tier: D
+categories:
+- beer
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.3
+license: public_web
+legal_basis: public_web
+provides:
+- recipe
+- ingredients
+- process
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.homebrewtalk.com
+notes: Published clone grain/hop bills for commercial beers — a shortcut to 'what's in Pliny'. community_clone
+  provenance.

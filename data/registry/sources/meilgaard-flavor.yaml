@@ -1,0 +1,20 @@
+id: meilgaard-flavor
+name: Meilgaard beer flavor terminology
+tier: B
+categories:
+- beer
+access:
+  method: manual
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: literature-citation
+legal_basis: academic_release
+provides:
+- sensory
+refresh: static
+est_records: null
+priority: 2
+status: planned
+notes: 'Flavor chemistry of beer Pt II: 239 aroma volatiles + thresholds; the beer aroma wheel. Grounds
+  the chemistry->sensory priors.'

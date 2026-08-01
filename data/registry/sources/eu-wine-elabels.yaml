@@ -1,0 +1,25 @@
+id: eu-wine-elabels
+name: EU Wine E-Labels (U-label et al.)
+tier: A
+categories:
+- wine
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+- abv
+- process
+refresh: event
+est_records: null
+priority: 2
+status: planned
+jurisdiction: EU
+urls:
+  home: https://new.u-label.com
+notes: Legally MANDATED ingredient lists behind per-bottle QR (Reg 2021/2117; all 2024+ harvest). Ground-truth
+  ingredient data; a QR our scanner already reads.

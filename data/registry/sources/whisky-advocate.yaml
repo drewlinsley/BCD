@@ -1,0 +1,22 @@
+id: whisky-advocate
+name: Whisky Advocate
+tier: D
+categories:
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- review
+- release
+refresh: weekly
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://www.whiskyadvocate.com
+sentinel: true

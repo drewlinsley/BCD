@@ -1,0 +1,21 @@
+id: kaggle-homebrew
+name: Kaggle homebrew recipe corpora
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: account
+  robots_allows: null
+  rate_limit_rps: null
+license: kaggle-dataset-terms
+legal_basis: academic_release
+provides:
+- recipe
+- ingredients
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.kaggle.com/datasets/matiasmiche/homebrew-beer-recipes

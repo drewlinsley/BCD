@@ -1,0 +1,25 @@
+id: google-patents
+name: Google Patents / USPTO
+tier: A
+categories:
+- beer
+- spirits
+- ingredients
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: us-gov-public-domain
+legal_basis: public_domain
+provides:
+- process
+- ingredients
+refresh: monthly
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://patents.google.com
+notes: Brewing/distilling PROCESS patents; hop plant patents (Summit PP18039, Columbus PP10956) with varietal
+  chemistry. Legally-published proprietary detail.

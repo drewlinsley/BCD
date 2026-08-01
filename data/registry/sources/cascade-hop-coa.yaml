@@ -1,0 +1,21 @@
+id: cascade-hop-coa
+name: Hop COA aggregators (public)
+tier: A
+categories:
+- ingredients
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: public_web
+legal_basis: public_web
+provides:
+- ingredients
+refresh: static
+est_records: null
+priority: 4
+status: planned
+urls:
+  home: https://hopsconnect.com/resources/interpreting-coas
+notes: 'Public certificate-of-analysis pages: alpha/beta/oil by lot.'

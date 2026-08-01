@@ -1,0 +1,22 @@
+id: reddit-bourbon
+name: Reddit r/bourbon, r/Scotch, r/whiskey, r/worldwhisky
+tier: D
+categories:
+- spirits
+access:
+  method: api
+  auth: oauth
+  robots_allows: null
+  rate_limit_rps: 1.0
+license: reddit-api-terms
+legal_basis: public_web
+provides:
+- review
+- release
+refresh: daily
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.reddit.com/r/bourbon
+sentinel: true

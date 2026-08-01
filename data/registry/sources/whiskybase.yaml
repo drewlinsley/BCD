@@ -1,0 +1,24 @@
+id: whiskybase
+name: Whiskybase
+tier: D
+categories:
+- spirits
+access:
+  method: scrape
+  auth: none
+  robots_allows: null
+  rate_limit_rps: 0.2
+license: public_web
+legal_basis: public_web
+provides:
+- product
+- rating
+- review
+- price
+refresh: static
+est_records: null
+priority: 2
+status: planned
+urls:
+  home: https://www.whiskybase.com
+notes: 'Largest whisky DB: bottlings, ratings, prices. Check ToS before crawl.'

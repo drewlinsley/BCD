@@ -1,0 +1,25 @@
+id: parallel-findall
+name: Parallel FindAll (source discovery)
+tier: A
+categories:
+- all
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: parallel-terms
+legal_basis: contract
+provides:
+- producer
+- venue
+refresh: daily
+est_records: null
+priority: 1
+status: planned
+urls:
+  home: https://parallel.ai
+  docs: https://docs.parallel.ai
+sentinel: true
+notes: 'Nightly job (25/hr cap): ''sites publishing US tap lists'', ''distilleries publishing mash bills''.
+  base $0.25+$0.03/match, pro $10+$1/match.'

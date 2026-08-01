@@ -1,0 +1,30 @@
+id: openfoodfacts
+name: Open Food Facts
+tier: A
+categories:
+- beer
+- spirits
+- ingredients
+access:
+  method: bulk
+  auth: none
+  robots_allows: true
+  rate_limit_rps: 1.0
+license: open-database-license
+legal_basis: open_license
+provides:
+- product
+- upc
+- abv
+- ingredients
+- label_image
+refresh: weekly
+est_records: 100000
+priority: 1
+status: active
+urls:
+  home: https://world.openfoodfacts.org
+  data: https://world.openfoodfacts.org/data
+  docs: https://openfoodfacts.github.io/openfoodfacts-server/api/
+notes: The only large OPEN barcode->ingredient corpus. Serves scan-a-can directly. Connector implemented
+  (v2 API).

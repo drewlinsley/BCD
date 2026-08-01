@@ -1,0 +1,57 @@
+[
+  {
+    "ttb_id": "23001001000123",
+    "brand_name": "The Alchemist",
+    "fanciful_name": "Heady Topper",
+    "class_type": "Malt Beverage (Ale)",
+    "permittee": "The Alchemist LLC",
+    "abv": 8.0,
+    "net_contents": "16 FL OZ",
+    "upc": "854416001019",
+    "label_image_url": "https://ttbonline.gov/colasonline/images/23001001000123.jpg"
+  },
+  {
+    "ttb_id": "21112233440567",
+    "brand_name": "Russian River",
+    "fanciful_name": "Pliny the Elder",
+    "class_type": "Malt Beverage (Ale)",
+    "permittee": "Russian River Brewing Company",
+    "abv": 8.0,
+    "net_contents": "16 FL OZ",
+    "upc": "897655001042",
+    "label_image_url": "https://ttbonline.gov/colasonline/images/21112233440567.jpg"
+  },
+  {
+    "ttb_id": "20055667780012",
+    "brand_name": "Buffalo Trace",
+    "fanciful_name": "Kentucky Straight Bourbon Whiskey",
+    "class_type": "Whisky (Bourbon)",
+    "permittee": "Buffalo Trace Distillery, Inc.",
+    "abv": 45.0,
+    "net_contents": "750 ML",
+    "upc": "080244009397",
+    "label_image_url": "https://ttbonline.gov/colasonline/images/20055667780012.jpg"
+  },
+  {
+    "ttb_id": "22099887760345",
+    "brand_name": "Sierra Nevada",
+    "fanciful_name": "Pale Ale",
+    "class_type": "Malt Beverage (Ale)",
+    "permittee": "Sierra Nevada Brewing Co.",
+    "abv": 5.6,
+    "net_contents": "12 FL OZ",
+    "upc": "083783375213",
+    "label_image_url": "https://ttbonline.gov/colasonline/images/22099887760345.jpg"
+  },
+  {
+    "ttb_id": "19088776650234",
+    "brand_name": "Lagavulin",
+    "fanciful_name": "16 Year Old Single Malt Scotch Whisky",
+    "class_type": "Whisky (Scotch)",
+    "permittee": "Diageo Americas",
+    "abv": 43.0,
+    "net_contents": "750 ML",
+    "upc": "088076175716",
+    "label_image_url": "https://ttbonline.gov/colasonline/images/19088776650234.jpg"
+  }
+]

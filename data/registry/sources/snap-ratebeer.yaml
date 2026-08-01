@@ -1,0 +1,23 @@
+id: snap-ratebeer
+name: SNAP RateBeer reviews
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: academic-research-only
+legal_basis: academic_release
+provides:
+- review
+- rating
+- sensory
+refresh: static
+est_records: 3000000
+priority: 1
+status: planned
+urls:
+  home: https://snap.stanford.edu/data/web-RateBeer.html
+notes: ~3M reviews, same 5-aspect structure to Nov 2011.

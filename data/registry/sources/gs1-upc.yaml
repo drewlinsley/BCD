@@ -1,0 +1,22 @@
+id: gs1-upc
+name: GS1 / UPCitemdb / Go-UPC / Barcode Lookup
+tier: C
+categories:
+- all
+access:
+  method: api
+  auth: key
+  robots_allows: null
+  rate_limit_rps: null
+license: commercial-api
+legal_basis: contract
+provides:
+- upc
+- product
+refresh: static
+est_records: null
+priority: 3
+status: planned
+urls:
+  home: https://www.gs1.org
+notes: Barcode->product fallback when OFF misses a SKU.

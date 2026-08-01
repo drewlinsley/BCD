@@ -1,0 +1,71 @@
+# XcodeGen manifest — generates BCDApp.xcodeproj from source, so the repo never commits a
+# fragile .xcodeproj. Run `make ios-gen` (or `xcodegen generate` here). The app builds
+# against the iOS 26 SDK (Xcode 26 on this machine); deployment target is iOS 18 so the
+# on-device-model install base isn't cut off.
+name: BCDApp
+
+options:
+  bundleIdPrefix: com.bcd
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+packages:
+  BCDKit:
+    path: BCDKit
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""        # set your team id to run on device
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  BCDApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: BCDApp/Sources
+      - path: BCDApp/Resources
+    dependencies:
+      - package: BCDKit
+    info:
+      path: BCDApp/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: "Bottles Cans Draft"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # Camera is the core surface; App Store requires a purpose string.
+        NSCameraUsageDescription: "BCD uses the camera to identify beers and spirits in front of you."
+        NSLocationWhenInUseUsageDescription: "BCD uses your location to match what's on the menu or shelf at this venue."
+        # Age gate: alcohol content requires a 17+ rating and an age check.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bcd.app
+        GENERATE_INFOPLIST_FILE: false
+        ENABLE_PREVIEWS: true
+
+  BCDAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: BCDApp/Tests
+    dependencies:
+      - target: BCDApp
+      - package: BCDKit
+
+schemes:
+  BCDApp:
+    build:
+      targets:
+        BCDApp: all
+        BCDAppTests: [test]
+    test:
+      targets:
+        - BCDAppTests

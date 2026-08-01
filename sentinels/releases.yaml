@@ -1,0 +1,52 @@
+# Parallel Monitor sentinels — standing watches for releases you'd care about.
+# type: event_stream. Frequency 1h–30d. Hits POST to /v1/hooks/parallel.
+# Cost: lite $3/1k, base $10/1k requests. Loaded by services/sentinel.
+
+version: 1
+defaults:
+  api: monitor
+  type: event_stream
+  processor: base        # higher recall for hype-driven, sparse events
+  webhook: /v1/hooks/parallel
+  frequency: 6h
+
+monitors:
+  - id: alchemist-collabs
+    objective: >
+      New beer releases or collaborations from The Alchemist (Stowe, VT), especially
+      Heady Topper variants and any brewery collaborations. Report brewery, beer name,
+      release date, and where to buy.
+    keywords: ["The Alchemist brewery release", "Heady Topper collaboration", "Alchemist collab"]
+    categories: [beer]
+    sentinel_kind: collab
+
+  - id: hill-farmstead-releases
+    objective: New limited releases and bottle drops from Hill Farmstead Brewery.
+    keywords: ["Hill Farmstead release", "Hill Farmstead bottle drop"]
+    categories: [beer]
+    sentinel_kind: release
+
+  - id: allocated-bourbon-drops
+    objective: >
+      Announcements of allocated bourbon becoming available at US retailers: Buffalo Trace
+      Antique Collection, Pappy Van Winkle, E.H. Taylor, Weller, Blanton's store drops.
+      Report product, retailer, city, and date.
+    keywords: ["BTAC release", "Pappy Van Winkle allocation", "Weller drop store", "Blanton's in stock"]
+    categories: [spirits]
+    sentinel_kind: allocated_drop
+    frequency: 3h
+
+  - id: pliny-the-younger
+    objective: Russian River Pliny the Younger annual release dates and participating bars.
+    keywords: ["Pliny the Younger release", "Pliny Younger on tap"]
+    categories: [beer]
+    sentinel_kind: release
+    frequency: 12h
+
+  - id: limited-hazy-ipa-national
+    objective: >
+      Nationally notable limited hazy/NEIPA releases from top-rated breweries (Tree House,
+      Trillium, Other Half, Monkish, Great Notion). Report brewery, beer, date.
+    keywords: ["Tree House release", "Monkish drop", "Other Half can release", "Trillium release"]
+    categories: [beer]
+    sentinel_kind: release
