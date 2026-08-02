@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 
-from bcd_ingest.store import MedallionStore
+from bcd_ingest.store import Store, open_store
 from bcd_schema import (
     Product,
     ProductSearchResponse,
@@ -28,7 +28,7 @@ _state: dict = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    store = MedallionStore(root="./data")
+    store = open_store(root="./data")
     _state["store"] = store
     _state["resolver"] = Resolver(store)
     _state["telemetry"] = TelemetryCollector(root="./data")
@@ -43,13 +43,13 @@ app = FastAPI(title="BCD API", version="0.1.0", lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz() -> dict:
-    store: MedallionStore = _state["store"]
+    store: Store = _state["store"]
     return {"ok": True, "counts": store.counts()}
 
 
 @app.get("/v1/product/search", response_model=ProductSearchResponse)
 def product_search(q: str = Query(..., min_length=1), limit: int = 20) -> ProductSearchResponse:
-    store: MedallionStore = _state["store"]
+    store: Store = _state["store"]
     resolver: Resolver = _state["resolver"]
     results: list[ResolvedProduct] = []
     seen: set[str] = set()
@@ -75,13 +75,20 @@ def scan_resolve(req: ScanResolveRequest, user_id: str = "demo") -> ScanResolveR
 
 @app.post("/v1/recommend")
 def recommend(user_id: str = "demo", limit: int = 10) -> dict:
-    """Stub: rank the whole catalog for a user. Real impl uses pgvector ANN over the
-    user's sensory_ideal. Here we score what's in the store and return the top-N."""
-    store: MedallionStore = _state["store"]
+    """Rank the catalog for a user. When the profile has a sensory_ideal the store does
+    the candidate generation — pgvector cosine ANN on Postgres, python cosine on the
+    SQLite dev store — and we then score + explain each candidate. No profile vector yet
+    (cold user) falls back to scanning the catalog."""
+    store: Store = _state["store"]
     resolver: Resolver = _state["resolver"]
     profile = _state["profiles"].get(user_id)
+    if profile is not None and profile.sensory_ideal is not None:
+        # over-fetch (limit*3) so the re-score with style/ABV priors has room to reorder
+        candidates = store.nearest_by_sensory(profile.sensory_ideal.to_array(), limit=limit * 3)
+    else:
+        candidates = list(store.iter_gold("product"))
     scored = []
-    for rec in store.iter_gold("product"):
+    for rec in candidates:
         product = Product.model_validate(rec)
         s, reason, cold = resolver.score(product, profile)
         scored.append({"product_id": product.id, "name": product.name,

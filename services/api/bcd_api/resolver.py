@@ -9,9 +9,7 @@ client codes against and what we optimize behind.
 
 from __future__ import annotations
 
-import re
-
-from bcd_ingest.store import MedallionStore
+from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     Brand,
     Producer,
@@ -25,34 +23,12 @@ from bcd_schema import (
 )
 
 
-def _tokenize(s: str) -> set[str]:
-    return {t for t in re.split(r"[^a-z0-9]+", s.lower()) if len(t) > 2}
-
-
 class Resolver:
-    def __init__(self, store: MedallionStore) -> None:
+    def __init__(self, store: Store) -> None:
         self.store = store
 
-    # ---- matching ----
-    def _match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Return (product_record, match_score) best-first. Placeholder for pg trigram."""
-        want = _tokenize(text)
-        if not want:
-            return []
-        scored: list[tuple[dict, float]] = []
-        for p in self.store.iter_gold("product"):
-            name_tokens = _tokenize(p.get("name", ""))
-            if not name_tokens:
-                continue
-            overlap = want & name_tokens
-            if not overlap:
-                continue
-            # Jaccard-ish, biased toward covering the product name
-            score = len(overlap) / max(len(name_tokens), 1)
-            scored.append((p, round(score, 3)))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
-
+    # Matching is delegated to the store: token-overlap on the SQLite dev store,
+    # real pg_trgm trigram similarity on Postgres — same signature either way.
     def _resolve_by_upc(self, upc: str) -> dict | None:
         sku = self.store.get_gold(f"sku:{upc}")
         if not sku:
@@ -107,7 +83,7 @@ class Resolver:
                 product_rec = self._resolve_by_upc(det.text)
                 match_score = 1.0 if product_rec else 0.0
             if product_rec is None:
-                matches = self._match_products(det.text)
+                matches = self.store.match_products(det.text)
                 if matches:
                     product_rec, match_score = matches[0]
             if product_rec is None:
@@ -132,15 +108,6 @@ class Resolver:
                 )
             )
         return ScanResolveResponse(candidates=candidates, unresolved_indices=unresolved)
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    num = sum(x * y for x, y in zip(a, b, strict=False))
-    da = sum(x * x for x in a) ** 0.5
-    db = sum(y * y for y in b) ** 0.5
-    if da == 0 or db == 0:
-        return 0.0
-    return num / (da * db)
 
 
 def _top_axis(sv: SensoryVector) -> str | None:
