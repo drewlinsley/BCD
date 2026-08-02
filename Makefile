@@ -5,6 +5,7 @@ PY := .venv/bin/python
 PIP := .venv/bin/pip
 SOURCE ?= openbrewerydb
 LIMIT ?= 50
+HOST ?= 127.0.0.1
 
 .PHONY: help
 help:
@@ -40,8 +41,12 @@ seed-registry: ## regenerate the source registry from scripts/seed_registry.py
 
 # ---- api ----
 .PHONY: api
-api: ## serve the FastAPI backend on :8000 (reads the local ingest store)
-	$(PY) -m uvicorn bcd_api.app:app --host 127.0.0.1 --port 8000 --reload
+api: ## serve the FastAPI backend on :8000 (HOST=0.0.0.0 to reach it from a phone)
+	$(PY) -m uvicorn bcd_api.app:app --host $(HOST) --port 8000 --reload
+
+.PHONY: api-lan
+api-lan: ## serve the API on 0.0.0.0:8000 so a device on the same Wi-Fi can reach it
+	$(PY) -m uvicorn bcd_api.app:app --host 0.0.0.0 --port 8000 --reload
 
 # ---- sentinels ----
 .PHONY: sentinel-dryrun
@@ -73,6 +78,7 @@ lint: ## ruff over the python code
 # ---- ios ----
 .PHONY: ios-gen
 ios-gen: ## generate BCDApp.xcodeproj from ios/project.yml (needs xcodegen)
+	cd ios && [ -f Local.xcconfig ] || cp Local.xcconfig.example Local.xcconfig
 	cd ios && xcodegen generate --spec project.yml
 	@echo "Open ios/BCDApp.xcodeproj in Xcode 26 to build/run the app."
 

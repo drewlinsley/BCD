@@ -1,0 +1,14 @@
+// Template for ios/Local.xcconfig (which is gitignored). Copy and fill in:
+//   cp Local.xcconfig.example Local.xcconfig
+// `make ios-gen` does this copy automatically when Local.xcconfig is missing.
+
+// Apple Developer Team ID — required to run on a physical device; blank builds for the
+// Simulator. Xcode ▸ Settings ▸ Accounts ▸ your team (the 10-char ID), or the Apple
+// Developer portal ▸ Membership. A free Apple ID's personal team works.
+DEVELOPMENT_TEAM =
+
+// API base, split into scheme + host:port because "//" starts a comment in an xcconfig.
+// The Simulator can use localhost; a real device needs this Mac's LAN IP on the same
+// Wi-Fi, e.g. BCD_API_HOSTPORT = 192.168.1.50:8000.
+BCD_API_SCHEME = http
+BCD_API_HOSTPORT = localhost:8000

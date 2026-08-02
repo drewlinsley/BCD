@@ -32,9 +32,7 @@ final class AppEnvironment: ObservableObject {
     }
 
     static func live() -> AppEnvironment {
-        let base = URL(string: ProcessInfo.processInfo.environment["BCD_API_BASE"]
-                       ?? "http://localhost:8000")!
-        let api = APIClient(baseURL: base)
+        let api = APIClient(baseURL: Self.apiBaseURL())
         // Consent starts empty; the onboarding sheet flips tiers on explicit opt-in.
         let telemetry = TelemetryQueue(consent: ConsentState(analytics: true), sink: api,
                                        storeURL: Self.telemetryStoreURL())
@@ -45,6 +43,20 @@ final class AppEnvironment: ObservableObject {
             api: api, llm: llm, telemetry: telemetry,
             makeScanEngine: { Self.makeScanEngine() }
         )
+    }
+
+    /// API base URL, resolved in priority order:
+    ///  1. `BCD_API_BASE` env var — set in the Xcode scheme for a quick dev override.
+    ///  2. `BCDAPIBase` from Info.plist — baked in at build time from the BCD_API_BASE build
+    ///     setting (Local.xcconfig), so a device build launched by tapping the icon points at
+    ///     your Mac's LAN IP rather than localhost.
+    ///  3. `http://localhost:8000` — Simulator default.
+    private static func apiBaseURL() -> URL {
+        if let env = ProcessInfo.processInfo.environment["BCD_API_BASE"], !env.isEmpty,
+           let url = URL(string: env) { return url }
+        if let s = Bundle.main.object(forInfoDictionaryKey: "BCDAPIBase") as? String,
+           !s.isEmpty, let url = URL(string: s) { return url }
+        return URL(string: "http://localhost:8000")!
     }
 
     private static func bestLLMProvider() -> LLMProvider {

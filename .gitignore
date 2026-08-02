@@ -47,6 +47,8 @@ DerivedData/
 !ios/project.yml
 *.xcuserstate
 xcuserdata/
+# machine-specific signing + api base url (bootstrapped from Local.xcconfig.example)
+ios/Local.xcconfig
 
 # ---- macos ----
 .DS_Store
