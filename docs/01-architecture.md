@@ -51,15 +51,15 @@ Never lose the raw bytes; **every gold field traces back to a bronze document id
 
 ## Storage
 
-| Store | Use |
-|---|---|
-| Postgres 16 + **pgvector** | canonical entities; product & taste embeddings for ANN |
-| Postgres + **PostGIS** | venue geo (`amenity=bar`, `shop=alcohol`) |
-| R2 / S3 | raw HTML, label images, menu photos (via git-lfs locally) |
-| ClickHouse (later) | telemetry at volume; starts Postgres-partitioned |
-| Redis + `arq` | crawl budgets + sentinel schedules |
+| Store | Use | Status |
+|---|---|---|
+| Postgres 16 + **pgvector** (cosine, HNSW) + **pg_trgm** (trigram) | canonical entities; sensory-vector ANN; fuzzy name match | **live** — [pg_store.py](../services/ingest/bcd_ingest/pg_store.py) |
+| Postgres + **PostGIS** | venue geo (`amenity=bar`, `shop=alcohol`) | deferred — venue lat/lon held in plain columns for now |
+| R2 / S3 | raw HTML, label images, menu photos (via git-lfs locally) | planned |
+| ClickHouse (later) | telemetry at volume; starts Postgres-partitioned | later |
+| Redis + `arq` | crawl budgets + sentinel schedules | planned |
 
-The local dev implementation swaps Postgres for a single SQLite medallion store ([services/ingest/store.py](../services/ingest/bcd_ingest/store.py)) so the whole pipeline runs on a laptop.
+Both backends implement one `Store` interface; **`open_store()`** selects Postgres when `BCD_DATABASE_URL` (or `BCD_STORE_BACKEND=postgres`) is set and otherwise falls back to a single-file SQLite medallion store ([store.py](../services/ingest/bcd_ingest/store.py)), so the whole pipeline runs on a laptop with no server. The two search operators are backend-parametric behind the same method names: `match_products` is real `pg_trgm` similarity on Postgres and token-overlap on SQLite; `nearest_by_sensory` is a `pgvector` `<=>` ANN on Postgres and an in-python cosine on SQLite. PostGIS is deferred (its Homebrew bottle targets pg17 while the dev service is pg16), so venue geo lives in plain `lat`/`lon` columns until a geometry column + GiST index land.
 
 ## Toolchain ceiling (why it's in the architecture)
 

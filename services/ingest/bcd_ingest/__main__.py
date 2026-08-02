@@ -10,11 +10,11 @@ import asyncio
 import sys
 
 from .connectors import get_connector
-from .store import MedallionStore
+from .store import open_store
 
 
 async def _run(source: str, limit: int | None, root: str) -> int:
-    store = MedallionStore(root=root)
+    store = open_store(root=root)
     try:
         connector = get_connector(store, source)
     except KeyError as exc:

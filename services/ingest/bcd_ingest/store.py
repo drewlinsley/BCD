@@ -11,16 +11,45 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
+
+from bcd_schema import SENSORY_AXES
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _tokenize(s: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if len(t) > 2}
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two dense vectors. Shared by the SQLite store's python-side
+    nearest-neighbor and the resolver's scorer so there's one definition."""
+    num = sum(x * y for x, y in zip(a, b, strict=False))
+    da = sum(x * x for x in a) ** 0.5
+    db = sum(y * y for y in b) ** 0.5
+    if da == 0 or db == 0:
+        return 0.0
+    return num / (da * db)
+
+
+def _sensory_array(record: dict[str, Any]) -> list[float] | None:
+    """Dense 25-vector in SENSORY_AXES order from a product record, or None when there's
+    no sensory / no signal — mirrors the same helper in pg_store so both backends agree."""
+    sv = record.get("sensory")
+    if not sv:
+        return None
+    axes = sv.get("axes") or {}
+    arr = [float(axes.get(a, 0.0)) for a in SENSORY_AXES]
+    return arr if any(arr) else None
 
 
 def doc_id(source_id: str, natural_key: str) -> str:
@@ -164,5 +193,75 @@ class MedallionStore:
             ).fetchall()
         return [json.loads(r["record"]) for r in rows]
 
+    # ---- search (used by the resolver / recommend) ----
+    def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """Token-overlap name match, best-first — the laptop stand-in for pg_trgm. The
+        Postgres store swaps in real trigram similarity behind this same signature."""
+        want = _tokenize(text)
+        if not want:
+            return []
+        scored: list[tuple[dict, float]] = []
+        for p in self.iter_gold("product"):
+            name_tokens = _tokenize(p.get("name", ""))
+            if not name_tokens:
+                continue
+            overlap = want & name_tokens
+            if not overlap:
+                continue
+            # Jaccard-ish, biased toward covering the product name.
+            score = len(overlap) / max(len(name_tokens), 1)
+            scored.append((p, round(score, 3)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
+
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
+        """Cosine nearest-neighbor over products that carry a sensory vector, computed in
+        python. The Postgres store does this as a single pgvector `<=>` ANN query."""
+        scored: list[tuple[dict, float]] = []
+        for p in self.iter_gold("product"):
+            arr = _sensory_array(p)
+            if arr is None:
+                continue
+            scored.append((p, _cosine(vec, arr)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [p for p, _ in scored[:limit]]
+
     def close(self) -> None:
         self._db.close()
+
+
+@runtime_checkable
+class Store(Protocol):
+    """The storage contract both backends satisfy. Callers depend on this, not on a
+    concrete class, so `open_store()` can hand back SQLite on a laptop and Postgres in
+    prod without anything downstream changing."""
+
+    db_path: str
+
+    def put_bronze(self, doc: BronzeDoc) -> None: ...
+    def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]: ...
+    def put_silver(self, sid: str, source_id: str, entity_type: str,
+                   bronze_id: str, record: dict[str, Any]) -> None: ...
+    def iter_silver(self, entity_type: str) -> Iterator[dict[str, Any]]: ...
+    def put_gold(self, gid: str, entity_type: str, record: dict[str, Any]) -> None: ...
+    def get_gold(self, gid: str) -> dict[str, Any] | None: ...
+    def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]: ...
+    def counts(self) -> dict[str, int]: ...
+    def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
+    def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
+    def close(self) -> None: ...
+
+
+def open_store(root: str = "./data", url: str | None = None) -> Store:
+    """Pick a backend. Explicit `BCD_STORE_BACKEND=sqlite|postgres` wins; otherwise the
+    presence of a `BCD_DATABASE_URL` selects Postgres, and a bare laptop falls back to the
+    SQLite dev store. The Postgres import is lazy so the SQLite path needs no psycopg."""
+    backend = os.environ.get("BCD_STORE_BACKEND")
+    url = url or os.environ.get("BCD_DATABASE_URL")
+    if backend == "sqlite":
+        return MedallionStore(root=root)
+    if backend == "postgres" or (backend is None and url):
+        from .pg_store import PostgresStore
+        return PostgresStore(url or "postgresql://localhost:5432/bcd")
+    return MedallionStore(root=root)

@@ -1,0 +1,128 @@
+[
+  {
+    "producer": {
+      "slug": "bcd-demo-brewing",
+      "name": "BCD Demo Brewing Co.",
+      "kind": "brewery",
+      "country": "US",
+      "region": "VT",
+      "lat": 44.2601,
+      "lon": -72.5754,
+      "website": "https://example.com/demo-brewing"
+    },
+    "product": {
+      "key": "galaxy-haze",
+      "name": "Galaxy Haze",
+      "category": "beer",
+      "style": "New England IPA",
+      "abv": 6.8,
+      "ibu": 45.0,
+      "upc": "000000000017",
+      "container": "can",
+      "volume_ml": 473.0,
+      "description": "Soft, juicy, heavily dry-hopped hazy IPA.",
+      "ingredients": [
+        {"role": "dry_hop", "entity_kind": "hop", "raw_name": "Citra"},
+        {"role": "dry_hop", "entity_kind": "hop", "raw_name": "Galaxy"},
+        {"role": "aroma_hop", "entity_kind": "hop", "raw_name": "Mosaic"},
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "Pilsner malt"},
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "White Wheat malt"},
+        {"role": "adjunct", "entity_kind": "grain", "raw_name": "Flaked oats"},
+        {"role": "yeast", "entity_kind": "yeast", "raw_name": "London Ale III"}
+      ]
+    }
+  },
+  {
+    "producer": {
+      "slug": "bcd-demo-brewing",
+      "name": "BCD Demo Brewing Co.",
+      "kind": "brewery",
+      "country": "US",
+      "region": "VT",
+      "lat": 44.2601,
+      "lon": -72.5754,
+      "website": "https://example.com/demo-brewing"
+    },
+    "product": {
+      "key": "west-coast-reference",
+      "name": "West Coast Reference IPA",
+      "category": "beer",
+      "style": "West Coast IPA",
+      "abv": 7.0,
+      "ibu": 68.0,
+      "upc": "000000000024",
+      "container": "bottle",
+      "volume_ml": 355.0,
+      "description": "Dry, bitter, piney and citrus-forward classic West Coast IPA.",
+      "ingredients": [
+        {"role": "bittering_hop", "entity_kind": "hop", "raw_name": "Simcoe"},
+        {"role": "dry_hop", "entity_kind": "hop", "raw_name": "Centennial"},
+        {"role": "aroma_hop", "entity_kind": "hop", "raw_name": "Cascade"},
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "Pale 2-Row malt"},
+        {"role": "specialty_malt", "entity_kind": "malt", "raw_name": "Crystal 40 caramel malt"},
+        {"role": "yeast", "entity_kind": "yeast", "raw_name": "California Ale"}
+      ]
+    }
+  },
+  {
+    "producer": {
+      "slug": "bcd-demo-brewing",
+      "name": "BCD Demo Brewing Co.",
+      "kind": "brewery",
+      "country": "US",
+      "region": "VT",
+      "lat": 44.2601,
+      "lon": -72.5754,
+      "website": "https://example.com/demo-brewing"
+    },
+    "product": {
+      "key": "midnight-roast-stout",
+      "name": "Midnight Roast Stout",
+      "category": "beer",
+      "style": "American Stout",
+      "abv": 5.9,
+      "ibu": 38.0,
+      "upc": "000000000031",
+      "container": "can",
+      "volume_ml": 473.0,
+      "description": "Roasty, dark, coffee-and-chocolate forward stout.",
+      "ingredients": [
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "Roasted barley"},
+        {"role": "specialty_malt", "entity_kind": "malt", "raw_name": "Chocolate malt"},
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "Maris Otter pale malt"},
+        {"role": "bittering_hop", "entity_kind": "hop", "raw_name": "Magnum"},
+        {"role": "yeast", "entity_kind": "yeast", "raw_name": "Irish Ale"}
+      ]
+    }
+  },
+  {
+    "producer": {
+      "slug": "bcd-demo-weiss",
+      "name": "Demo Weissbräu",
+      "kind": "brewery",
+      "country": "DE",
+      "region": "Bavaria",
+      "lat": 48.1372,
+      "lon": 11.5756,
+      "website": "https://example.com/demo-weiss"
+    },
+    "product": {
+      "key": "bavarian-hefeweizen",
+      "name": "Bavarian Hefeweizen",
+      "category": "beer",
+      "style": "Weissbier",
+      "abv": 5.2,
+      "ibu": 12.0,
+      "upc": "000000000048",
+      "container": "bottle",
+      "volume_ml": 500.0,
+      "description": "Classic wheat beer: banana and clove from an open-fermented hefeweizen yeast.",
+      "ingredients": [
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "White Wheat malt"},
+        {"role": "base_malt", "entity_kind": "malt", "raw_name": "Pilsner malt"},
+        {"role": "aroma_hop", "entity_kind": "hop", "raw_name": "Saaz"},
+        {"role": "yeast", "entity_kind": "yeast", "raw_name": "Hefeweizen Ale yeast"}
+      ]
+    }
+  }
+]

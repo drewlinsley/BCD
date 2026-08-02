@@ -2,11 +2,12 @@
 
 ## Done (this scaffold)
 
-- ✅ Canonical data model with provenance, recipe graph, sensory vector ([packages/schema](../packages/schema/bcd_schema)) — 18 python tests
+- ✅ Canonical data model with provenance, recipe graph, sensory vector ([packages/schema](../packages/schema/bcd_schema)) — 22 python tests
 - ✅ Robots-aware crawler policy + evidence log ([packages/crawler](../packages/crawler/bcd_crawler))
 - ✅ Medallion ingest + **3 live connectors** (Open Brewery DB, Open Food Facts, TTB COLA)
 - ✅ FastAPI: scan/resolve, product/search, recommend, telemetry, Parallel webhook
-- ✅ Cold-start chemistry→sensory scorer ([services/enrich](../services/enrich/bcd_enrich))
+- ✅ Cold-start chemistry→sensory scorer ([services/enrich](../services/enrich/bcd_enrich)) + `python -m bcd_enrich` backfill
+- ✅ **Postgres 16 store** — pgvector cosine ANN + pg_trgm fuzzy match ([pg_store.py](../services/ingest/bcd_ingest/pg_store.py)) behind the same `Store` interface via `open_store()`; SQLite dev fallback intact, PG tests skip without a server
 - ✅ 90-source registry + schema + validator
 - ✅ Parallel sentinels wired + key confirmed (Search/Task) — FindAll pending beta access
 - ✅ Telemetry spec + codegen (Swift + Python from one file)
@@ -23,7 +24,7 @@
 
 ## Phase 1 — real catalog (weeks)
 
-- Swap the SQLite dev store for **Postgres 16 + pgvector + PostGIS**; port the medallion store behind the same interface.
+- Add **PostGIS** for venue geo (the pgvector + pg_trgm store already landed in the scaffold behind `open_store()`; venue `lat`/`lon` sit in plain columns until then). Move to a `psycopg_pool` connection pool for the server.
 - Bulk-load TTB/COLA Cloud; ingest Open Food Facts fully; layer Wikidata ownership.
 - Build the **entity-resolution pipeline** with the human review queue (the real cost center).
 - Train the **ingredient→sensory model** on the SNAP corpora; reconcile with the chemistry prior.

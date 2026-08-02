@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 from ..base import Connector
+from .demo import DemoConnector
 from .openbrewerydb import OpenBreweryDBConnector
 from .openfoodfacts import OpenFoodFactsConnector
 from .ttb_cola import TTBColaConnector
 
 REGISTRY: dict[str, type[Connector]] = {
+    DemoConnector.source_id: DemoConnector,
     OpenBreweryDBConnector.source_id: OpenBreweryDBConnector,
     OpenFoodFactsConnector.source_id: OpenFoodFactsConnector,
     TTBColaConnector.source_id: TTBColaConnector,
@@ -18,6 +20,8 @@ REGISTRY: dict[str, type[Connector]] = {
 
 # Friendly aliases so the Makefile can say SOURCE=ttb_cola
 ALIASES = {
+    "demo": "bcd-demo",
+    "bcd-demo": "bcd-demo",
     "openbrewerydb": "openbrewerydb",
     "obdb": "openbrewerydb",
     "openfoodfacts": "openfoodfacts",

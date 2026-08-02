@@ -27,8 +27,18 @@ toolchain: ## install Xcode 26.0 + brew deps (see docs). Xcode needs your Apple 
 
 # ---- data pipeline ----
 .PHONY: ingest
-ingest: ## run one connector end to end. SOURCE=openbrewerydb|off|ttb LIMIT=50
+ingest: ## run one connector end to end. SOURCE=demo|openbrewerydb|off|ttb LIMIT=50
 	$(PY) -m bcd_ingest $(SOURCE) --limit $(LIMIT)
+
+.PHONY: enrich
+enrich: ## backfill chemistry-prior sensory vectors onto gold products (feeds vector search)
+	$(PY) -m bcd_enrich
+
+.PHONY: demo
+demo: ## seed 4 recipe-complete demo products, then enrich → ready for scan + recommend
+	$(PY) -m bcd_ingest demo
+	$(PY) -m bcd_enrich
+	@echo "Demo catalog ready. Set BCD_STORE_BACKEND=postgres to use Postgres. Then: make api"
 
 .PHONY: validate-registry
 validate-registry: ## check every data/registry/sources/*.yaml against schema.json

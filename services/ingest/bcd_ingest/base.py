@@ -14,14 +14,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Any
 
-from .store import BronzeDoc, MedallionStore
+from .store import BronzeDoc, Store
 
 
 class Connector(ABC):
     source_id: str
     provides: tuple[str, ...] = ()
 
-    def __init__(self, store: MedallionStore) -> None:
+    def __init__(self, store: Store) -> None:
         self.store = store
 
     @abstractmethod
