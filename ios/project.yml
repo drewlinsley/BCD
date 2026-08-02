@@ -14,13 +14,19 @@ packages:
   BCDKit:
     path: BCDKit
 
+# Machine-specific values (Team ID for device signing, API base URL) live in
+# Local.xcconfig — gitignored, bootstrapped from Local.xcconfig.example by `make ios-gen`.
+configFiles:
+  Debug: Local.xcconfig
+  Release: Local.xcconfig
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: ""        # set your team id to run on device
     CODE_SIGN_STYLE: Automatic
+    # DEVELOPMENT_TEAM comes from Local.xcconfig — set it there to run on a device.
 
 targets:
   BCDApp:
@@ -44,6 +50,10 @@ targets:
         NSLocationWhenInUseUsageDescription: "BCD uses your location to match what's on the menu or shelf at this venue."
         # Age gate: alcohol content requires a 17+ rating and an age check.
         ITSAppUsesNonExemptEncryption: false
+        # API base URL, composed from Local.xcconfig at build time (scheme + host:port kept
+        # separate there because "//" starts a comment in an xcconfig). A device build points
+        # at your Mac, not localhost. Read in BCDApp.swift.
+        BCDAPIBase: "$(BCD_API_SCHEME)://$(BCD_API_HOSTPORT)"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bcd.app
