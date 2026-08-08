@@ -52,8 +52,8 @@ public struct FoundationModelsProvider: LLMProvider {
     private static func parseLoose(_ content: String, original: String) -> QueryIntent {
         var intent = QueryIntent(freeText: original)
         let lower = content.lowercased()
-        if let r = lower.range(of: #/max_?abv[:=]\s*(\d+(?:\.\d+)?)/#),
-           let v = Double(content[r].filter { $0.isNumber || $0 == "." }) {
+        if let m = lower.firstMatch(of: #/max_?abv[:=]\s*(\d+(?:\.\d+)?)/#),
+           let v = Double(m.1) {
             intent.maxAbv = v
         }
         return intent

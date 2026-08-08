@@ -26,7 +26,7 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
 
     public var viewController: UIViewController? { scanner }
 
-    public func makeScanner() -> DataScannerViewController {
+    @MainActor public func makeScanner() -> DataScannerViewController {
         let scanner = DataScannerViewController(
             recognizedDataTypes: [.text(), .barcode()],
             qualityLevel: .fast,
@@ -40,13 +40,15 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
     }
 
     public func start() async {
-        guard let scanner else { return }
-        try? scanner.startScanning()
+        // Hop to the main actor: DataScannerViewController is @MainActor-isolated, but
+        // ScanEngine.start() is a non-isolated protocol requirement. Capture self (which is
+        // @unchecked Sendable), not the non-Sendable scanner, to stay race-clean.
+        await MainActor.run { try? self.scanner?.startScanning() }
     }
 
     public func stop() {
-        scanner?.stopScanning()
         continuation?.finish()
+        Task { @MainActor in self.scanner?.stopScanning() }
     }
 
     private func emit(_ items: [RecognizedItem], in bounds: CGSize) {
