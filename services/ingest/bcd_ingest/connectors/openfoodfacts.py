@@ -44,7 +44,7 @@ class OpenFoodFactsConnector(Connector):
     source_id = "openfoodfacts"
     provides = ("product", "producer", "sku", "upc", "abv", "ingredients")
 
-    def __init__(self, store, categories: tuple[str, ...] = ("beers", "whiskies")) -> None:
+    def __init__(self, store, categories: tuple[str, ...] = ("beers", "whiskies", "spirits")) -> None:
         super().__init__(store)
         self.categories = categories
 
@@ -65,24 +65,40 @@ class OpenFoodFactsConnector(Connector):
             },
         )
         resp.raise_for_status()
-        return resp.json()
+        # OFF intermittently answers 200 with an HTML "temporarily unavailable" page.
+        # raise_for_status() passes it, but resp.json() would then throw JSONDecodeError
+        # — which is neither an httpx.HTTPError (so tenacity wouldn't retry) nor caught by
+        # fetch()'s degrade path. Convert both bad-payload modes into httpx.HTTPError so a
+        # blip gets retried and, if it persists, the run degrades gracefully.
+        if "json" not in resp.headers.get("content-type", "").lower():
+            raise httpx.HTTPError("OFF returned a non-JSON page (transient outage)")
+        try:
+            return resp.json()
+        except ValueError as exc:  # JSONDecodeError subclasses ValueError
+            raise httpx.HTTPError(f"OFF returned unparseable JSON: {exc}") from exc
 
     async def fetch(self, limit: int | None = None) -> AsyncIterator[BronzeDoc]:
         fetched = 0
+        # Round-robin one page from each category per pass, so a global --limit is spread
+        # across beer *and* spirits instead of being exhausted by whichever category sorts
+        # first. A category drops out of rotation when it errors or runs dry.
         async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": _UA}) as client:
-            for category in self.categories:
-                page = 1
-                while True:
+            page = {c: 1 for c in self.categories}
+            active = list(self.categories)
+            while active:
+                for category in list(active):
                     try:
-                        data = await self._get_page(client, category, page)
+                        data = await self._get_page(client, category, page[category])
                     except httpx.HTTPError as exc:
                         # Degrade gracefully: OFF being down shouldn't abort a run that
                         # may already have landed the primary (TTB/OBDB) sources.
-                        print(f"  ! openfoodfacts '{category}' page {page} failed: {exc}")
-                        break
+                        print(f"  ! openfoodfacts '{category}' page {page[category]} failed: {exc}")
+                        active.remove(category)
+                        continue
                     products = data.get("products", [])
                     if not products:
-                        break
+                        active.remove(category)
+                        continue
                     for row in products:
                         code = row.get("code")
                         if not code:
@@ -98,7 +114,7 @@ class OpenFoodFactsConnector(Connector):
                         fetched += 1
                         if limit is not None and fetched >= limit:
                             return
-                    page += 1
+                    page[category] += 1
 
     def normalize(self, doc: BronzeDoc) -> list[dict[str, Any]]:
         r = doc.payload
