@@ -7,6 +7,10 @@
 // Developer portal ▸ Membership. A free Apple ID's personal team works.
 DEVELOPMENT_TEAM =
 
+// App bundle identifier — must be globally unique for a free Apple ID (a personal team
+// can't register a generic id like com.bcd.app). Use your own reverse-DNS, e.g. com.you.bcd.
+BCD_BUNDLE_ID = com.example.bcd
+
 // API base, split into scheme + host:port because "//" starts a comment in an xcconfig.
 // The Simulator can use localhost; a real device needs this Mac's LAN IP on the same
 // Wi-Fi, e.g. BCD_API_HOSTPORT = 192.168.1.50:8000.

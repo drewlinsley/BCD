@@ -27,6 +27,13 @@ public struct WeeklyPrediction: Codable, Sendable, Identifiable {
     public let kind: String
     public let confidence: Double
     public var resolved: Bool?
+
+    public init(text: String, kind: String, confidence: Double, resolved: Bool? = nil) {
+        self.text = text
+        self.kind = kind
+        self.confidence = confidence
+        self.resolved = resolved
+    }
 }
 
 public struct WeeklyProfileDelta: Codable, Sendable {
@@ -35,6 +42,15 @@ public struct WeeklyProfileDelta: Codable, Sendable {
     public let toVersion: Int
     public let summary: String
     public let predictions: [WeeklyPrediction]
+
+    public init(userId: String, fromVersion: Int, toVersion: Int,
+                summary: String, predictions: [WeeklyPrediction]) {
+        self.userId = userId
+        self.fromVersion = fromVersion
+        self.toVersion = toVersion
+        self.summary = summary
+        self.predictions = predictions
+    }
 
     enum CodingKeys: String, CodingKey {
         case summary, predictions

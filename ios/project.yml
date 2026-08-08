@@ -56,7 +56,10 @@ targets:
         BCDAPIBase: "$(BCD_API_SCHEME)://$(BCD_API_HOSTPORT)"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.bcd.app
+        # Bundle ID comes from Local.xcconfig (BCD_BUNDLE_ID) — a free Apple ID can't register
+        # a generic id like com.bcd.app, so each developer sets a unique one there, keeping it
+        # out of the shared repo (same pattern as DEVELOPMENT_TEAM).
+        PRODUCT_BUNDLE_IDENTIFIER: $(BCD_BUNDLE_ID)
         GENERATE_INFOPLIST_FILE: false
         ENABLE_PREVIEWS: true
 

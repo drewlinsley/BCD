@@ -1,5 +1,9 @@
 import SwiftUI
 import BCDKit
+#if canImport(VisionKit) && os(iOS)
+import VisionKit
+import AVFoundation
+#endif
 
 // The camera HUD — the whole product thesis in one screen. Live detections become
 // overlays anchored to their bounding boxes, color-coded by predicted enjoyment. A
@@ -13,7 +17,7 @@ struct ScanView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            CameraLayer()  // real preview on device; neutral backdrop in preview/host
+            CameraLayer(engine: model.engine)  // live DataScanner on device; gradient in Sim/host
                 .ignoresSafeArea()
 
             GeometryReader { geo in
@@ -102,6 +106,9 @@ struct OverlayChip: View {
 final class ScanViewModel: ObservableObject {
     @Published var overlays: [HUDOverlay] = []
     @Published var lastLatencyMs: Double?
+    /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
+    /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
+    @Published private(set) var engine: ScanEngine?
 
     private var coordinator: ScanCoordinator?
     private var env: AppEnvironment?
@@ -110,7 +117,9 @@ final class ScanViewModel: ObservableObject {
     func configure(env: AppEnvironment) {
         guard coordinator == nil else { return }
         self.env = env
-        let coord = ScanCoordinator(engine: env.makeScanEngine(), api: env.api,
+        let engine = env.makeScanEngine()
+        self.engine = engine
+        let coord = ScanCoordinator(engine: engine, api: env.api,
                                     telemetry: env.telemetry)
         self.coordinator = coord
         // Re-render overlays whenever the coordinator publishes new candidates.
@@ -146,11 +155,54 @@ final class ScanViewModel: ObservableObject {
     }
 }
 
-/// Camera preview seam. The real `AVCaptureVideoPreviewLayer` / VisionKit scanner view is
-/// wired on device; here it's a neutral gradient so the HUD is previewable on the host.
+/// Camera layer. On a real device it presents VisionKit's `DataScannerViewController` (live
+/// text + barcode) driven by the shared engine; in the Simulator or on the host — no camera —
+/// it falls back to a neutral gradient so the HUD stays previewable.
 struct CameraLayer: View {
+    var engine: ScanEngine?
+
     var body: some View {
+        #if canImport(VisionKit) && os(iOS)
+        if #available(iOS 18.0, *), DataScannerViewController.isSupported,
+           let vk = engine as? VisionKitScanEngine {
+            DataScannerView(engine: vk)
+        } else {
+            placeholder
+        }
+        #else
+        placeholder
+        #endif
+    }
+
+    private var placeholder: some View {
         LinearGradient(colors: [.black, .gray.opacity(0.6)],
                        startPoint: .top, endPoint: .bottom)
     }
 }
+
+#if canImport(VisionKit) && os(iOS)
+/// Presents the engine's `DataScannerViewController` and drives its lifecycle: request camera
+/// access (this is what makes iOS show the permission prompt), then start scanning. Detections
+/// flow out through the engine's delegate → `frames` → the coordinator, which the HUD renders.
+@available(iOS 18.0, *)
+struct DataScannerView: UIViewControllerRepresentable {
+    let engine: VisionKitScanEngine
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        engine.makeScanner()
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {
+        guard !context.coordinator.started else { return }
+        context.coordinator.started = true
+        let engine = self.engine  // @unchecked Sendable — safe to hand to the async closure
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            guard granted else { return }
+            Task { await engine.start() }  // hops to @MainActor, starts the created scanner
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var started = false }
+}
+#endif
