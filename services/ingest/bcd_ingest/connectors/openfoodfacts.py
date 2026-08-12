@@ -8,6 +8,7 @@ categories. Ingredient text becomes RecipeIngredient parts tagged as producer-st
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -118,16 +119,26 @@ class OpenFoodFactsConnector(Connector):
 
     def normalize(self, doc: BronzeDoc) -> list[dict[str, Any]]:
         r = doc.payload
+        name = (r.get("product_name") or "").strip()
+        categories = r.get("categories", "")
+        category = _category_of(categories)
+        # Quality gate. OFF is a food database, so its alcohol categories are noisy: some
+        # rows are unnamed, some name no drink at all (a gas station that slipped in), and a
+        # few are plainly food mistagged as liquor (a drinking yogurt). Drop those — an empty
+        # list skips the document — so the catalog stays beverages-only.
+        if (not name or _is_placeholder(name) or category is None
+                or _is_nonbeverage(name, categories)):
+            return []
         return [
             {
                 "entity_type": "off_product",
                 "bronze_id": doc.id,
                 "upc": r.get("code"),
-                "name": (r.get("product_name") or "").strip(),
+                "name": name,
                 "brand": (r.get("brands") or "").split(",")[0].strip(),
                 "ingredients_text": r.get("ingredients_text"),
                 "abv": _to_float(r.get("alcohol_value") or r.get("abv")),
-                "category": _category_of(r.get("categories", "")),
+                "category": category,
                 "url": doc.url,
             }
         ]
@@ -220,15 +231,60 @@ def _guess_kind(name: str) -> str:
     return "other"
 
 
-def _category_of(categories: str) -> Category:
+def _category_of(categories: str) -> Category | None:
+    """Map OFF's free-text category list to our enum, or None when nothing in it names a
+    drink — the caller drops those (OFF is a food DB; non-beverages leak in). Order matters:
+    match the specific alcohol families before the generic 'beer' fallback. The old code
+    knew only whisk/spirit/vodka/gin/rum/tequila, so cognac, brandy, liqueurs, eaux-de-vie,
+    amaro, grappa, ouzo … all fell through and were mislabeled beer."""
     c = categories.lower()
-    if any(w in c for w in ("whisk", "spirit", "vodka", "gin", "rum", "tequila")):
+
+    # Patterns, not bare substrings: `\b` word boundaries keep short tokens honest — `gin`
+    # matches "Gins"/"London Dry Gin" but not "ginger", `ale` matches "Pale Ales" but not
+    # "céréales". Prefixes (\bwhisk) absorb plurals/spellings (whisky/whiskey/whiskies).
+    def has(*patterns: str) -> bool:
+        return any(re.search(p, c) for p in patterns)
+
+    if has(r"\bwhisk", r"\bbourbon", r"\bscotch\b", r"\bspirit", r"\bliqueur", r"\bliquor",
+           r"\bvodka", r"\bgins?\b", r"\brums?\b", r"\brhums?\b", r"\btequila", r"\bmezcal",
+           r"\bcognac", r"\bbrandy", r"\bbrandies", r"\barmagnac", r"\bcalvados",
+           r"\beaux?[\s-]de[\s-]vie", r"\bcacha[çc]a", r"\bgrappa", r"\bouzo", r"\bamaro",
+           r"\bvermouth",
+           r"\bap[eé]ritif", r"\babsinthe", r"\bschnapps", r"\baquavit", r"\bpastis",
+           r"\bsambuca", r"\btriple sec", r"\bbitters", r"\bsake\b", r"\bsoju"):
         return Category.SPIRIT
-    if "wine" in c:
-        return Category.WINE
-    if "cider" in c:
+    if has(r"\bcidres?\b", r"\bcider"):
         return Category.CIDER
-    return Category.BEER
+    if has(r"\bwines?\b", r"\bchampagne", r"\bprosecco", r"\bsherry", r"\bsparkling"):
+        return Category.WINE
+    if has(r"\bbeers?\b", r"\bbiers?\b", r"\bbirra", r"\bcerveza", r"\bcerveja",
+           r"\bales?\b", r"\blager", r"\bpils", r"\bstout", r"\bipas?\b", r"\bporter",
+           r"\bsaison", r"\bweizen", r"\bweiss", r"\bweiß"):
+        return Category.BEER
+    if has(r"\bbeverage", r"\bdrink", r"\balcohol"):  # a drink, no family named → spine
+        return Category.BEER
+    return None  # nothing here names a drink
+
+
+# Terms that never occur in a real beer/spirit name but do show up on food rows OFF has
+# mistagged with an alcohol category. Deliberately tiny and safe — nothing here collides
+# with a legitimate style (a "Chocolate Stout" or "Coffee Porter" is untouched).
+_NONBEVERAGE_TERMS = ("yaourt", "yogurt", "yoghurt", "vinegar", "vinaigre")
+
+
+def _is_nonbeverage(name: str, categories: str) -> bool:
+    hay = f"{name} {categories}".lower()
+    return any(t in hay for t in _NONBEVERAGE_TERMS)
+
+
+# Scraper leftovers that land in product_name when a page had not finished rendering.
+_PLACEHOLDER_NAMES = {"chargement", "loading", "unknown", "unknown product",
+                      "sans nom", "no name", "n/a", ""}
+
+
+def _is_placeholder(name: str) -> bool:
+    # "Chargement…" / "Loading..." etc.; strip trailing dots/ellipsis before matching.
+    return name.strip().lower().rstrip(" .…") in _PLACEHOLDER_NAMES
 
 
 def _slug(s: str) -> str:
