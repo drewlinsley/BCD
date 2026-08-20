@@ -119,9 +119,13 @@ class OpenFoodFactsConnector(Connector):
 
     def normalize(self, doc: BronzeDoc) -> list[dict[str, Any]]:
         r = doc.payload
-        name = (r.get("product_name") or "").strip()
         categories = r.get("categories", "")
         category = _category_of(categories)
+        brand = (r.get("brands") or "").split(",")[0].strip()
+        # Recover a usable display name: OFF's product_name is often just "Gin"/"Rum"/"15",
+        # which both misreads in the HUD and trigram-matches any stray OCR token. Lead with
+        # the brand OFF also carries when the name is that thin; None when nothing's salvageable.
+        name = _display_name(r.get("product_name"), brand)
         # Quality gate. OFF is a food database, so its alcohol categories are noisy: some
         # rows are unnamed, some name no drink at all (a gas station that slipped in), and a
         # few are plainly food mistagged as liquor (a drinking yogurt). Drop those — an empty
@@ -135,7 +139,7 @@ class OpenFoodFactsConnector(Connector):
                 "bronze_id": doc.id,
                 "upc": r.get("code"),
                 "name": name,
-                "brand": (r.get("brands") or "").split(",")[0].strip(),
+                "brand": brand,
                 "ingredients_text": r.get("ingredients_text"),
                 "abv": _to_float(r.get("alcohol_value") or r.get("abv")),
                 "category": category,
@@ -285,6 +289,49 @@ _PLACEHOLDER_NAMES = {"chargement", "loading", "unknown", "unknown product",
 def _is_placeholder(name: str) -> bool:
     # "Chargement…" / "Loading..." etc.; strip trailing dots/ellipsis before matching.
     return name.strip().lower().rstrip(" .…") in _PLACEHOLDER_NAMES
+
+
+# Bare style/category words OFF sometimes drops into product_name. Alone they name no product
+# and trigram-match anything sharing the letters, so they count as "weak" and get the brand
+# prepended (or the row dropped). Kept lowercase for a case-folded lookup.
+_BARE_CATEGORY = {
+    "gin", "rum", "rhum", "beer", "beers", "ale", "ales", "ipa", "lager", "lagers",
+    "pils", "pilsner", "stout", "porter", "vodka", "whisky", "whiskey", "wine", "cider",
+    "eau", "spirit", "spirits", "liqueur", "mini", "biere", "bière", "cerveza", "birra",
+}
+
+
+def _is_weak_name(name: str) -> bool:
+    """A product_name too thin to stand on its own: a 1-3 digit number ("15", "40"), a bare
+    category word ("Gin", "Pils"), or a tiny all-lowercase fragment ("fen"). A 4-digit number
+    ("1664") or a self-identifying short brand ("J&B", "OB") is *not* weak — those are real."""
+    n = (name or "").strip()
+    if not n:
+        return True
+    if re.fullmatch(r"[0-9]{1,3}", n):
+        return True
+    if n.lower() in _BARE_CATEGORY:
+        return True
+    return len(n) <= 3 and n.isalpha() and n.islower()
+
+
+def _display_name(product_name: str | None, brand: str | None) -> str | None:
+    """Best display name for an OFF row, or None when nothing usable remains. A strong
+    product_name stands as-is; a weak one is anchored on the brand OFF also carries
+    ("Glenfiddich" + "15" -> "Glenfiddich 15", "Hendrick's" + "Gin" -> "Hendrick's Gin");
+    a weak name with no brand to rescue it ("fen") is dropped."""
+    pn = (product_name or "").strip()
+    brand = (brand or "").strip()
+    if not _is_weak_name(pn):
+        return pn
+    if not brand or _is_weak_name(brand):
+        # Brand can't rescue it — keep a combo only if it turns out non-weak (rare), else drop.
+        combo = f"{brand} {pn}".strip() if (brand and pn) else (brand or pn).strip()
+        return combo if (combo and not _is_weak_name(combo)) else None
+    # Strong brand + weak qualifier: append the qualifier when it adds anything the brand lacks.
+    if pn and pn.lower() not in brand.lower():
+        return f"{brand} {pn}"
+    return brand
 
 
 def _slug(s: str) -> str:

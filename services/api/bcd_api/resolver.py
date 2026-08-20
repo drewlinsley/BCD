@@ -9,6 +9,8 @@ client codes against and what we optimize behind.
 
 from __future__ import annotations
 
+import re
+
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     Brand,
@@ -21,6 +23,32 @@ from bcd_schema import (
     SensoryVector,
     TasteProfile,
 )
+
+
+# A text detection resolves to a product only if its name-match clears this floor. Tuned
+# against the real catalog: real beers (Heineken 1.0, Krombacher 0.69, a "GUINNESS DRAUGHT
+# 440ML" line 0.56) clear it; OCR chrome ("12 FL OZ" 0.38, "BREWED AND BOTTLED BY" 0.33) does
+# not — so noise resolves to nothing instead of a confident wrong beer.
+_MIN_MATCH = 0.5
+# Cap overlays per frame so a busy shelf can't bury the HUD (the client caps + anchors too).
+_MAX_CANDIDATES = 8
+
+# A detection is a *product identity* only if it carries a real word — a run of >=3 letters (a
+# brand or name token). A bare number is label chrome, not a name: "15" off a 15th-anniversary
+# can, "40" for proof, "500" for mL, "5" for %ABV. Trigram-matching those resolves to whatever
+# junk shares the digits (a can's "15" once matched a spirit literally named "15"), so they must
+# resolve to nothing. The one numeric exception is a 4+-digit run that IS the identity ("1664").
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_LONGNUM_RE = re.compile(r"^[0-9]{4,}$")
+
+
+def _is_identity_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _WORD_RE.search(t):
+        return True
+    return bool(_LONGNUM_RE.match(t.replace(" ", "")))
 
 
 class Resolver:
@@ -82,9 +110,13 @@ class Resolver:
             if det.kind == "barcode":
                 product_rec = self._resolve_by_upc(det.text)
                 match_score = 1.0 if product_rec else 0.0
-            if product_rec is None:
+            elif _is_identity_text(det.text):
+                # Text path only for lines that could name a product; a bare number/fragment
+                # (and a failed barcode's digits) is skipped rather than trigram-matched.
                 matches = self.store.match_products(det.text)
-                if matches:
+                # Confidence floor: below it a line is OCR chrome that still trigram-matches
+                # *something* — leave it unresolved rather than show a wrong beer.
+                if matches and matches[0][1] >= _MIN_MATCH:
                     product_rec, match_score = matches[0]
             if product_rec is None:
                 unresolved.append(i)
@@ -107,6 +139,16 @@ class Resolver:
                     cold_start=cold,
                 )
             )
+        # Collapse to one overlay per product (strongest match wins) and cap the frame —
+        # the server-side backstop against the crowding the HUD was showing.
+        best: dict[str, ScoredCandidate] = {}
+        for c in candidates:
+            pid = c.resolved.product.id
+            if pid not in best or c.match_score > best[pid].match_score:
+                best[pid] = c
+        candidates = sorted(
+            best.values(), key=lambda c: c.match_score, reverse=True
+        )[:_MAX_CANDIDATES]
         return ScanResolveResponse(candidates=candidates, unresolved_indices=unresolved)
 
 
