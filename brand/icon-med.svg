@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="inkBg" cx="50%" cy="33%" r="82%">
+      <stop offset="0" stop-color="#24222F"/><stop offset="1" stop-color="#100F16"/>
+    </radialGradient>
+    <clipPath id="cBottleM"><path d="M416 400 L416 462 C416 492 388 500 388 534 L388 640 Q388 672 418 672 L442 672 Q472 672 472 640 L472 534 C472 500 444 492 444 462 L444 400 Z"/></clipPath>
+    <clipPath id="cGlassM"><path d="M548 430 L660 430 L648 654 Q647 672 630 672 L578 672 Q561 672 560 654 Z"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#inkBg)"/>
+  <rect x="150" y="505" width="724" height="6" rx="3" fill="#E9A23A" opacity=".15"/>
+  <g fill="none" stroke="#E9A23A" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="160,300 160,160 300,160"/><polyline points="724,160 864,160 864,300"/>
+    <polyline points="160,724 160,864 300,864"/><polyline points="724,864 864,864 864,724"/>
+  </g>
+  <g transform="translate(512,522) scale(1.1) translate(-512,-522)">
+    <g fill="#F3EADB">
+      <rect x="416" y="372" width="28" height="30" rx="7"/>
+      <path d="M416 400 L416 462 C416 492 388 500 388 534 L388 640 Q388 672 418 672 L442 672 Q472 672 472 640 L472 534 C472 500 444 492 444 462 L444 400 Z"/>
+      <path d="M548 430 L660 430 L648 654 Q647 672 630 672 L578 672 Q561 672 560 654 Z"/>
+      <rect x="548" y="414" width="112" height="18" rx="9"/>
+      <circle cx="566" cy="408" r="17"/><circle cx="596" cy="398" r="21"/>
+      <circle cx="626" cy="404" r="18"/><circle cx="650" cy="412" r="15"/>
+    </g>
+    <g clip-path="url(#cBottleM)"><rect x="386" y="556" width="88" height="120" fill="#E9A23A"/><rect x="386" y="556" width="88" height="8" fill="#F6C979"/></g>
+    <g clip-path="url(#cGlassM)"><rect x="546" y="512" width="118" height="164" fill="#E9A23A"/><rect x="546" y="512" width="118" height="8" fill="#F6C979"/></g>
+  </g>
+</svg>
