@@ -104,19 +104,23 @@ import Foundation
 
 @Suite struct ScanCoordination {
     @MainActor
-    @Test func resolvesScriptedFramesAndDedupes() async throws {
-        // Two frames with the same text — the coordinator must query it only once.
+    @Test func captureResolvesCurrentFrameOnceAndAnchors() async throws {
+        // The live viewfinder buffers frames but never resolves; the shutter resolves the
+        // current frame exactly once and pins each overlay to its detection's box center.
         let engine = MockScanEngine(scripted: [
-            [DetectedText(text: "Heady Topper", kind: "text")],
-            [DetectedText(text: "Heady Topper", kind: "text")],  // dup -> ignored
-            [DetectedText(text: "854416001019", kind: "barcode")],
+            [DetectedText(text: "Heady Topper", kind: "text", x: 0.1, y: 0.2, w: 0.2, h: 0.1)],
         ])
         let api = StubAPI()
         let coord = ScanCoordinator(engine: engine, api: api)
         coord.start()
-        try await Task.sleep(nanoseconds: 300_000_000)  // let the stream drain
-        #expect(api.resolveCallCount == 2)  // "Heady Topper" once + the barcode
-        #expect(!coord.candidates.isEmpty)
+        try await Task.sleep(nanoseconds: 200_000_000)  // let the frame buffer
+        #expect(api.resolveCallCount == 0)              // live viewfinder never resolves
+        await coord.capture()
+        #expect(api.resolveCallCount == 1)              // the shutter resolves exactly once
+        #expect(coord.captured)
+        let overlay = try #require(coord.overlays.first)
+        #expect(abs(overlay.x - 0.2) < 0.001)           // box center x = 0.1 + 0.2/2
+        #expect(abs(overlay.y - 0.25) < 0.001)          // box center y = 0.2 + 0.1/2
     }
 }
 

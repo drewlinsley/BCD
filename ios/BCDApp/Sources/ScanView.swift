@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import BCDKit
 #if canImport(VisionKit) && os(iOS)
 import VisionKit
@@ -20,6 +21,11 @@ struct ScanView: View {
             CameraLayer(engine: model.engine)  // live DataScanner on device; gradient in Sim/host
                 .ignoresSafeArea()
 
+            // Once captured, dim the live feed so the frozen result reads as "analyzed".
+            if model.captured {
+                Color.black.opacity(0.35).ignoresSafeArea().allowsHitTesting(false)
+            }
+
             GeometryReader { geo in
                 ForEach(model.overlays) { overlay in
                     OverlayChip(candidate: overlay.candidate)
@@ -29,14 +35,10 @@ struct ScanView: View {
                 }
             }
 
-            VStack(spacing: 8) {
-                if let latency = model.lastLatencyMs {
-                    Text("\(model.overlays.count) in view · \(Int(latency))ms")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
-                chatBar
+            VStack(spacing: 12) {
+                statusPill
+                if model.captured && !model.overlays.isEmpty { chatBar }
+                shutterRow
             }
             .padding()
         }
@@ -44,6 +46,48 @@ struct ScanView: View {
         .onDisappear { model.stop() }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
+        }
+    }
+
+    // A one-line status: what to do, that we're working, or what we found.
+    @ViewBuilder private var statusPill: some View {
+        if model.isResolving {
+            pill("Analyzing…", system: "hourglass")
+        } else if model.captured {
+            let n = model.overlays.count
+            pill(n == 0 ? "No products found" : "\(n) found"
+                    + (model.lastLatencyMs.map { " · \(Int($0))ms" } ?? ""),
+                 system: n == 0 ? "questionmark.circle" : "checkmark.circle.fill")
+        } else {
+            pill("Point at a shelf, then tap to scan", system: "viewfinder")
+        }
+    }
+
+    private func pill(_ text: String, system: String) -> some View {
+        Label(text, systemImage: system)
+            .font(.caption).foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    // Shutter when live; Rescan when a result is frozen.
+    @ViewBuilder private var shutterRow: some View {
+        if model.captured {
+            Button { model.rescan() } label: {
+                Label("Rescan", systemImage: "arrow.counterclockwise")
+                    .font(.headline).foregroundStyle(.white)
+                    .padding(.horizontal, 24).padding(.vertical, 14)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+        } else {
+            Button { model.capture() } label: {
+                ZStack {
+                    Circle().strokeBorder(.white, lineWidth: 4).frame(width: 74, height: 74)
+                    Circle().fill(.white).frame(width: 60, height: 60)
+                }
+            }
+            .disabled(model.isResolving)
+            .opacity(model.isResolving ? 0.5 : 1)
         }
     }
 
@@ -55,7 +99,7 @@ struct ScanView: View {
                 .submitLabel(.search)
                 .onSubmit { Task { await model.applyAsk(ask) } }
             if !ask.isEmpty {
-                Button { ask = ""; Task { await model.applyAsk("") } } label: {
+                Button { ask = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
             }
@@ -106,52 +150,44 @@ struct OverlayChip: View {
 final class ScanViewModel: ObservableObject {
     @Published var overlays: [HUDOverlay] = []
     @Published var lastLatencyMs: Double?
+    @Published var captured = false
+    @Published var isResolving = false
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
     /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
     @Published private(set) var engine: ScanEngine?
 
     private var coordinator: ScanCoordinator?
     private var env: AppEnvironment?
-    private var lastDetections: [String: CGPoint] = [:]
 
     func configure(env: AppEnvironment) {
         guard coordinator == nil else { return }
         self.env = env
         let engine = env.makeScanEngine()
         self.engine = engine
-        let coord = ScanCoordinator(engine: engine, api: env.api,
-                                    telemetry: env.telemetry)
+        let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry)
         self.coordinator = coord
-        // Re-render overlays whenever the coordinator publishes new candidates.
-        Task { [weak self] in
-            guard let self else { return }
-            for await _ in coord.$candidates.values {
-                self.rebuildOverlays(from: coord.candidates)
-                self.lastLatencyMs = coord.lastLatencyMs
+        // Mirror the coordinator's frozen, box-anchored overlays straight into the view.
+        coord.$overlays
+            .map { ovs in
+                ovs.map { HUDOverlay(id: $0.id, candidate: $0.candidate,
+                                     anchor: CGPoint(x: $0.x, y: $0.y)) }
             }
-        }
+            .assign(to: &$overlays)
+        coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
+        coord.$captured.assign(to: &$captured)
+        coord.$isResolving.assign(to: &$isResolving)
     }
 
     func start() { coordinator?.start() }
     func stop() { coordinator?.stop() }
+    func capture() { Task { await coordinator?.capture() } }
+    func rescan() { coordinator?.rescan() }
 
+    /// Chat-bar rerank: ask the LLM to order the captured products, then re-pin in that order.
     func applyAsk(_ ask: String) async {
-        guard let env, let coord = coordinator else { return }
-        guard !ask.isEmpty else { rebuildOverlays(from: coord.candidates); return }
-        let order = (try? await env.llm.rerank(coord.candidates, for: ask)) ?? []
-        let ranked = order.compactMap { id in
-            coord.candidates.first { $0.resolved.product.id == id }
-        }
-        rebuildOverlays(from: ranked.isEmpty ? coord.candidates : ranked)
-    }
-
-    private func rebuildOverlays(from candidates: [ScoredCandidate]) {
-        overlays = candidates.enumerated().map { idx, cand in
-            // Anchor to the detection's box if we have it; else fan out down the frame.
-            let anchor = CGPoint(x: 0.25 + 0.5 * Double(idx % 2),
-                                 y: 0.25 + 0.12 * Double(idx))
-            return HUDOverlay(id: cand.id, candidate: cand, anchor: anchor)
-        }
+        guard let env, let coord = coordinator, !ask.isEmpty else { return }
+        let order = (try? await env.llm.rerank(coord.capturedCandidates, for: ask)) ?? []
+        coord.rerank(order: order)
     }
 }
 
