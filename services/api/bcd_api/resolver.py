@@ -30,6 +30,11 @@ from bcd_schema import (
 # 440ML" line 0.56) clear it; OCR chrome ("12 FL OZ" 0.38, "BREWED AND BOTTLED BY" 0.33) does
 # not — so noise resolves to nothing instead of a confident wrong beer.
 _MIN_MATCH = 0.5
+# A very short catalog name ("J&B", "1664") is low-information and trigram-matches garbled OCR
+# far too easily, so it must clear a near-exact bar instead of the normal floor. Observed live: a
+# mangled Heady-Topper-can frame matched the scotch "J&B" at exactly 0.5.
+_SHORT_MIN_MATCH = 0.8
+_SHORT_NAME_LEN = 5
 # Cap overlays per frame so a busy shelf can't bury the HUD (the client caps + anchors too).
 _MAX_CANDIDATES = 8
 
@@ -115,9 +120,14 @@ class Resolver:
                 # (and a failed barcode's digits) is skipped rather than trigram-matched.
                 matches = self.store.match_products(det.text)
                 # Confidence floor: below it a line is OCR chrome that still trigram-matches
-                # *something* — leave it unresolved rather than show a wrong beer.
-                if matches and matches[0][1] >= _MIN_MATCH:
-                    product_rec, match_score = matches[0]
+                # *something* — leave it unresolved rather than show a wrong beer. Short catalog
+                # names need a higher, near-exact floor (see _SHORT_MIN_MATCH).
+                if matches:
+                    rec, sc = matches[0]
+                    floor = (_SHORT_MIN_MATCH
+                             if len((rec.get("name") or "")) < _SHORT_NAME_LEN else _MIN_MATCH)
+                    if sc >= floor:
+                        product_rec, match_score = rec, sc
             if product_rec is None:
                 unresolved.append(i)
                 continue
