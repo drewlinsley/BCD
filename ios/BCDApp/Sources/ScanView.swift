@@ -51,9 +51,11 @@ struct ScanView: View {
         }
     }
 
-    // A one-line status: live scanning, or the frozen result.
+    // A one-line status: on-device interpretation, live scanning, or the frozen result.
     @ViewBuilder private var statusPill: some View {
-        if model.captured {
+        if model.isInterpreting {
+            pill("Reading with Apple Intelligence…", system: "sparkles")
+        } else if model.captured {
             let n = model.overlays.count
             pill(n == 0 ? "No products found" : "\(n) found"
                     + (model.lastLatencyMs.map { " · \(Int($0))ms" } ?? ""),
@@ -154,6 +156,7 @@ final class ScanViewModel: ObservableObject {
     @Published var lastLatencyMs: Double?
     @Published var captured = false
     @Published var isResolving = false
+    @Published var isInterpreting = false
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
     /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
     @Published private(set) var engine: ScanEngine?
@@ -166,7 +169,8 @@ final class ScanViewModel: ObservableObject {
         self.env = env
         let engine = env.makeScanEngine()
         self.engine = engine
-        let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry)
+        let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry,
+                                    llm: env.llm)
         self.coordinator = coord
         // Mirror the coordinator's frozen, box-anchored overlays straight into the view.
         coord.$overlays
@@ -178,6 +182,7 @@ final class ScanViewModel: ObservableObject {
         coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
         coord.$captured.assign(to: &$captured)
         coord.$isResolving.assign(to: &$isResolving)
+        coord.$isInterpreting.assign(to: &$isInterpreting)
     }
 
     func start() { coordinator?.start() }

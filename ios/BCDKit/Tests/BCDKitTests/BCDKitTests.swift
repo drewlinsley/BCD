@@ -143,12 +143,32 @@ import Foundation
         await coord.resolveLatest()                     // same frame → deduped, no round-trip
         #expect(api.resolveCallCount == 1)
     }
+
+    @MainActor
+    @Test func captureFallsBackToOnDeviceInterpretation() async throws {
+        // A stylized label OCRs as garbage that matches nothing; the shutter's Apple-Intelligence
+        // fallback names the product, and *that* clean name resolves and anchors.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let llm = StubLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.capture()
+        #expect(coord.captured)
+        #expect(api.resolveCallCount == 2)              // raw OCR (miss) then the LLM guess (hit)
+        #expect(llm.calls == 1)
+        #expect(coord.overlays.count == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
 }
 
 // MARK: - test doubles
 
 private func makeCandidate(id: String, name: String, abv: Double,
-                          personal: Double) -> ScoredCandidate {
+                          personal: Double, index: Int = 0) -> ScoredCandidate {
     let prov = Provenance(sourceId: "t", url: nil, quote: nil,
                           method: .regulatoryFiling, confidence: 1)
     let product = Product(
@@ -161,7 +181,7 @@ private func makeCandidate(id: String, name: String, abv: Double,
         producer: Producer(id: "p", name: "P", kind: nil, country: nil, region: nil,
                            lat: nil, lon: nil, website: nil),
         brand: Brand(id: "b", producerId: "p", name: "B"))
-    return ScoredCandidate(detectionIndex: 0, resolved: resolved, matchScore: 1,
+    return ScoredCandidate(detectionIndex: index, resolved: resolved, matchScore: 1,
                            personalScore: personal, reason: nil, coldStart: true)
 }
 
@@ -185,4 +205,42 @@ private final class StubAPI: APIClientProtocol, @unchecked Sendable {
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// Resolves a detection only when its text is a known catalog name — so garbled OCR misses,
+/// the way the real trigram store does. Lets the LLM-fallback path be exercised deterministically.
+private final class CatalogStubAPI: APIClientProtocol, @unchecked Sendable {
+    let known: Set<String>
+    var resolveCallCount = 0
+    init(known: Set<String>) { self.known = known }
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        var candidates: [ScoredCandidate] = []
+        var unresolved: [Int] = []
+        for (i, d) in req.detections.enumerated() {
+            if known.contains(d.text) {
+                candidates.append(makeCandidate(id: d.text, name: d.text, abv: 8, personal: 0.8, index: i))
+            } else {
+                unresolved.append(i)
+            }
+        }
+        return ScanResolveResponse(candidates: candidates, unresolvedIndices: unresolved, latencyMs: 0.5)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// LLM double: returns a fixed product-name guess and counts how many times it was asked.
+private final class StubLLM: LLMProvider, @unchecked Sendable {
+    let guess: String
+    var calls = 0
+    init(guess: String) { self.guess = guess }
+    func parseQuery(_ text: String) async throws -> QueryIntent { QueryIntent(freeText: text) }
+    func rerank(_ candidates: [ScoredCandidate], for ask: String) async throws -> [String] {
+        candidates.map { $0.resolved.product.id }
+    }
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String] {
+        calls += 1
+        return [guess]
+    }
 }

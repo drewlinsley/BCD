@@ -49,6 +49,28 @@ public struct FoundationModelsProvider: LLMProvider {
         return ranked + candidates.map { $0.resolved.product.id }.filter { !ranked.contains($0) }
     }
 
+    public func interpretLabels(_ ocrLines: [String]) async throws -> [String] {
+        // Stylized cans (Heady Topper's logo, etc.) defeat plain OCR — VisionKit returns
+        // fragments like "FADY TOPP", "DEALCHEMIST". The on-device model reads them in context
+        // and names the product; that clean name is what the catalog match then hits.
+        let fragments = ocrLines.map { $0.replacingOccurrences(of: "\n", with: " ") }
+            .filter { !$0.isEmpty }
+        guard isAvailable, !fragments.isEmpty else { return [] }
+        let session = LanguageModelSession()
+        let prompt = """
+        These are OCR fragments from ONE alcoholic-drink label (beer or spirits), possibly \
+        garbled or partial. If you recognize the product, reply with just its brand and name \
+        on a single line, e.g. "Heady Topper The Alchemist". If you can't, reply exactly NONE.
+        Fragments: \(fragments.joined(separator: " | "))
+        """
+        let response = try await session.respond(to: prompt)
+        let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let guess = firstLine.trimmingCharacters(in: .whitespaces)
+        if guess.isEmpty || guess.uppercased().contains("NONE") { return [] }
+        return [guess]
+    }
+
     private static func parseLoose(_ content: String, original: String) -> QueryIntent {
         var intent = QueryIntent(freeText: original)
         let lower = content.lowercased()

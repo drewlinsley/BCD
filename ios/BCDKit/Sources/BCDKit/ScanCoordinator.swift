@@ -38,6 +38,8 @@ public final class ScanCoordinator: ObservableObject {
     @Published public private(set) var isScanning = false
     /// A resolve is in flight (shutter tap, or a live tick).
     @Published public private(set) var isResolving = false
+    /// The on-device model is naming a stylized label (the shutter's Apple-Intelligence fallback).
+    @Published public private(set) var isInterpreting = false
     /// A result is frozen on screen (capture mode). Live mode leaves this false — overlays
     /// keep updating — so the UI shows a "live" affordance instead of "Rescan".
     @Published public private(set) var captured = false
@@ -49,6 +51,7 @@ public final class ScanCoordinator: ObservableObject {
     private let engine: ScanEngine
     private let api: APIClientProtocol
     private let telemetry: TelemetryQueue?
+    private let llm: LLMProvider?                   // on-device model for the shutter fallback
     private var latestFrame: [DetectedText] = []   // most recent live detections (with boxes)
     private var capturedFrame: [DetectedText] = []  // the frame the current overlays anchor to
     private var task: Task<Void, Never>?            // frame-buffer pump
@@ -60,10 +63,12 @@ public final class ScanCoordinator: ObservableObject {
     /// Cap overlays so a busy shelf stays legible (the server caps too).
     private let maxOverlays = 8
 
-    public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil) {
+    public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil,
+                llm: LLMProvider? = nil) {
         self.engine = engine
         self.api = api
         self.telemetry = telemetry
+        self.llm = llm
     }
 
     /// Start the live viewfinder buffering frames. Nothing hits the network until a `capture()`
@@ -106,10 +111,41 @@ public final class ScanCoordinator: ObservableObject {
         isScanning = false
     }
 
-    /// Shutter. Freeze the current frame's result: pause any live ticker and resolve once.
+    /// Shutter. Freeze the current frame's result: pause any live ticker and resolve once. If
+    /// plain OCR matched nothing but the label carried text, fall back to on-device interpretation.
     public func capture(venueId: String? = nil) async {
         pauseTicker()
-        await resolve(frame: latestFrame.filter { !$0.text.isEmpty }, freeze: true, venueId: venueId)
+        let frame = latestFrame.filter { !$0.text.isEmpty }
+        await resolve(frame: frame, freeze: true, venueId: venueId)
+        if overlays.isEmpty, !frame.isEmpty, let llm {
+            await interpret(frame: frame, using: llm, venueId: venueId)
+        }
+    }
+
+    /// Shutter fallback: hand the raw (garbled) OCR to the on-device model, resolve the product
+    /// name it returns, and anchor the result to the label's most prominent text box.
+    private func interpret(frame: [DetectedText], using llm: LLMProvider, venueId: String?) async {
+        isInterpreting = true
+        defer { isInterpreting = false }
+        let guesses = (try? await llm.interpretLabels(frame.map { $0.text })) ?? []
+        guard !guesses.isEmpty else { return }
+        let box = frame.max { ($0.w ?? 0) * ($0.h ?? 0) < ($1.w ?? 0) * ($1.h ?? 0) } ?? frame[0]
+        let synthetic = guesses.map {
+            DetectedText(text: $0, kind: "text", x: box.x, y: box.y, w: box.w, h: box.h)
+        }
+        let req = ScanResolveRequest(detections: synthetic, venueId: venueId, includeScore: true)
+        guard let resp = try? await api.resolveScan(req), !resp.candidates.isEmpty else { return }
+        capturedCandidates = resp.candidates
+        capturedFrame = synthetic
+        overlays = Self.anchor(resp.candidates, to: synthetic, cap: maxOverlays)
+        lastLatencyMs = resp.latencyMs
+        await telemetry?.log("scan_frame_batch", tier: .personalization, [
+            "n_detections": .int(frame.count),
+            "n_resolved": .int(resp.candidates.count),
+            "mode": .string("llm_assist"),
+            "llm_guesses": .stringList(guesses),
+            "ocr_strings": .stringList(frame.map { $0.text }),
+        ])
     }
 
     /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
