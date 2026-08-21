@@ -34,6 +34,8 @@ struct ScanView: View {
                         .onTapGesture { selected = overlay.candidate }
                 }
             }
+            // Ease overlays in/out as the fixed-rate loop swaps the set each tick.
+            .animation(.easeInOut(duration: 0.2), value: model.overlays.count)
 
             VStack(spacing: 12) {
                 statusPill
@@ -42,24 +44,26 @@ struct ScanView: View {
             }
             .padding()
         }
-        .task { model.configure(env: env); model.start() }
+        .task { model.configure(env: env); model.startLive() }
         .onDisappear { model.stop() }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
         }
     }
 
-    // A one-line status: what to do, that we're working, or what we found.
+    // A one-line status: live scanning, or the frozen result.
     @ViewBuilder private var statusPill: some View {
-        if model.isResolving {
-            pill("Analyzing…", system: "hourglass")
-        } else if model.captured {
+        if model.captured {
             let n = model.overlays.count
             pill(n == 0 ? "No products found" : "\(n) found"
                     + (model.lastLatencyMs.map { " · \(Int($0))ms" } ?? ""),
                  system: n == 0 ? "questionmark.circle" : "checkmark.circle.fill")
         } else {
-            pill("Point at a shelf, then tap to scan", system: "viewfinder")
+            // Live, fixed-rate: overlays refresh on their own, so skip the per-tick "Analyzing…"
+            // that would strobe the pill as each tick resolves.
+            let n = model.overlays.count
+            pill(n == 0 ? "Point at a shelf · scanning live" : "\(n) in view · live",
+                 system: "dot.radiowaves.left.and.right")
         }
     }
 
@@ -70,24 +74,22 @@ struct ScanView: View {
             .background(.ultraThinMaterial, in: Capsule())
     }
 
-    // Shutter when live; Rescan when a result is frozen.
+    // Live by default; Freeze grabs the current frame for a closer look, Resume returns to the cadence.
     @ViewBuilder private var shutterRow: some View {
         if model.captured {
             Button { model.rescan() } label: {
-                Label("Rescan", systemImage: "arrow.counterclockwise")
+                Label("Resume", systemImage: "play.circle")
                     .font(.headline).foregroundStyle(.white)
                     .padding(.horizontal, 24).padding(.vertical, 14)
                     .background(.ultraThinMaterial, in: Capsule())
             }
         } else {
-            Button { model.capture() } label: {
-                ZStack {
-                    Circle().strokeBorder(.white, lineWidth: 4).frame(width: 74, height: 74)
-                    Circle().fill(.white).frame(width: 60, height: 60)
-                }
+            Button { model.freeze() } label: {
+                Label("Freeze", systemImage: "camera.fill")
+                    .font(.headline).foregroundStyle(.white)
+                    .padding(.horizontal, 24).padding(.vertical, 14)
+                    .background(.ultraThinMaterial, in: Capsule())
             }
-            .disabled(model.isResolving)
-            .opacity(model.isResolving ? 0.5 : 1)
         }
     }
 
@@ -179,8 +181,13 @@ final class ScanViewModel: ObservableObject {
     }
 
     func start() { coordinator?.start() }
+    /// Fixed-rate mode: the viewfinder re-resolves the latest frame on a cadence and swaps
+    /// overlays in place — no tapping, no accumulation.
+    func startLive() { coordinator?.startLive() }
     func stop() { coordinator?.stop() }
     func capture() { Task { await coordinator?.capture() } }
+    /// Freeze the current live frame for a closer look (pauses the cadence until `rescan`).
+    func freeze() { Task { await coordinator?.capture() } }
     func rescan() { coordinator?.rescan() }
 
     /// Chat-bar rerank: ask the LLM to order the captured products, then re-pin in that order.

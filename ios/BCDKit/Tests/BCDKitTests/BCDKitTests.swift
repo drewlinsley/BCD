@@ -122,6 +122,27 @@ import Foundation
         #expect(abs(overlay.x - 0.2) < 0.001)           // box center x = 0.1 + 0.2/2
         #expect(abs(overlay.y - 0.25) < 0.001)          // box center y = 0.2 + 0.1/2
     }
+
+    @MainActor
+    @Test func liveModeResolvesLatestFrameAndSkipsUnchanged() async throws {
+        // Fixed-rate mode resolves the latest frame and swaps overlays in place *without*
+        // freezing, and skips the re-resolve when the OCR is unchanged (camera held still) —
+        // so a held viewfinder stays cheap instead of firehosing the backend every tick.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
+        ])
+        let api = StubAPI()
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)  // let the frame buffer
+        await coord.resolveLatest()                     // one live tick
+        #expect(api.resolveCallCount == 1)
+        #expect(!coord.captured)                         // live never freezes
+        #expect(coord.overlays.count == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Krombacher")
+        await coord.resolveLatest()                     // same frame → deduped, no round-trip
+        #expect(api.resolveCallCount == 1)
+    }
 }
 
 // MARK: - test doubles
