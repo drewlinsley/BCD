@@ -8,9 +8,11 @@ hop bill, and the cold-start moat (scoring from chemistry with zero reviews) onl
 up when there IS one. Ingredient facts here are `STATED_BY_PRODUCER` at 0.9 confidence —
 illustrative seed data, capped below regulatory certainty, never passed off as scraped.
 
-The four products are deliberately spread across sensory space (tropical NEIPA, piney
-West Coast IPA, roasty stout, banana/clove hefeweizen) so `nearest_by_sensory` returns a
-visibly sensible ranking after enrichment.
+The first four products are fictional, deliberately spread across sensory space (tropical
+NEIPA, piney West Coast IPA, roasty stout, banana/clove hefeweizen) so `nearest_by_sensory`
+returns a visibly sensible ranking after enrichment. A fifth — Heady Topper (The Alchemist)
+— is a *real* beer seeded with public facts only (no recipe: its hop bill isn't disclosed),
+so it resolves by name without a fabricated chemistry.
 """
 
 from __future__ import annotations

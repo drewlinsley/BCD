@@ -273,7 +273,8 @@ def _category_of(categories: str) -> Category | None:
 # Terms that never occur in a real beer/spirit name but do show up on food rows OFF has
 # mistagged with an alcohol category. Deliberately tiny and safe — nothing here collides
 # with a legitimate style (a "Chocolate Stout" or "Coffee Porter" is untouched).
-_NONBEVERAGE_TERMS = ("yaourt", "yogurt", "yoghurt", "vinegar", "vinaigre")
+_NONBEVERAGE_TERMS = ("yaourt", "yogurt", "yoghurt", "vinegar", "vinaigre",
+                      "pasta", "pâtes", "pates")
 
 
 def _is_nonbeverage(name: str, categories: str) -> bool:
