@@ -8,6 +8,7 @@ categories. Ingredient text becomes RecipeIngredient parts tagged as producer-st
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -48,9 +49,14 @@ class OpenFoodFactsConnector(Connector):
     provides = ("product", "producer", "sku", "upc", "abv", "ingredients")
 
     def __init__(self, store,
-                 categories: tuple[str, ...] = ("beers", "whiskies", "spirits")) -> None:
+                 categories: tuple[str, ...] = ("beers", "whiskies", "spirits"),
+                 country: str | None = None) -> None:
         super().__init__(store)
         self.categories = categories
+        # Optional OFF country filter (e.g. "united-states") to target a market instead of OFF's
+        # Euro-first ordering. Env-driven so `BCD_OFF_COUNTRY=united-states make ingest SOURCE=off`
+        # works without threading a flag through the generic registry/CLI.
+        self.country = country or os.environ.get("BCD_OFF_COUNTRY") or None
 
     @retry(
         retry=retry_if_exception_type(httpx.HTTPError),
@@ -59,15 +65,15 @@ class OpenFoodFactsConnector(Connector):
         reraise=True,
     )
     async def _get_page(self, client: httpx.AsyncClient, category: str, page: int) -> dict:
-        resp = await client.get(
-            SEARCH,
-            params={
-                "categories_tags_en": category,
-                "fields": _FIELDS,
-                "page_size": 50,
-                "page": page,
-            },
-        )
+        params: dict[str, Any] = {
+            "categories_tags_en": category,
+            "fields": _FIELDS,
+            "page_size": 50,
+            "page": page,
+        }
+        if self.country:
+            params["countries_tags_en"] = self.country
+        resp = await client.get(SEARCH, params=params)
         resp.raise_for_status()
         # OFF intermittently answers 200 with an HTML "temporarily unavailable" page.
         # raise_for_status() passes it, but resp.json() would then throw JSONDecodeError

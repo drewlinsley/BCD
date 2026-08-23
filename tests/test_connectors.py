@@ -1,8 +1,23 @@
-"""Connector naming — the part that decides what an overlay actually says."""
+"""Connector naming + config — small units that shape what lands and what an overlay says."""
 
 from __future__ import annotations
 
+from bcd_ingest.connectors.openfoodfacts import OpenFoodFactsConnector
 from bcd_ingest.connectors.ttb_cola import _display_name
+
+
+def test_off_country_filter_from_env(monkeypatch):
+    # BCD_OFF_COUNTRY targets a market (e.g. US) instead of OFF's Euro-first ordering, without
+    # threading a flag through the generic registry/CLI.
+    monkeypatch.setenv("BCD_OFF_COUNTRY", "united-states")
+    assert OpenFoodFactsConnector(store=None).country == "united-states"
+    # An explicit argument still wins over the env var.
+    assert OpenFoodFactsConnector(store=None, country="france").country == "france"
+
+
+def test_off_country_none_by_default(monkeypatch):
+    monkeypatch.delenv("BCD_OFF_COUNTRY", raising=False)
+    assert OpenFoodFactsConnector(store=None).country is None
 
 
 def test_ttb_name_leads_with_brand_when_fanciful_is_generic():
