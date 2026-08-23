@@ -104,30 +104,10 @@ import Foundation
 
 @Suite struct ScanCoordination {
     @MainActor
-    @Test func captureResolvesCurrentFrameOnceAndAnchors() async throws {
-        // The live viewfinder buffers frames but never resolves; the shutter resolves the
-        // current frame exactly once and pins each overlay to its detection's box center.
-        let engine = MockScanEngine(scripted: [
-            [DetectedText(text: "Heady Topper", kind: "text", x: 0.1, y: 0.2, w: 0.2, h: 0.1)],
-        ])
-        let api = StubAPI()
-        let coord = ScanCoordinator(engine: engine, api: api)
-        coord.start()
-        try await Task.sleep(nanoseconds: 200_000_000)  // let the frame buffer
-        #expect(api.resolveCallCount == 0)              // live viewfinder never resolves
-        await coord.capture()
-        #expect(api.resolveCallCount == 1)              // the shutter resolves exactly once
-        #expect(coord.captured)
-        let overlay = try #require(coord.overlays.first)
-        #expect(abs(overlay.x - 0.2) < 0.001)           // box center x = 0.1 + 0.2/2
-        #expect(abs(overlay.y - 0.25) < 0.001)          // box center y = 0.2 + 0.1/2
-    }
-
-    @MainActor
     @Test func liveModeResolvesLatestFrameAndSkipsUnchanged() async throws {
-        // Fixed-rate mode resolves the latest frame and swaps overlays in place *without*
-        // freezing, and skips the re-resolve when the OCR is unchanged (camera held still) —
-        // so a held viewfinder stays cheap instead of firehosing the backend every tick.
+        // Fixed-rate live mode resolves the latest frame, pins each overlay to its detection's box
+        // center, and skips the re-resolve when the OCR is unchanged (camera held still) — so a
+        // held viewfinder stays cheap instead of firehosing the backend every tick. No shutter.
         let engine = MockScanEngine(scripted: [
             [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
         ])
@@ -135,19 +115,23 @@ import Foundation
         let coord = ScanCoordinator(engine: engine, api: api)
         coord.start()
         try await Task.sleep(nanoseconds: 100_000_000)  // let the frame buffer
+        #expect(api.resolveCallCount == 0)              // the viewfinder alone never resolves
         await coord.resolveLatest()                     // one live tick
         #expect(api.resolveCallCount == 1)
-        #expect(!coord.captured)                         // live never freezes
         #expect(coord.overlays.count == 1)
-        #expect(coord.overlays.first?.candidate.resolved.product.name == "Krombacher")
+        let overlay = try #require(coord.overlays.first)
+        #expect(overlay.candidate.resolved.product.name == "Krombacher")
+        #expect(abs(overlay.x - 0.4) < 0.001)           // box center x = 0.3 + 0.2/2
+        #expect(abs(overlay.y - 0.45) < 0.001)          // box center y = 0.4 + 0.1/2
         await coord.resolveLatest()                     // same frame → deduped, no round-trip
         #expect(api.resolveCallCount == 1)
     }
 
     @MainActor
-    @Test func captureFallsBackToOnDeviceInterpretation() async throws {
-        // A stylized label OCRs as garbage that matches nothing; the shutter's Apple-Intelligence
-        // fallback names the product, and *that* clean name resolves and anchors.
+    @Test func liveAutoInterpretsWhenNothingResolves() async throws {
+        // A stylized label OCRs as garbage that matches nothing. With no shutter, the live tick
+        // itself triggers the on-device fallback: it names the product, and *that* clean name
+        // resolves and anchors — zero clicking.
         let engine = MockScanEngine(scripted: [
             [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
         ])
@@ -156,12 +140,51 @@ import Foundation
         let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
         coord.start()
         try await Task.sleep(nanoseconds: 100_000_000)
-        await coord.capture()
-        #expect(coord.captured)
+        await coord.resolveLatest()                     // one live tick, no clicking
         #expect(api.resolveCallCount == 2)              // raw OCR (miss) then the LLM guess (hit)
         #expect(llm.calls == 1)
         #expect(coord.overlays.count == 1)
         #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func liveAutoInterpretRunsOncePerFrame() async throws {
+        // The fallback is debounced by OCR signature: a held-still garbled label runs the on-device
+        // model once, not on every tick.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = CatalogStubAPI(known: [])             // nothing ever resolves
+        let llm = StubLLM(guess: "Still Unmatched")     // guess doesn't resolve either
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        await coord.resolveLatest()
+        await coord.resolveLatest()
+        #expect(llm.calls == 1)                          // same frame → interpreted exactly once
+    }
+
+    @MainActor
+    @Test func liveFilterHidesOutOfSpecOverlaysAndRestores() async throws {
+        // The persistent chat-bar filter is parsed once and applied to each tick's candidates:
+        // "nothing over 6%" hides the 8.5% DIPA and keeps the 4.2% lager; clearing restores both.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "SHELF", kind: "text", x: 0.2, y: 0.3, w: 0.4, h: 0.1)],
+        ])
+        let api = TwoCandidateAPI()
+        let coord = ScanCoordinator(engine: engine, api: api, llm: MockLLMProvider())
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 2)
+        await coord.setFilter("nothing over 6%")
+        #expect(coord.overlays.count == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Light Lager")
+        #expect(coord.filterText == "nothing over 6%")
+        await coord.clearFilter()
+        #expect(coord.overlays.count == 2)
+        #expect(coord.filterText == nil)
     }
 }
 
@@ -225,6 +248,21 @@ private final class CatalogStubAPI: APIClientProtocol, @unchecked Sendable {
             }
         }
         return ScanResolveResponse(candidates: candidates, unresolvedIndices: unresolved, latencyMs: 0.5)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// Returns two candidates of different ABV for any single detection — an 8.5% DIPA and a 4.2%
+/// lager pinned to the same box — so the persistent chat-bar filter can be exercised.
+private final class TwoCandidateAPI: APIClientProtocol, @unchecked Sendable {
+    var resolveCallCount = 0
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        return ScanResolveResponse(candidates: [
+            makeCandidate(id: "dipa", name: "Big DIPA", abv: 8.5, personal: 0.9, index: 0),
+            makeCandidate(id: "lager", name: "Light Lager", abv: 4.2, personal: 0.4, index: 0),
+        ], unresolvedIndices: [], latencyMs: 0.5)
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}

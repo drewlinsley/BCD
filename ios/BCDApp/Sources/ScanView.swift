@@ -6,9 +6,10 @@ import VisionKit
 import AVFoundation
 #endif
 
-// The camera HUD — the whole product thesis in one screen. Live detections become
-// overlays anchored to their bounding boxes, color-coded by predicted enjoyment. A
-// persistent chat bar routes natural-language asks against the items currently in frame.
+// The camera HUD — the whole product thesis in one screen. It is fully live: point the phone at a
+// shelf and detections become overlays anchored to their boxes, color-coded by predicted
+// enjoyment, refreshed on a fixed cadence. No shutter, no freeze, no tap-to-scan. A persistent
+// chat bar applies a natural-language filter ("nothing over 6%") to whatever is currently in frame.
 
 struct ScanView: View {
     @EnvironmentObject var env: AppEnvironment
@@ -21,17 +22,12 @@ struct ScanView: View {
             CameraLayer(engine: model.engine)  // live DataScanner on device; gradient in Sim/host
                 .ignoresSafeArea()
 
-            // Once captured, dim the live feed so the frozen result reads as "analyzed".
-            if model.captured {
-                Color.black.opacity(0.35).ignoresSafeArea().allowsHitTesting(false)
-            }
-
             GeometryReader { geo in
                 ForEach(model.overlays) { overlay in
                     OverlayChip(candidate: overlay.candidate)
                         .position(x: overlay.anchor.x * geo.size.width,
                                   y: overlay.anchor.y * geo.size.height)
-                        .onTapGesture { selected = overlay.candidate }
+                        .onTapGesture { selected = overlay.candidate }  // optional: open the detail receipt
                 }
             }
             // Ease overlays in/out as the fixed-rate loop swaps the set each tick.
@@ -39,8 +35,7 @@ struct ScanView: View {
 
             VStack(spacing: 12) {
                 statusPill
-                if model.captured && !model.overlays.isEmpty { chatBar }
-                shutterRow
+                chatBar
             }
             .padding()
         }
@@ -51,18 +46,16 @@ struct ScanView: View {
         }
     }
 
-    // A one-line status: on-device interpretation, live scanning, or the frozen result.
+    // A one-line status: on-device interpretation, an active filter, or the live scan state.
     @ViewBuilder private var statusPill: some View {
         if model.isInterpreting {
             pill("Reading with Apple Intelligence…", system: "sparkles")
-        } else if model.captured {
+        } else if let f = model.filterText {
             let n = model.overlays.count
-            pill(n == 0 ? "No products found" : "\(n) found"
-                    + (model.lastLatencyMs.map { " · \(Int($0))ms" } ?? ""),
-                 system: n == 0 ? "questionmark.circle" : "checkmark.circle.fill")
+            pill(n == 0 ? "None in view match “\(f)”" : "\(n) match “\(f)”",
+                 system: "line.3.horizontal.decrease.circle")
         } else {
-            // Live, fixed-rate: overlays refresh on their own, so skip the per-tick "Analyzing…"
-            // that would strobe the pill as each tick resolves.
+            // Live, fixed-rate: overlays refresh on their own, so no per-tick "Analyzing…" strobe.
             let n = model.overlays.count
             pill(n == 0 ? "Point at a shelf · scanning live" : "\(n) in view · live",
                  system: "dot.radiowaves.left.and.right")
@@ -76,34 +69,20 @@ struct ScanView: View {
             .background(.ultraThinMaterial, in: Capsule())
     }
 
-    // Live by default; Freeze grabs the current frame for a closer look, Resume returns to the cadence.
-    @ViewBuilder private var shutterRow: some View {
-        if model.captured {
-            Button { model.rescan() } label: {
-                Label("Resume", systemImage: "play.circle")
-                    .font(.headline).foregroundStyle(.white)
-                    .padding(.horizontal, 24).padding(.vertical, 14)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-        } else {
-            Button { model.freeze() } label: {
-                Label("Freeze", systemImage: "camera.fill")
-                    .font(.headline).foregroundStyle(.white)
-                    .padding(.horizontal, 24).padding(.vertical, 14)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-        }
-    }
-
+    // Persistent, always-on. Typing an ask sets a live filter over the in-frame items; clearing it
+    // returns to the full set. No effect on the scan loop itself — the HUD keeps resolving live.
     private var chatBar: some View {
         HStack {
             Image(systemName: "sparkles")
             TextField("cheapest hazy here · nothing over 6%", text: $ask)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
-                .onSubmit { Task { await model.applyAsk(ask) } }
+                .onSubmit { Task { await model.applyFilter(ask) } }
             if !ask.isEmpty {
-                Button { ask = "" } label: {
+                Button {
+                    ask = ""
+                    Task { await model.clearFilter() }
+                } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
             }
@@ -154,9 +133,10 @@ struct OverlayChip: View {
 final class ScanViewModel: ObservableObject {
     @Published var overlays: [HUDOverlay] = []
     @Published var lastLatencyMs: Double?
-    @Published var captured = false
     @Published var isResolving = false
     @Published var isInterpreting = false
+    /// The active natural-language filter (nil = none), mirrored for the status pill.
+    @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
     /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
     @Published private(set) var engine: ScanEngine?
@@ -172,7 +152,7 @@ final class ScanViewModel: ObservableObject {
         let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry,
                                     llm: env.llm)
         self.coordinator = coord
-        // Mirror the coordinator's frozen, box-anchored overlays straight into the view.
+        // Mirror the coordinator's box-anchored overlays straight into the view.
         coord.$overlays
             .map { ovs in
                 ovs.map { HUDOverlay(id: $0.id, candidate: $0.candidate,
@@ -180,27 +160,19 @@ final class ScanViewModel: ObservableObject {
             }
             .assign(to: &$overlays)
         coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
-        coord.$captured.assign(to: &$captured)
         coord.$isResolving.assign(to: &$isResolving)
         coord.$isInterpreting.assign(to: &$isInterpreting)
+        coord.$filterText.assign(to: &$filterText)
     }
 
-    func start() { coordinator?.start() }
-    /// Fixed-rate mode: the viewfinder re-resolves the latest frame on a cadence and swaps
-    /// overlays in place — no tapping, no accumulation.
+    /// Fixed-rate live mode: the viewfinder re-resolves the latest frame on a cadence and swaps
+    /// overlays in place — no tapping, no accumulation. This is the entire scan interaction.
     func startLive() { coordinator?.startLive() }
     func stop() { coordinator?.stop() }
-    func capture() { Task { await coordinator?.capture() } }
-    /// Freeze the current live frame for a closer look (pauses the cadence until `rescan`).
-    func freeze() { Task { await coordinator?.capture() } }
-    func rescan() { coordinator?.rescan() }
 
-    /// Chat-bar rerank: ask the LLM to order the captured products, then re-pin in that order.
-    func applyAsk(_ ask: String) async {
-        guard let env, let coord = coordinator, !ask.isEmpty else { return }
-        let order = (try? await env.llm.rerank(coord.capturedCandidates, for: ask)) ?? []
-        coord.rerank(order: order)
-    }
+    /// Chat-bar filter: parse the ask once and apply it to every live tick.
+    func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }
+    func clearFilter() async { await coordinator?.clearFilter() }
 }
 
 /// Camera layer. On a real device it presents VisionKit's `DataScannerViewController` (live
