@@ -10,6 +10,7 @@ client codes against and what we optimize behind.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
@@ -23,7 +24,6 @@ from bcd_schema import (
     SensoryVector,
     TasteProfile,
 )
-
 
 # A text detection resolves to a product only if its name-match clears this floor. Tuned
 # against the real catalog: real beers (Heineken 1.0, Krombacher 0.69, a "GUINNESS DRAUGHT
@@ -54,6 +54,56 @@ def _is_identity_text(text: str) -> bool:
     if _WORD_RE.search(t):
         return True
     return bool(_LONGNUM_RE.match(t.replace(" ", "")))
+
+
+# Even a line that clears the score floor can be a *coincidental* trigram window rather than a
+# real name hit. OCR mangles the ubiquitous Surgeon-General warning ("...impairs your ability to
+# drive A CAR OR operate machinery") into a fragment like "BACAR OR", which word-similarity-matches
+# "Bacardi" at 0.625 — HIGHER than a legitimately-embedded "GUINNESS DRAUGHT 440ML" line scores
+# (0.56). Measured against the real catalog, no similarity threshold separates the two. What does
+# separate them is token agreement: a genuine match carries an OCR token that *is* a name word
+# ("GUINNESS" == "Guinness"), while the garble only has a truncation ("BACAR" vs "Bacardi" ~ 0.56,
+# "OR" vs "Bacardi" = 0). So a text match must also carry a real name token (>=4 letters) that
+# closely matches some OCR token — otherwise the "brand" is only a coincidental sub-window.
+_TOKEN_SUPPORT_MIN = 0.85
+_MIN_NAME_TOKEN_LEN = 4
+_TOKEN_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)  # runs of >=2 unicode letters
+
+
+def _norm_token(s: str) -> str:
+    """Casefold and strip diacritics so 'Bière' and 'BIERE' compare equal."""
+    decomposed = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _tokens(s: str) -> list[str]:
+    return [_norm_token(t) for t in _TOKEN_RE.findall(s or "")]
+
+
+def _trigrams(token: str) -> set[str]:
+    # pg_trgm-style padding: two leading spaces + one trailing, then 3-grams. Mirrors the
+    # store's similarity() closely enough to calibrate one threshold across both.
+    padded = f"  {token} "
+    return {padded[i:i + 3] for i in range(len(padded) - 2)}
+
+
+def _trigram_sim(a: str, b: str) -> float:
+    ta, tb = _trigrams(a), _trigrams(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _token_supported(query: str, name: str) -> bool:
+    """True if a real name token (>=4 letters) closely matches some OCR token — evidence the
+    brand word is actually present in the line, not a coincidental trigram window. A name with
+    no such token ("J&B", "1664") has nothing to anchor on and defers to the score floors."""
+    name_tokens = [t for t in _tokens(name) if len(t) >= _MIN_NAME_TOKEN_LEN]
+    if not name_tokens:
+        return True
+    q_tokens = _tokens(query)
+    return any(_trigram_sim(nt, qt) >= _TOKEN_SUPPORT_MIN
+               for nt in name_tokens for qt in q_tokens)
 
 
 class Resolver:
@@ -118,16 +168,17 @@ class Resolver:
             elif _is_identity_text(det.text):
                 # Text path only for lines that could name a product; a bare number/fragment
                 # (and a failed barcode's digits) is skipped rather than trigram-matched.
-                matches = self.store.match_products(det.text)
-                # Confidence floor: below it a line is OCR chrome that still trigram-matches
-                # *something* — leave it unresolved rather than show a wrong beer. Short catalog
-                # names need a higher, near-exact floor (see _SHORT_MIN_MATCH).
-                if matches:
-                    rec, sc = matches[0]
-                    floor = (_SHORT_MIN_MATCH
-                             if len((rec.get("name") or "")) < _SHORT_NAME_LEN else _MIN_MATCH)
-                    if sc >= floor:
+                # Take the best candidate that clears BOTH the score floor and token support.
+                # The floor rejects OCR chrome ("12 FL OZ"); token support rejects a coincidental
+                # sub-window (a garbled warning line that outscores the real product) — iterating
+                # rather than checking only matches[0] means such a coincidence is skipped, not
+                # allowed to block a genuine lower-ranked hit. Short names use a near-exact floor.
+                for rec, sc in self.store.match_products(det.text):
+                    name = rec.get("name") or ""
+                    floor = _SHORT_MIN_MATCH if len(name) < _SHORT_NAME_LEN else _MIN_MATCH
+                    if sc >= floor and _token_supported(det.text, name):
                         product_rec, match_score = rec, sc
+                        break
             if product_rec is None:
                 unresolved.append(i)
                 continue
