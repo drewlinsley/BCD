@@ -14,8 +14,10 @@ from typing import Any
 
 import httpx
 from bcd_schema import (
+    SKU,
     Brand,
     Category,
+    ContainerType,
     ExtractionMethod,
     IngredientRole,
     Producer,
@@ -45,7 +47,8 @@ class OpenFoodFactsConnector(Connector):
     source_id = "openfoodfacts"
     provides = ("product", "producer", "sku", "upc", "abv", "ingredients")
 
-    def __init__(self, store, categories: tuple[str, ...] = ("beers", "whiskies", "spirits")) -> None:
+    def __init__(self, store,
+                 categories: tuple[str, ...] = ("beers", "whiskies", "spirits")) -> None:
         super().__init__(store)
         self.categories = categories
 
@@ -148,7 +151,7 @@ class OpenFoodFactsConnector(Connector):
         ]
 
     def promote(self) -> dict[str, int]:
-        n_prod = n_producer = 0
+        n_prod = n_producer = n_sku = 0
         for rec in self.store.iter_silver("off_product"):
             if not rec.get("name"):
                 continue
@@ -192,7 +195,21 @@ class OpenFoodFactsConnector(Connector):
             )
             self.store.put_gold(base, "product", product.model_dump(mode="json"))
             n_prod += 1
-        return {"product": n_prod, "producer": n_producer}
+
+            # Emit the barcode->product SKU so the scan barcode path (`sku:<upc>`) resolves this
+            # product. OFF is a barcode database, so every row carries one — without this the 380+
+            # OFF products are invisible to the most reliable scan path (only the hand-seeded demo
+            # SKUs resolved). Container isn't in OFF's search fields; default to bottle.
+            upc = rec.get("upc")
+            if upc:
+                sku_id = f"sku:{upc}"
+                self.store.put_gold(
+                    sku_id, "sku",
+                    SKU(id=sku_id, product_id=base, container=ContainerType.BOTTLE, upc=upc)
+                    .model_dump(mode="json"),
+                )
+                n_sku += 1
+        return {"product": n_prod, "producer": n_producer, "sku": n_sku}
 
 
 def _ingredients_to_recipe(text: str | None, prov: Provenance) -> RecipeGraph:

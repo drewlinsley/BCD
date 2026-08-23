@@ -106,6 +106,20 @@ def _token_supported(query: str, name: str) -> bool:
                for nt in name_tokens for qt in q_tokens)
 
 
+def _upc_variants(upc: str) -> list[str]:
+    """A barcode's equivalent GTIN forms. A UPC-A (12 digits) and its EAN-13 form differ only by a
+    leading zero and identify the *same* item, but a scanner and the catalog may store different
+    forms — so a lookup tries both. EAN-8 and other lengths are used as-is."""
+    u = (upc or "").strip()
+    out = [u]
+    if u.isdigit():
+        if len(u) == 12:
+            out.append("0" + u)             # UPC-A -> EAN-13
+        elif len(u) == 13 and u.startswith("0"):
+            out.append(u[1:])               # EAN-13 -> UPC-A
+    return list(dict.fromkeys(out))         # de-dup, preserve order
+
+
 class Resolver:
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -113,10 +127,11 @@ class Resolver:
     # Matching is delegated to the store: token-overlap on the SQLite dev store,
     # real pg_trgm trigram similarity on Postgres — same signature either way.
     def _resolve_by_upc(self, upc: str) -> dict | None:
-        sku = self.store.get_gold(f"sku:{upc}")
-        if not sku:
-            return None
-        return self.store.get_gold(sku["product_id"])
+        for key in _upc_variants(upc):
+            sku = self.store.get_gold(f"sku:{key}")
+            if sku:
+                return self.store.get_gold(sku["product_id"])
+        return None
 
     def _hydrate(self, product_rec: dict) -> ResolvedProduct | None:
         producer = self.store.get_gold(product_rec.get("producer_id", ""))

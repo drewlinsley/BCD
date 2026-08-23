@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 
 import pytest
-from bcd_api.resolver import Resolver, _token_supported
+from bcd_api.resolver import Resolver, _token_supported, _upc_variants
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
     SKU,
@@ -54,6 +54,23 @@ def test_resolves_by_barcode(store):
     assert len(resp.candidates) == 1
     assert resp.candidates[0].resolved.product.name == "Heady Topper"
     assert resp.candidates[0].match_score == 1.0
+
+
+def test_resolves_barcode_across_gtin_forms(store):
+    # The fixture seeds the SKU as a 12-digit UPC-A; a scanner returning the 13-digit EAN-13 form
+    # (a leading zero) is the same GTIN and must still resolve the product.
+    r = Resolver(store)
+    req = ScanResolveRequest(detections=[DetectedText(text="0854416001019", kind="barcode")])
+    resp = r.resolve(req)
+    assert resp.candidates and resp.candidates[0].resolved.product.name == "Heady Topper"
+    assert resp.candidates[0].match_score == 1.0
+
+
+def test_upc_variants_covers_gtin_forms():
+    assert "0854416001019" in _upc_variants("854416001019")   # UPC-A -> EAN-13
+    assert "854416001019" in _upc_variants("0854416001019")   # EAN-13 -> UPC-A
+    assert _upc_variants("75032814") == ["75032814"]          # EAN-8 left as-is
+    assert _upc_variants("not-a-barcode") == ["not-a-barcode"]
 
 
 def test_resolves_by_ocr_text(store):
