@@ -120,6 +120,27 @@ def _upc_variants(upc: str) -> list[str]:
     return list(dict.fromkeys(out))         # de-dup, preserve order
 
 
+def _identity_key(name: str, brand: str, pid: str) -> str:
+    """One key per *real* product, so duplicate catalog records collapse into a single overlay.
+
+    The catalog carries the same beer under multiple rows — different UPCs of one product (Lagunitas
+    IPA ×2, Heineken ×7), or an OFF pull plus a TTB record. Keyed on the raw id they'd each draw
+    their own overlay; keyed on normalized brand+name they merge. Brand is part of the key on
+    purpose: OFF often names a product only by its class ("Blended Scotch Whisky" for eight
+    different distilleries), and those must stay distinct — their brands (Johnnie Walker vs Queen
+    Margot) are what separate them. A placeholder "Unknown" brand (or one that just echoes the name)
+    carries no identity, so it drops out and the name alone keys — which is what lets the two
+    Unknown-branded "Lagunitas IPA" rows collapse. A row with no usable name has nothing to
+    canonicalize on and falls back to its id, so unnamed rows never merge into one another."""
+    n = " ".join(_tokens(name))
+    if not n:
+        return f"id:{pid}"
+    b = " ".join(_tokens(brand))
+    if not b or b == "unknown" or b == n:
+        return n
+    return f"{b}\x1f{n}"
+
+
 class Resolver:
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -215,13 +236,21 @@ class Resolver:
                     cold_start=cold,
                 )
             )
-        # Collapse to one overlay per product (strongest match wins) and cap the frame —
-        # the server-side backstop against the crowding the HUD was showing.
+        # Collapse to one overlay per *real* product and cap the frame — the server-side backstop
+        # against the crowding (and the duplicate-catalog-record double overlays) the HUD showed.
+        # Keyed on canonical brand+name, not the raw id, so two rows for the same beer merge; the
+        # strongest match wins, and on a tie the richer record (has ABV / sensory) represents it so
+        # the surviving overlay carries the most complete data.
+        def _rank(c: ScoredCandidate) -> tuple:
+            p = c.resolved.product
+            return (c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory))
+
         best: dict[str, ScoredCandidate] = {}
         for c in candidates:
-            pid = c.resolved.product.id
-            if pid not in best or c.match_score > best[pid].match_score:
-                best[pid] = c
+            key = _identity_key(c.resolved.product.name, c.resolved.brand.name,
+                                c.resolved.product.id)
+            if key not in best or _rank(c) > _rank(best[key]):
+                best[key] = c
         candidates = sorted(
             best.values(), key=lambda c: c.match_score, reverse=True
         )[:_MAX_CANDIDATES]

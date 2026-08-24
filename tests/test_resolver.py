@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 
 import pytest
-from bcd_api.resolver import Resolver, _token_supported, _upc_variants
+from bcd_api.resolver import Resolver, _identity_key, _token_supported, _upc_variants
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
     SKU,
@@ -175,3 +175,74 @@ def test_skips_unsupported_leader_for_supported_runnerup():
     resp = r.resolve(req)
     assert resp.candidates and resp.candidates[0].resolved.product.name == "Guinness Draught"
     assert resp.candidates[0].match_score == 0.55
+
+
+# ---- duplicate-record collapse (one overlay per real product) ----
+
+@pytest.mark.parametrize("a, b", [
+    # Same beer under two UPCs, brand is the "Unknown" placeholder -> name alone must merge them.
+    (("Lagunitas IPA", "Unknown", "off:1"), ("Lagunitas IPA", "Unknown", "off:2")),
+    # Brand just echoes the name (Heineken/Heineken) -> the echo drops out, still merges.
+    (("Heineken", "Heineken", "off:a"), ("Heineken", "Heineken", "off:b")),
+    # Cross-source (a TTB row + an OFF row) with a shared brand+name is the same product.
+    (("Sierra Nevada Pale Ale", "Sierra Nevada", "ttb:1"),
+     ("Sierra Nevada Pale Ale", "Sierra Nevada", "off:9")),
+])
+def test_identity_key_merges_same_beer(a, b):
+    assert _identity_key(*a) == _identity_key(*b)
+
+
+@pytest.mark.parametrize("a, b", [
+    # A generic class name OFF reuses across distilleries -> the distinct brands keep them apart.
+    (("Blended Scotch Whisky", "Johnnie Walker", "off:1"),
+     ("Blended Scotch Whisky", "Queen Margot", "off:2")),
+    # Unnamed rows have nothing to canonicalize on -> id fallback, never merged into each other.
+    (("", "", "off:e1"), ("", "", "off:e2")),
+    # A line extension is a different product, not a duplicate.
+    (("Heineken", "Heineken", "off:a"), ("Heineken Light", "Heineken", "off:b")),
+])
+def test_identity_key_separates_distinct_products(a, b):
+    assert _identity_key(*a) != _identity_key(*b)
+
+
+def _seed_product(store, pid, name, brand_name, upc, brand_id):
+    if store.get_gold("prod:seed") is None:
+        store.put_gold("prod:seed", "producer",
+                       Producer(id="prod:seed", name="Seed Co").model_dump(mode="json"))
+    store.put_gold(brand_id, "brand",
+                   Brand(id=brand_id, producer_id="prod:seed", name=brand_name)
+                   .model_dump(mode="json"))
+    store.put_gold(pid, "product",
+                   Product(id=pid, brand_id=brand_id, producer_id="prod:seed",
+                           category=Category.BEER, name=name).model_dump(mode="json"))
+    store.put_gold(f"sku:{upc}", "sku",
+                   SKU(id=f"sku:{upc}", product_id=pid, container="can", upc=upc)
+                   .model_dump(mode="json"))
+
+
+def test_collapses_duplicate_records_of_same_beer(store):
+    # Two catalog rows for the identical beer (two real UPCs) must draw ONE overlay, not two.
+    _seed_product(store, "off:1", "Lagunitas IPA", "Unknown", "111", "brand:unk")
+    _seed_product(store, "off:2", "Lagunitas IPA", "Unknown", "222", "brand:unk")
+    r = Resolver(store)
+    req = ScanResolveRequest(detections=[
+        DetectedText(text="111", kind="barcode"),
+        DetectedText(text="222", kind="barcode"),
+    ])
+    resp = r.resolve(req)
+    assert len(resp.candidates) == 1
+    assert resp.candidates[0].resolved.product.name == "Lagunitas IPA"
+
+
+def test_does_not_collapse_distinct_products_with_generic_names(store):
+    # Two different scotches OFF named only "Blended Scotch Whisky" stay as two overlays — the
+    # brand is the identity, so the name-only collision must not merge them.
+    _seed_product(store, "off:s1", "Blended Scotch Whisky", "Johnnie Walker", "301", "brand:jw")
+    _seed_product(store, "off:s2", "Blended Scotch Whisky", "Queen Margot", "302", "brand:qm")
+    r = Resolver(store)
+    req = ScanResolveRequest(detections=[
+        DetectedText(text="301", kind="barcode"),
+        DetectedText(text="302", kind="barcode"),
+    ])
+    resp = r.resolve(req)
+    assert len(resp.candidates) == 2
