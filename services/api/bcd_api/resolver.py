@@ -14,6 +14,7 @@ import unicodedata
 
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
+    SENSORY_AXES,
     Brand,
     Producer,
     Product,
@@ -37,6 +38,11 @@ _SHORT_MIN_MATCH = 0.8
 _SHORT_NAME_LEN = 5
 # Cap overlays per frame so a busy shelf can't bury the HUD (the client caps + anchors too).
 _MAX_CANDIDATES = 8
+
+# Score bands for the overlay's one-line 'why'. Above _STRONG_MATCH we claim a match;
+# below _MILD_MATCH we say so plainly rather than dressing up a miss.
+_STRONG_MATCH = 0.8
+_MILD_MATCH = 0.6
 
 # A detection is a *product identity* only if it carries a real word — a run of >=3 letters (a
 # brand or name token). A bare number is label chrome, not a name: "15" off a 15th-anniversary
@@ -200,9 +206,7 @@ class Resolver:
 
         sim = _cosine(sensory.to_array(), profile.sensory_ideal.to_array())
         score = max(0.0, min(1.0, 0.5 + 0.5 * sim))
-        top = _top_axis(sensory)
-        reason = f"matches your {top} preference" if top else "matches your taste profile"
-        return (round(score, 3), reason, cold_start)
+        return (round(score, 3), _match_reason(score, sensory, profile.sensory_ideal), cold_start)
 
     def resolve(self, req: ScanResolveRequest,
                 profile: TasteProfile | None = None) -> ScanResolveResponse:
@@ -274,3 +278,27 @@ def _top_axis(sv: SensoryVector) -> str | None:
     if not sv.axes:
         return None
     return max(sv.axes.items(), key=lambda kv: kv[1])[0].replace("_", " ")
+
+
+def _match_reason(score: float, sensory: SensoryVector, ideal: SensoryVector) -> str:
+    """Explain the score honestly.
+
+    The axis we name is the one that actually drove the agreement — high on the product
+    *and* high in the profile — not the product's loudest note. Naming the loudest note
+    made a poor match still read "matches your smoky peat preference", which is the
+    overlay telling the user something the score itself contradicts.
+    """
+    shared = _agreeing_axis(sensory, ideal)
+    if score >= _STRONG_MATCH:
+        return f"matches your {shared} preference" if shared else "matches your taste profile"
+    if score >= _MILD_MATCH:
+        return f"some {shared}, which you like" if shared else "a partial match"
+    loud = _top_axis(sensory)
+    return f"outside your usual — mostly {loud}" if loud else "outside your usual"
+
+
+def _agreeing_axis(sensory: SensoryVector, ideal: SensoryVector) -> str | None:
+    """The axis contributing most to the match: argmax of product·profile, per axis."""
+    a, b = sensory.to_array(), ideal.to_array()
+    weight, axis = max((a[i] * b[i], SENSORY_AXES[i]) for i in range(len(SENSORY_AXES)))
+    return axis.replace("_", " ") if weight > 0 else None
