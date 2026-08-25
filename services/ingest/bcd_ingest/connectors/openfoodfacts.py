@@ -297,7 +297,11 @@ def _category_of(categories: str) -> Category | None:
 # mistagged with an alcohol category. Deliberately tiny and safe — nothing here collides
 # with a legitimate style (a "Chocolate Stout" or "Coffee Porter" is untouched).
 _NONBEVERAGE_TERMS = ("yaourt", "yogurt", "yoghurt", "vinegar", "vinaigre",
-                      "pasta", "pâtes", "pates")
+                      "pasta", "pâtes", "pates",
+                      # A soft drink OFF double-tagged with a beer category (a "Beers, Sodas"
+                      # Coca-Cola). "sodas"/"soft drink" are OFF's own category tokens, not beer
+                      # styles — a hard seltzer is tagged "flavored malt beverage", not a soda.
+                      "sodas", "soft drink")
 
 
 def _is_nonbeverage(name: str, categories: str) -> bool:
@@ -322,19 +326,33 @@ _BARE_CATEGORY = {
     "gin", "rum", "rhum", "beer", "beers", "ale", "ales", "ipa", "lager", "lagers",
     "pils", "pilsner", "stout", "porter", "vodka", "whisky", "whiskey", "wine", "cider",
     "eau", "spirit", "spirits", "liqueur", "mini", "biere", "bière", "cerveza", "birra",
+    # Spirit classes OFF also drops in bare — a product named just "Tequila" is no more a
+    # product than one named "Gin", and trigram-matches any stray "tequila" OCR.
+    "tequila", "tequilas", "mezcal", "bourbon", "scotch", "brandy", "cognac", "sake",
+    "ouzo", "grappa", "absinthe", "schnapps", "sherry", "vermouth", "mead", "soju", "shochu",
 }
+
+
+def _has_latin(s: str) -> bool:
+    """Whether a string carries any A–Z letter — the alphabet the HUD renders and OCR emits."""
+    return bool(re.search(r"[A-Za-z]", s or ""))
 
 
 def _is_weak_name(name: str) -> bool:
     """A product_name too thin to stand on its own: a 1-3 digit number ("15", "40"), a bare
-    category word ("Gin", "Pils"), or a tiny all-lowercase fragment ("fen"). A 4-digit number
-    ("1664") or a self-identifying short brand ("J&B", "OB") is *not* weak — those are real."""
+    category word ("Gin", "Pils", "Tequila"), a name with no Latin letters at all (a Cyrillic /
+    Hebrew / Arabic foreign-market entry like "Виски … Джемесон" or "הוגרדן פחית", which can't
+    render in the HUD or trigram-match Latin OCR), or a tiny all-lowercase fragment ("fen"). A
+    4-digit number ("1664") or a self-identifying short brand ("J&B", "OB") is *not* weak."""
     n = (name or "").strip()
     if not n:
         return True
     if re.fullmatch(r"[0-9]{1,3}", n):
         return True
     if n.lower() in _BARE_CATEGORY:
+        return True
+    if not _has_latin(n) and not n.isdigit():
+        # No Latin letters and not a pure number ("1664" stays real via the 4-digit rule below).
         return True
     return len(n) <= 3 and n.isalpha() and n.islower()
 
@@ -352,8 +370,11 @@ def _display_name(product_name: str | None, brand: str | None) -> str | None:
         # Brand can't rescue it — keep a combo only if it turns out non-weak (rare), else drop.
         combo = f"{brand} {pn}".strip() if (brand and pn) else (brand or pn).strip()
         return combo if (combo and not _is_weak_name(combo)) else None
-    # Strong brand + weak qualifier: append the qualifier when it adds anything the brand lacks.
-    if pn and pn.lower() not in brand.lower():
+    # Strong brand + weak qualifier: append the qualifier only when it's pure ASCII — a readable
+    # age/proof ("Glenfiddich" + "15") or style ("Hendrick's" + "Gin") the HUD can show — and it
+    # adds something the brand lacks. A non-Latin fragment ("Бира 5%") is dropped rather than
+    # mixed into a "Stella Artois Бира 5%" label; there the Latin brand stands alone.
+    if pn and pn.isascii() and pn.lower() not in brand.lower():
         return f"{brand} {pn}"
     return brand
 
