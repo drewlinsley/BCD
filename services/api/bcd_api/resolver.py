@@ -120,6 +120,18 @@ def _upc_variants(upc: str) -> list[str]:
     return list(dict.fromkeys(out))         # de-dup, preserve order
 
 
+_KEY_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_key(s: str) -> str:
+    """Lowercase, strip accents, keep alphanumerics — digits included. Unlike `_tokens` (which
+    keeps only letters, for word matching), the identity key must preserve numbers: "0.0%", "12
+    ans", "Select 55" are real product distinctions, not noise. "Jupiler 0,0%" -> "jupiler 0 0"."""
+    decomposed = unicodedata.normalize("NFKD", s or "")
+    ascii_ = "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+    return _KEY_STRIP_RE.sub(" ", ascii_).strip()
+
+
 def _identity_key(name: str, brand: str, pid: str) -> str:
     """One key per *real* product, so duplicate catalog records collapse into a single overlay.
 
@@ -130,12 +142,13 @@ def _identity_key(name: str, brand: str, pid: str) -> str:
     different distilleries), and those must stay distinct — their brands (Johnnie Walker vs Queen
     Margot) are what separate them. A placeholder "Unknown" brand (or one that just echoes the name)
     carries no identity, so it drops out and the name alone keys — which is what lets the two
-    Unknown-branded "Lagunitas IPA" rows collapse. A row with no usable name has nothing to
-    canonicalize on and falls back to its id, so unnamed rows never merge into one another."""
-    n = " ".join(_tokens(name))
+    Unknown-branded "Lagunitas IPA" rows collapse. Digits are kept, so an alcohol-free "0.0%" or an
+    age-stated "12 ans" stays a distinct product from its sibling. A row with no alphanumeric name
+    falls back to its id, so unnamed (e.g. non-Latin) rows never merge into one another."""
+    n = _norm_key(name)
     if not n:
         return f"id:{pid}"
-    b = " ".join(_tokens(brand))
+    b = _norm_key(brand)
     if not b or b == "unknown" or b == n:
         return n
     return f"{b}\x1f{n}"

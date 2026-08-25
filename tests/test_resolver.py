@@ -187,6 +187,10 @@ def test_skips_unsupported_leader_for_supported_runnerup():
     # Cross-source (a TTB row + an OFF row) with a shared brand+name is the same product.
     (("Sierra Nevada Pale Ale", "Sierra Nevada", "ttb:1"),
      ("Sierra Nevada Pale Ale", "Sierra Nevada", "off:9")),
+    # A digit-only name is a real identity (Kronenbourg 1664); the two rows are one beer.
+    (("1664", "1664", "off:a"), ("1664", "1664", "off:b")),
+    # Case / punctuation / accents don't distinguish a product.
+    (("BUD LIGHT", "Bud Light", "off:a"), ("Bud light", "Unknown", "off:b")),
 ])
 def test_identity_key_merges_same_beer(a, b):
     assert _identity_key(*a) == _identity_key(*b)
@@ -200,6 +204,12 @@ def test_identity_key_merges_same_beer(a, b):
     (("", "", "off:e1"), ("", "", "off:e2")),
     # A line extension is a different product, not a duplicate.
     (("Heineken", "Heineken", "off:a"), ("Heineken Light", "Heineken", "off:b")),
+    # Alcohol-free variants are NOT the same product as the full-strength sibling — the digit in
+    # "0.0%" must survive normalization (it's dropped if the key runs through word-only _tokens).
+    (("Jupiler", "Jupiler", "off:a"), ("Jupiler 0,0%", "Jupiler", "off:b")),
+    (("Carlsberg", "Carlsberg", "off:a"), ("Carlsberg 0%", "Carlsberg", "off:b")),
+    # Different age statements are different whiskies.
+    (("Aberlour 10 ans", "Aberlour", "off:a"), ("Aberlour 12 ans", "Aberlour", "off:b")),
 ])
 def test_identity_key_separates_distinct_products(a, b):
     assert _identity_key(*a) != _identity_key(*b)
