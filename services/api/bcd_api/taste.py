@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from bcd_ingest.merge import get_product, resolve_id
 from bcd_schema import (
     SENSORY_AXES,
     Product,
@@ -117,7 +118,7 @@ def build_profile(
     liked_styles: list[str] = []
 
     for pid, weight in signals.items():
-        rec = store.get_gold(pid)
+        rec = get_product(store, pid)   # follows merge tombstones
         if not rec:
             continue
         try:
@@ -256,6 +257,26 @@ def save_profile(store: Any, profile: TasteProfile) -> None:
     )
 
 
+def _canonical(store: Any, events: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    """Rewrite each event's product_id to the id that still holds the product.
+
+    Dedup merges rows away, and a rating pointing at a merged id would otherwise be dropped
+    on rebuild — the user's signal silently disappearing because the catalog was tidied.
+    Done BEFORE signal extraction so "a later rating supersedes an earlier one" keeps
+    holding across a merge: rate row A, we merge A into B, rate B — that is one product with
+    one verdict, not two. Events are copied, never mutated; the log stays what was recorded.
+    """
+    cache: dict[str, str] = {}
+    for ev in events:
+        pid = ev.get("product_id")
+        if pid:
+            if pid not in cache:
+                cache[pid] = resolve_id(store, pid)
+            if cache[pid] != pid:
+                ev = {**ev, "product_id": cache[pid]}
+        yield ev
+
+
 def rebuild_profile(
     store: Any, events: Iterable[dict[str, Any]], install_id: str
 ) -> TasteProfile:
@@ -263,7 +284,7 @@ def rebuild_profile(
     nudging the stored vector) keeps the profile a pure function of consented events —
     so a withdrawn consent or a deleted event actually disappears from the result."""
     previous = load_profile(store, install_id)
-    signals = signals_from_events(events, install_id)
+    signals = signals_from_events(_canonical(store, events), install_id)
     profile = build_profile(install_id, signals, store, previous=previous)
     save_profile(store, profile)
     return profile
