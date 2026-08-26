@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -32,6 +33,7 @@ from bcd_schema import (
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..base import Connector
+from ..dedup import is_generic_name
 from ..store import BronzeDoc, doc_id
 
 # v2 search API — the legacy cgi/search.pl is deprecated and frequently 503s.
@@ -357,6 +359,25 @@ def _is_weak_name(name: str) -> bool:
     return len(n) <= 3 and n.isalpha() and n.islower()
 
 
+def _qualify(pn: str, brand: str) -> str:
+    """Anchor a generic-but-not-weak name on its brand.
+
+    `_is_weak_name` only catches a name that is exactly one category word, so multi-word
+    class names ("Blended Canadian Whiskey", "Rhum blanc agricole") sail through and stand
+    alone — and eight different distilleries then all show up as "Blended Scotch Whisky".
+    Prefixing the brand keeps every row truthful and tells them apart.
+    """
+    if not brand or _is_weak_name(brand) or not is_generic_name(pn):
+        return pn
+    if _brand_tokens(brand) <= _brand_tokens(pn):
+        return pn  # brand already stated in the name
+    return f"{brand} {pn}"
+
+
+def _brand_tokens(s: str) -> set[str]:
+    return set(re.findall(r"[^\W\d_]{2,}", unicodedata.normalize("NFKD", s or "").casefold()))
+
+
 def _display_name(product_name: str | None, brand: str | None) -> str | None:
     """Best display name for an OFF row, or None when nothing usable remains. A strong
     product_name stands as-is; a weak one is anchored on the brand OFF also carries
@@ -365,7 +386,7 @@ def _display_name(product_name: str | None, brand: str | None) -> str | None:
     pn = (product_name or "").strip()
     brand = (brand or "").strip()
     if not _is_weak_name(pn):
-        return pn
+        return _qualify(pn, brand)
     if not brand or _is_weak_name(brand):
         # Brand can't rescue it — keep a combo only if it turns out non-weak (rare), else drop.
         combo = f"{brand} {pn}".strip() if (brand and pn) else (brand or pn).strip()

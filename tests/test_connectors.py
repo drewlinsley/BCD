@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from bcd_ingest.connectors.openfoodfacts import (
     OpenFoodFactsConnector,
     _is_nonbeverage,
@@ -89,3 +90,27 @@ def test_off_soda_double_tagged_as_beer_is_nonbeverage():
     assert _is_nonbeverage("كوكا ميني", "Beers, Sodas")
     assert _is_nonbeverage("Fizzy Orange", "Soft drink")
     assert not _is_nonbeverage("Chocolate Stout", "Beers, Stouts")
+
+
+# ---- generic names get anchored on their brand ---------------------------------------
+
+@pytest.mark.parametrize("pn, brand, expected", [
+    # multi-word category names: many producers sell each, so they must be told apart
+    ("Blended Canadian Whiskey", "Crown Royal", "Crown Royal Blended Canadian Whiskey"),
+    ("Rhum blanc agricole", "HSE", "HSE Rhum blanc agricole"),
+    ("London Dry Gin", "Beefeater", "Beefeater London Dry Gin"),
+    ("Bière Blonde", "Lidl", "Lidl Bière Blonde"),
+    # a real product name is left alone, even when it contains category words
+    ("Punk IPA", "BrewDog", "Punk IPA"),
+    ("London Pride", "Fuller's", "London Pride"),
+    ("Lagunitas IPA", "Lagunitas", "Lagunitas IPA"),
+    # brand already stated in the name -> no stutter
+    ("Cerveza Heineken", "Heineken", "Cerveza Heineken"),
+])
+def test_generic_names_are_brand_qualified(pn, brand, expected):
+    assert _off_name(pn, brand) == expected
+
+
+def test_generic_name_without_a_brand_is_left_as_is():
+    # Nothing to anchor on; the row still exists, it just stays generic.
+    assert _off_name("Blended Scotch Whisky", "") == "Blended Scotch Whisky"

@@ -25,18 +25,33 @@ survives (by provenance/richness) and repoints SKUs.
 """
 from __future__ import annotations
 
+import difflib
 import re
 import unicodedata
+from collections import defaultdict
 from collections.abc import Iterable
 
 _WORD = re.compile(r"[^\W\d_]{2,}", re.UNICODE)  # runs of >=2 letters; digits are not tokens
+_DIGITS = re.compile(r"\d+")
+
+# Two brand strings this close are the same brand mistyped or punctuated differently
+# ("William Lawson's"/"william lawsons", "Leinenkugel's"/"Leinenliugels"). Measured on the
+# real catalog the gap is wide: true variants score 0.83-0.96, while genuinely different
+# brands that share a product name (Hoepfner/Gösser) top out at 0.43.
+_BRAND_SIM = 0.80
+
+# Age statements written in different languages. The only words allowed to be present on
+# one side and absent on the other: "Lagavulin 16 ans" is "Lagavulin 16 Year Old".
+_AGE_EQUIV = {"ans", "ano", "anos", "año", "años", "anni", "jahre", "jahren",
+              "year", "years", "yr", "yrs", "old", "aged"}
 
 # Style, varietal, packaging and stop words — shared alone they carry no product identity.
 _STYLE = {
     "the", "and", "of", "for", "with", "by", "co", "cie", "vol", "abv", "cl", "ml", "oz",
     "beer", "beers", "bier", "biere", "bière", "cerveza", "cerveja", "birra", "pivo",
     "ale", "ales", "ipa", "apa", "lager", "lagers", "pils", "pilsner", "pilsener", "stout",
-    "porter", "wheat", "weizen", "weiss", "weisse", "hefeweizen", "witbier", "wit", "blanche",
+    "porter", "wheat", "weizen", "weiss", "weisse", "hefeweizen", "witbier", "wit",
+    "blanche", "blanc",
     "saison", "tripel", "dubbel", "abbaye", "abbey", "trappist", "kolsch", "kölsch", "helles",
     "dunkel", "bock", "radler", "shandy", "seltzer", "gose", "lambic", "kriek", "amber",
     "blonde", "blond", "brune", "brown", "red", "rouge", "pale", "dark", "gold", "golden",
@@ -48,6 +63,11 @@ _STYLE = {
     "year", "old", "aged", "anos", "años", "ans", "tequila", "mezcal", "brandy", "cognac",
     "liqueur", "spiced", "coconut", "flavour", "flavored", "natural", "organic", "style",
     "new", "belgisch", "belgian", "german", "spirit", "spirits", "wine", "cider", "unknown",
+    # regional/varietal category words: "Rhum blanc agricole" and "Blended Canadian
+    # Whiskey" name a category that many distinct producers all sell.
+    "agricole", "canadian", "japanese", "american", "mexican", "caribbean", "highland",
+    "speyside", "islay", "anejo", "añejo", "reposado", "blanco", "silver", "ecosse",
+    "vsop", "cerveses", "ouzo", "sake", "soju", "london",
 }
 
 
@@ -55,6 +75,12 @@ def _tokens(s: str) -> set[str]:
     d = unicodedata.normalize("NFKD", s or "")
     a = "".join(c for c in d if not unicodedata.combining(c)).casefold()
     return set(_WORD.findall(a))
+
+
+def _digits(s: str) -> frozenset[str]:
+    """Digit runs in a name. These carry identity — an age statement, an ABV, a batch —
+    so 8 vs 16 is a different bottle even when every word matches."""
+    return frozenset(_DIGITS.findall(s or ""))
 
 
 def _prep(p: dict) -> dict:
@@ -65,15 +91,40 @@ def _prep(p: dict) -> dict:
     # real match nor stands in for one.
     ident = set() if (not bt or bt <= {"unknown"} or bt <= nt) else bt
     return {
-        "id": p["id"], "src": p["id"].split(":", 1)[0],
+        "id": p["id"], "src": p["id"].split(":", 1)[0], "dig": _digits(p.get("name", "")),
         "name": p.get("name", ""), "brand": p.get("brand", ""),
-        "nt": nt, "full": nt | bt, "brand_ident": ident,
+        "nt": nt, "bt": bt, "full": nt | bt, "brand_ident": ident,
     }
 
 
 def _brand_compatible(a: dict, b: dict) -> bool:
-    return (not a["brand_ident"] or not b["brand_ident"]
-            or a["brand_ident"] <= b["full"] or b["brand_ident"] <= a["full"])
+    if (not a["brand_ident"] or not b["brand_ident"]
+            or a["brand_ident"] <= b["full"] or b["brand_ident"] <= a["full"]):
+        return True
+    # ...or the same brand spelled differently. Compared as one string so word order
+    # and a lost apostrophe do not read as two different companies.
+    x, y = ("".join(sorted(v["brand_ident"])) for v in (a, b))
+    return difflib.SequenceMatcher(None, x, y).ratio() >= _BRAND_SIM
+
+
+def _covered(sub: dict, sup: dict) -> bool:
+    """Is the alias name a less specific writing of the canonical's?
+
+    Every identity-bearing token must appear in the canonical. Style/stop words on the
+    alias side may be absent, which is what lets "Lagavulin 16 ans" reach "Lagavulin 16
+    Year Old Single Malt Scotch Whisky" — the same bottle labelled in two languages,
+    where requiring the French "ans" to appear in the English name blocks it forever.
+    """
+    if sub["nt"] <= sup["full"]:
+        return True
+    # Only an age/time word may go uncovered. Allowing any style word to vanish lets a
+    # product collapse to its brand: "Sierra Nevada Pale Ale" would reach the unrelated
+    # "Juicy Little Thing Hazy IPA" (same brewery), and "Bavarian Hefeweizen" would reach
+    # "Bavarian Amber Lager". Style is identity when style is the difference.
+    uncovered = sub["nt"] - sup["full"]
+    if not uncovered <= _AGE_EQUIV:
+        return False
+    return bool((sub["nt"] - uncovered) - _STYLE)
 
 
 def find_substring_merges(products: Iterable[dict],
@@ -93,8 +144,10 @@ def find_substring_merges(products: Iterable[dict],
                 continue  # canonical must have a strictly more specific name
             if cross_source_only and sub["src"] == sup["src"]:
                 continue
-            if not sub["nt"] <= sup["full"]:
+            if not _covered(sub, sup):
                 continue
+            if sub["dig"] != sup["dig"]:
+                continue  # different age/ABV/batch -> different bottle
             if not _brand_compatible(sub, sup):
                 continue
             if not (sub["full"] & sup["full"]) - _STYLE:
@@ -103,3 +156,81 @@ def find_substring_merges(products: Iterable[dict],
         if len(cands) == 1:  # a unique canonical; 2+ is ambiguous -> leave alone
             out.append((sub["id"], cands[0]["id"]))
     return out
+
+
+def _richness(p: dict) -> tuple:
+    """Which row of a duplicate cluster should survive.
+
+    A brand echoing its own product name ("Coors" on "Coors Light") is the most reliable
+    signal we have; preferring merely *having* a brand instead would let a mis-scraped one
+    win, which is how "Coors Light" ends up filed under the jerky brand OLD TRAPPER.
+    Failing that, take a real brand over a placeholder, then the fuller name. Ties break on
+    id so the choice is stable across runs."""
+    echoes = bool(p["bt"] & p["nt"])
+    real = bool(p["bt"]) and p["bt"] != {"unknown"}
+    return (echoes, real, len(p["name"]), p["id"])
+
+
+def find_duplicate_merges(products: Iterable[dict],
+                          cross_source_only: bool = False) -> list[tuple[str, str]]:
+    """Find rows that are the SAME product written differently — word order, punctuation,
+    accents, case: "Cerveza Heineken"/"Heineken Cerveza", "Fernet Branca"/"Fernet-Branca".
+
+    Containment can't reach these (neither name is more specific than the other), so they
+    survived the substring pass and show up as twins in a recommendation list.
+
+    Identical name tokens are NOT sufficient on their own. Hoepfner and Gösser both sell a
+    "Natur Radler" and they are different beers, so a compatible brand is required too —
+    the same gate that lets a bare "Unknown" or a brand that merely echoes the name merge
+    freely. Digits must match for the reason they always do here: age and ABV are identity.
+    """
+    ps = [_prep(p) for p in products]
+    buckets: dict[tuple, list[dict]] = defaultdict(list)
+    for p in ps:
+        if p["nt"]:
+            buckets[(frozenset(p["nt"]), p["dig"])].append(p)
+
+    out: list[tuple[str, str]] = []
+    for group in buckets.values():
+        if len(group) < 2:
+            continue
+        # Grow clusters only where a row is compatible with EVERY existing member, so one
+        # permissive row (brand "Unknown") cannot chain two rival brands together.
+        # A name made only of style/category words ("Irish Whiskey", "Rhum blanc agricole")
+        # names a class, not a product — two such rows are the same thing only if BOTH
+        # carry a real, matching brand. Without this, every brand-less row gets adopted by
+        # whichever same-named row happens to have a brand, which is a guess, not a merge.
+        generic = not (group[0]["nt"] - _STYLE)
+
+        def compatible(p: dict, q: dict, generic: bool = generic) -> bool:
+            if generic and not (p["brand_ident"] and q["brand_ident"]):
+                return False
+            return _brand_compatible(p, q)
+
+        clusters: list[list[dict]] = []
+        for p in sorted(group, key=_richness, reverse=True):
+            for c in clusters:
+                if all(compatible(p, q) for q in c):
+                    c.append(p)
+                    break
+            else:
+                clusters.append([p])
+        for c in clusters:
+            if len(c) < 2:
+                continue
+            if cross_source_only and len({m["src"] for m in c}) == 1:
+                continue
+            canon = max(c, key=_richness)
+            out.extend((m["id"], canon["id"]) for m in c if m["id"] != canon["id"])
+    return out
+
+
+def is_generic_name(name: str) -> bool:
+    """Whether a name is built entirely from category/style words and so identifies a class
+    rather than a product ("Blended Canadian Whiskey", "Rhum blanc agricole", "London Dry
+    Gin"). Many unrelated producers sell each of these, so such a name has to be anchored on
+    its brand before it can be shown — otherwise the catalog reads as full of duplicates
+    that are not duplicates. Shared with the connectors so "carries no identity" means one
+    thing across ingest and resolution."""
+    toks = _tokens(name)
+    return bool(toks) and not (toks - _STYLE)

@@ -5,7 +5,7 @@ containments, the rest coincidental style-word overlaps that must NOT merge.
 """
 from __future__ import annotations
 
-from bcd_ingest.dedup import find_substring_merges
+from bcd_ingest.dedup import find_duplicate_merges, find_substring_merges
 
 # The real cross-source neighbourhood: two true dupes + the Lagavulin/Buffalo-Trace style-word
 # fan-in + the demo-IPA false hits.
@@ -72,3 +72,93 @@ def test_cross_source_only_flag():
     ]
     assert find_substring_merges(cat, cross_source_only=True) == []
     assert find_substring_merges(cat, cross_source_only=False) == [("off:a", "off:b")]
+
+
+# ---- equivalence pass: same product, written differently ------------------------------
+# Real rows from the OFF catalog. The traps are deliberate: identical names that are NOT the
+# same beer, and generic names shared by rival producers.
+EQUIV = [
+    {"id": "off:hein-a", "name": "Heineken Cerveza", "brand": "Heineken"},
+    {"id": "off:hein-b", "name": "Cerveza Heineken", "brand": "Heineken"},
+    # same name, genuinely different breweries -> must stay apart
+    {"id": "off:radler-a", "name": "Natur Radler", "brand": "Hoepfner"},
+    {"id": "off:radler-b", "name": "Natur Radler", "brand": "Gösser"},
+    # bare category + a brand-less row: adopting it would be a guess
+    {"id": "off:irish-a", "name": "Irish whiskey", "brand": "Unknown"},
+    {"id": "off:irish-b", "name": "Irish Whiskey", "brand": "Bushmills"},
+    # bare category, but both carry the same brand punctuated differently -> a real dupe
+    {"id": "off:lawson-a", "name": "Blended Scotch Whisky", "brand": "William Lawson's"},
+    {"id": "off:lawson-b", "name": "blended scotch whisky", "brand": "william lawsons"},
+    # rival producers of the same rhum category
+    {"id": "off:rhum-a", "name": "Rhum blanc agricole", "brand": "Rhum J.M"},
+    {"id": "off:rhum-b", "name": "Rhum blanc agricole", "brand": "HSE"},
+    # a mis-scraped brand must not win the survivor slot
+    {"id": "off:coors-a", "name": "Coors Light", "brand": "Coors"},
+    {"id": "off:coors-b", "name": "Coors Light", "brand": "OLD TRAPPER"},
+]
+
+
+def _pairs(catalog=EQUIV):
+    return set(find_duplicate_merges(catalog))
+
+
+def test_merges_word_order_variants():
+    assert ("off:hein-a", "off:hein-b") in _pairs() or ("off:hein-b", "off:hein-a") in _pairs()
+
+
+def test_same_name_different_brewery_is_not_a_duplicate():
+    """Hoepfner and Gösser both sell a "Natur Radler" and they are different beers."""
+    merged = {a for a, _ in _pairs()} | {c for _, c in _pairs()}
+    assert "off:radler-a" not in merged
+    assert "off:radler-b" not in merged
+
+
+def test_bare_category_name_does_not_adopt_a_brandless_row():
+    """"Irish Whiskey" names a class; the unbranded row could be anyone's."""
+    assert not {p for p in _pairs() if "irish" in p[0]}
+
+
+def test_bare_category_merges_when_both_brands_are_the_same():
+    assert ("off:lawson-a", "off:lawson-b") in _pairs() or \
+           ("off:lawson-b", "off:lawson-a") in _pairs()
+
+
+def test_rival_producers_of_a_category_stay_apart():
+    assert not {p for p in _pairs() if "rhum" in p[0]}
+
+
+def test_survivor_is_the_row_whose_brand_matches_its_name():
+    """Preferring merely *having* a brand files Coors Light under a jerky company."""
+    coors = [p for p in _pairs() if "coors" in p[0]]
+    assert coors == [("off:coors-b", "off:coors-a")]
+
+
+# ---- containment: the relaxation must not let a product collapse to its brand ---------
+
+def test_age_statement_in_another_language_still_merges():
+    cat = [
+        {"id": "off:lag", "name": "Lagavulin 16 ans", "brand": "Isle of Islay"},
+        {"id": "ttb:lag", "name": "Lagavulin 16 Year Old Single Malt Scotch Whisky",
+         "brand": "Lagavulin"},
+    ]
+    assert set(find_substring_merges(cat)) == {("off:lag", "ttb:lag")}
+
+
+def test_different_age_statements_are_different_bottles():
+    cat = [
+        {"id": "off:lag8", "name": "Lagavulin 8", "brand": "Lagavulin"},
+        {"id": "ttb:lag16", "name": "Lagavulin 16 Year Old Single Malt Scotch", "brand": "Lagavulin"},
+    ]
+    assert find_substring_merges(cat) == []
+
+
+def test_style_words_are_identity_not_noise():
+    """Both traps the relaxation originally fell into: a product must not reduce to the
+    brand/region word it shares with an unrelated sibling."""
+    cat = [
+        {"id": "ttb:snpale", "name": "Sierra Nevada Pale Ale", "brand": "Sierra Nevada"},
+        {"id": "off:juicy", "name": "Juicy Little Thing Hazy IPA", "brand": "Sierra Nevada"},
+        {"id": "bcd-demo:bavhefe", "name": "Bavarian Hefeweizen", "brand": "Bavarian Hefeweizen"},
+        {"id": "off:bavamber", "name": "Bavarian Amber Lager", "brand": "Red Oak"},
+    ]
+    assert find_substring_merges(cat) == []
