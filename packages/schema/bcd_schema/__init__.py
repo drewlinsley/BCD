@@ -5,6 +5,8 @@ Import from here; submodule layout may change but this surface is stable.
 
 from .api import (
     DetectedText,
+    FeedbackRequest,
+    FeedbackResponse,
     ProductSearchResponse,
     ScanResolveRequest,
     ScanResolveResponse,
@@ -58,6 +60,8 @@ __all__ = [
     "Category",
     "ContainerType",
     "DetectedText",
+    "FeedbackRequest",
+    "FeedbackResponse",
     "ExtractionMethod",
     "GenericIngredient",
     "Hop",

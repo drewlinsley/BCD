@@ -51,7 +51,9 @@ data/registry/        90 machine-readable source definitions + JSON schema + val
 packages/schema/      pydantic canonical model — the single source of truth (Provenance, RecipeGraph, SensoryVector)
 packages/crawler/     robots-aware fetcher + policy module + append-only evidence log
 services/ingest/      medallion store + connectors (openbrewerydb, ttb_cola, openfoodfacts)
-services/api/         FastAPI: /v1/scan/resolve, /v1/product/search, /v1/recommend, /v1/telemetry
+services/api/         FastAPI: /v1/scan/resolve, /v1/product/search, /v1/recommend,
+                      /v1/feedback, /v1/profile, /v1/telemetry
+services/api/taste.py behavior→TasteProfile (Rocchio centroid; consent-gated)
 services/enrich/      chemistry→sensory (the cold-start scorer)
 services/sentinel/    Parallel Monitor + FindAll orchestration
 services/telemetry/   own-collector event ingest

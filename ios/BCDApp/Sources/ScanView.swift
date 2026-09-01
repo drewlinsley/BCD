@@ -1,13 +1,15 @@
 import SwiftUI
+import Combine
 import BCDKit
 #if canImport(VisionKit) && os(iOS)
 import VisionKit
 import AVFoundation
 #endif
 
-// The camera HUD — the whole product thesis in one screen. Live detections become
-// overlays anchored to their bounding boxes, color-coded by predicted enjoyment. A
-// persistent chat bar routes natural-language asks against the items currently in frame.
+// The camera HUD — the whole product thesis in one screen. It is fully live: point the phone at a
+// shelf and detections become overlays anchored to their boxes, color-coded by predicted
+// enjoyment, refreshed on a fixed cadence. No shutter, no freeze, no tap-to-scan. A persistent
+// chat bar applies a natural-language filter ("nothing over 6%") to whatever is currently in frame.
 
 struct ScanView: View {
     @EnvironmentObject var env: AppEnvironment
@@ -25,37 +27,62 @@ struct ScanView: View {
                     OverlayChip(candidate: overlay.candidate)
                         .position(x: overlay.anchor.x * geo.size.width,
                                   y: overlay.anchor.y * geo.size.height)
-                        .onTapGesture { selected = overlay.candidate }
+                        .onTapGesture { selected = overlay.candidate }  // optional: open the detail receipt
                 }
             }
+            // Ease overlays in/out as the fixed-rate loop swaps the set each tick.
+            .animation(.easeInOut(duration: 0.2), value: model.overlays.count)
 
-            VStack(spacing: 8) {
-                if let latency = model.lastLatencyMs {
-                    Text("\(model.overlays.count) in view · \(Int(latency))ms")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
+            VStack(spacing: 12) {
+                statusPill
                 chatBar
             }
             .padding()
         }
-        .task { model.configure(env: env); model.start() }
+        .task { model.configure(env: env); model.startLive() }
         .onDisappear { model.stop() }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
         }
     }
 
+    // A one-line status: on-device interpretation, an active filter, or the live scan state.
+    @ViewBuilder private var statusPill: some View {
+        if model.isInterpreting {
+            pill("Reading with Apple Intelligence…", system: "sparkles")
+        } else if let f = model.filterText {
+            let n = model.overlays.count
+            pill(n == 0 ? "None in view match “\(f)”" : "\(n) match “\(f)”",
+                 system: "line.3.horizontal.decrease.circle")
+        } else {
+            // Live, fixed-rate: overlays refresh on their own, so no per-tick "Analyzing…" strobe.
+            let n = model.overlays.count
+            pill(n == 0 ? "Point at a shelf · scanning live" : "\(n) in view · live",
+                 system: "dot.radiowaves.left.and.right")
+        }
+    }
+
+    private func pill(_ text: String, system: String) -> some View {
+        Label(text, systemImage: system)
+            .font(.caption).foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    // Persistent, always-on. Typing an ask sets a live filter over the in-frame items; clearing it
+    // returns to the full set. No effect on the scan loop itself — the HUD keeps resolving live.
     private var chatBar: some View {
         HStack {
             Image(systemName: "sparkles")
             TextField("cheapest hazy here · nothing over 6%", text: $ask)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
-                .onSubmit { Task { await model.applyAsk(ask) } }
+                .onSubmit { Task { await model.applyFilter(ask) } }
             if !ask.isEmpty {
-                Button { ask = ""; Task { await model.applyAsk("") } } label: {
+                Button {
+                    ask = ""
+                    Task { await model.clearFilter() }
+                } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
             }
@@ -106,53 +133,46 @@ struct OverlayChip: View {
 final class ScanViewModel: ObservableObject {
     @Published var overlays: [HUDOverlay] = []
     @Published var lastLatencyMs: Double?
+    @Published var isResolving = false
+    @Published var isInterpreting = false
+    /// The active natural-language filter (nil = none), mirrored for the status pill.
+    @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
     /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
     @Published private(set) var engine: ScanEngine?
 
     private var coordinator: ScanCoordinator?
     private var env: AppEnvironment?
-    private var lastDetections: [String: CGPoint] = [:]
 
     func configure(env: AppEnvironment) {
         guard coordinator == nil else { return }
         self.env = env
         let engine = env.makeScanEngine()
         self.engine = engine
-        let coord = ScanCoordinator(engine: engine, api: env.api,
-                                    telemetry: env.telemetry)
+        let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry,
+                                    llm: env.llm)
         self.coordinator = coord
-        // Re-render overlays whenever the coordinator publishes new candidates.
-        Task { [weak self] in
-            guard let self else { return }
-            for await _ in coord.$candidates.values {
-                self.rebuildOverlays(from: coord.candidates)
-                self.lastLatencyMs = coord.lastLatencyMs
+        // Mirror the coordinator's box-anchored overlays straight into the view.
+        coord.$overlays
+            .map { ovs in
+                ovs.map { HUDOverlay(id: $0.id, candidate: $0.candidate,
+                                     anchor: CGPoint(x: $0.x, y: $0.y)) }
             }
-        }
+            .assign(to: &$overlays)
+        coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
+        coord.$isResolving.assign(to: &$isResolving)
+        coord.$isInterpreting.assign(to: &$isInterpreting)
+        coord.$filterText.assign(to: &$filterText)
     }
 
-    func start() { coordinator?.start() }
+    /// Fixed-rate live mode: the viewfinder re-resolves the latest frame on a cadence and swaps
+    /// overlays in place — no tapping, no accumulation. This is the entire scan interaction.
+    func startLive() { coordinator?.startLive() }
     func stop() { coordinator?.stop() }
 
-    func applyAsk(_ ask: String) async {
-        guard let env, let coord = coordinator else { return }
-        guard !ask.isEmpty else { rebuildOverlays(from: coord.candidates); return }
-        let order = (try? await env.llm.rerank(coord.candidates, for: ask)) ?? []
-        let ranked = order.compactMap { id in
-            coord.candidates.first { $0.resolved.product.id == id }
-        }
-        rebuildOverlays(from: ranked.isEmpty ? coord.candidates : ranked)
-    }
-
-    private func rebuildOverlays(from candidates: [ScoredCandidate]) {
-        overlays = candidates.enumerated().map { idx, cand in
-            // Anchor to the detection's box if we have it; else fan out down the frame.
-            let anchor = CGPoint(x: 0.25 + 0.5 * Double(idx % 2),
-                                 y: 0.25 + 0.12 * Double(idx))
-            return HUDOverlay(id: cand.id, candidate: cand, anchor: anchor)
-        }
-    }
+    /// Chat-bar filter: parse the ask once and apply it to every live tick.
+    func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }
+    func clearFilter() async { await coordinator?.clearFilter() }
 }
 
 /// Camera layer. On a real device it presents VisionKit's `DataScannerViewController` (live

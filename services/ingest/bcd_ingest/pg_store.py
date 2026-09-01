@@ -244,17 +244,24 @@ class PostgresStore:
 
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Trigram similarity on product name, best-first. Index-accelerated via the GIN
-        `%` operator; similarity() gives the ranking score (0-1)."""
+        """Best-first name match for an OCR line, scored 0-1. Uses GREATEST(similarity,
+        word_similarity): plain `similarity` compares the whole strings (great when the OCR
+        *is* the name, e.g. "HEINEKEN"), while `word_similarity` finds the name *inside* a
+        noisy line ("GUINNESS DRAUGHT 440ML EXTRA STOUT" → the Guinness product). The caller
+        applies a confidence floor, so this returns the top few regardless and lets the
+        resolver reject weak ones. Seq-scans the ~hundreds of products (fine at this size); a
+        million-row catalog would gate with the GIN `%`/`%>` operators first."""
         text = (text or "").strip()
         if not text:
             return []
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
                 """
-                SELECT record, similarity(coalesce(name,''), %s) AS sim
+                SELECT record,
+                       GREATEST(similarity(coalesce(name,''), %s),
+                                word_similarity(coalesce(name,''), %s)) AS sim
                 FROM gold
-                WHERE entity_type='product' AND coalesce(name,'') %% %s
+                WHERE entity_type='product'
                 ORDER BY sim DESC
                 LIMIT %s
                 """,

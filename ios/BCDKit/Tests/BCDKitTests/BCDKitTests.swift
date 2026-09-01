@@ -104,26 +104,94 @@ import Foundation
 
 @Suite struct ScanCoordination {
     @MainActor
-    @Test func resolvesScriptedFramesAndDedupes() async throws {
-        // Two frames with the same text — the coordinator must query it only once.
+    @Test func liveModeResolvesLatestFrameAndSkipsUnchanged() async throws {
+        // Fixed-rate live mode resolves the latest frame, pins each overlay to its detection's box
+        // center, and skips the re-resolve when the OCR is unchanged (camera held still) — so a
+        // held viewfinder stays cheap instead of firehosing the backend every tick. No shutter.
         let engine = MockScanEngine(scripted: [
-            [DetectedText(text: "Heady Topper", kind: "text")],
-            [DetectedText(text: "Heady Topper", kind: "text")],  // dup -> ignored
-            [DetectedText(text: "854416001019", kind: "barcode")],
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
         ])
         let api = StubAPI()
         let coord = ScanCoordinator(engine: engine, api: api)
         coord.start()
-        try await Task.sleep(nanoseconds: 300_000_000)  // let the stream drain
-        #expect(api.resolveCallCount == 2)  // "Heady Topper" once + the barcode
-        #expect(!coord.candidates.isEmpty)
+        try await Task.sleep(nanoseconds: 100_000_000)  // let the frame buffer
+        #expect(api.resolveCallCount == 0)              // the viewfinder alone never resolves
+        await coord.resolveLatest()                     // one live tick
+        #expect(api.resolveCallCount == 1)
+        #expect(coord.overlays.count == 1)
+        let overlay = try #require(coord.overlays.first)
+        #expect(overlay.candidate.resolved.product.name == "Krombacher")
+        #expect(abs(overlay.x - 0.4) < 0.001)           // box center x = 0.3 + 0.2/2
+        #expect(abs(overlay.y - 0.45) < 0.001)          // box center y = 0.4 + 0.1/2
+        await coord.resolveLatest()                     // same frame → deduped, no round-trip
+        #expect(api.resolveCallCount == 1)
+    }
+
+    @MainActor
+    @Test func liveAutoInterpretsWhenNothingResolves() async throws {
+        // A stylized label OCRs as garbage that matches nothing. With no shutter, the live tick
+        // itself triggers the on-device fallback: it names the product, and *that* clean name
+        // resolves and anchors — zero clicking.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let llm = StubLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()                     // one live tick, no clicking
+        #expect(api.resolveCallCount == 2)              // raw OCR (miss) then the LLM guess (hit)
+        #expect(llm.calls == 1)
+        #expect(coord.overlays.count == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func liveAutoInterpretRunsOncePerFrame() async throws {
+        // The fallback is debounced by OCR signature: a held-still garbled label runs the on-device
+        // model once, not on every tick.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = CatalogStubAPI(known: [])             // nothing ever resolves
+        let llm = StubLLM(guess: "Still Unmatched")     // guess doesn't resolve either
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        await coord.resolveLatest()
+        await coord.resolveLatest()
+        #expect(llm.calls == 1)                          // same frame → interpreted exactly once
+    }
+
+    @MainActor
+    @Test func liveFilterHidesOutOfSpecOverlaysAndRestores() async throws {
+        // The persistent chat-bar filter is parsed once and applied to each tick's candidates:
+        // "nothing over 6%" hides the 8.5% DIPA and keeps the 4.2% lager; clearing restores both.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "SHELF", kind: "text", x: 0.2, y: 0.3, w: 0.4, h: 0.1)],
+        ])
+        let api = TwoCandidateAPI()
+        let coord = ScanCoordinator(engine: engine, api: api, llm: MockLLMProvider())
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 2)
+        await coord.setFilter("nothing over 6%")
+        #expect(coord.overlays.count == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Light Lager")
+        #expect(coord.filterText == "nothing over 6%")
+        await coord.clearFilter()
+        #expect(coord.overlays.count == 2)
+        #expect(coord.filterText == nil)
     }
 }
 
 // MARK: - test doubles
 
 private func makeCandidate(id: String, name: String, abv: Double,
-                          personal: Double) -> ScoredCandidate {
+                          personal: Double, index: Int = 0) -> ScoredCandidate {
     let prov = Provenance(sourceId: "t", url: nil, quote: nil,
                           method: .regulatoryFiling, confidence: 1)
     let product = Product(
@@ -136,7 +204,7 @@ private func makeCandidate(id: String, name: String, abv: Double,
         producer: Producer(id: "p", name: "P", kind: nil, country: nil, region: nil,
                            lat: nil, lon: nil, website: nil),
         brand: Brand(id: "b", producerId: "p", name: "B"))
-    return ScoredCandidate(detectionIndex: 0, resolved: resolved, matchScore: 1,
+    return ScoredCandidate(detectionIndex: index, resolved: resolved, matchScore: 1,
                            personalScore: personal, reason: nil, coldStart: true)
 }
 
@@ -160,4 +228,57 @@ private final class StubAPI: APIClientProtocol, @unchecked Sendable {
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// Resolves a detection only when its text is a known catalog name — so garbled OCR misses,
+/// the way the real trigram store does. Lets the LLM-fallback path be exercised deterministically.
+private final class CatalogStubAPI: APIClientProtocol, @unchecked Sendable {
+    let known: Set<String>
+    var resolveCallCount = 0
+    init(known: Set<String>) { self.known = known }
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        var candidates: [ScoredCandidate] = []
+        var unresolved: [Int] = []
+        for (i, d) in req.detections.enumerated() {
+            if known.contains(d.text) {
+                candidates.append(makeCandidate(id: d.text, name: d.text, abv: 8, personal: 0.8, index: i))
+            } else {
+                unresolved.append(i)
+            }
+        }
+        return ScanResolveResponse(candidates: candidates, unresolvedIndices: unresolved, latencyMs: 0.5)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// Returns two candidates of different ABV for any single detection — an 8.5% DIPA and a 4.2%
+/// lager pinned to the same box — so the persistent chat-bar filter can be exercised.
+private final class TwoCandidateAPI: APIClientProtocol, @unchecked Sendable {
+    var resolveCallCount = 0
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        return ScanResolveResponse(candidates: [
+            makeCandidate(id: "dipa", name: "Big DIPA", abv: 8.5, personal: 0.9, index: 0),
+            makeCandidate(id: "lager", name: "Light Lager", abv: 4.2, personal: 0.4, index: 0),
+        ], unresolvedIndices: [], latencyMs: 0.5)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+/// LLM double: returns a fixed product-name guess and counts how many times it was asked.
+private final class StubLLM: LLMProvider, @unchecked Sendable {
+    let guess: String
+    var calls = 0
+    init(guess: String) { self.guess = guess }
+    func parseQuery(_ text: String) async throws -> QueryIntent { QueryIntent(freeText: text) }
+    func rerank(_ candidates: [ScoredCandidate], for ask: String) async throws -> [String] {
+        candidates.map { $0.resolved.product.id }
+    }
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String] {
+        calls += 1
+        return [guess]
+    }
 }

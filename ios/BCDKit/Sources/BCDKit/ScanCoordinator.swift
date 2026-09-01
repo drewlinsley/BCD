@@ -1,28 +1,77 @@
 import Foundation
 import Combine
 
-/// Ties the pieces together: consumes detection frames from a `ScanEngine`, batches and
-/// dedupes them, asks the backend to resolve + score, and publishes ranked candidates the
-/// HUD renders. This is the client half of the latency-critical path; the on-device
-/// dedupe here is what keeps us inside the <400ms budget by not re-querying stable text.
+/// One overlay: a scored candidate pinned to where its detection sat in the resolved frame
+/// (normalized 0-1). Plain `Double`s, no CoreGraphics, so BCDKit stays portable.
+public struct ResolvedOverlay: Identifiable, Sendable {
+    public let id: String            // product id — also the per-product dedup key
+    public let candidate: ScoredCandidate
+    public let x: Double             // normalized box center, 0-1
+    public let y: Double
+    public init(id: String, candidate: ScoredCandidate, x: Double, y: Double) {
+        self.id = id; self.candidate = candidate; self.x = x; self.y = y
+    }
+}
+
+/// Drives the scan flow — a **camera-first, fully live HUD**. There is no shutter and no freeze:
+/// the engine runs a live viewfinder, this buffers its latest detections, and a fixed-rate ticker
+/// re-resolves the latest frame every `intervalMs`, **replacing** the overlays each tick. Overlays
+/// are always *assigned*, never appended, so nothing accumulates.
+///
+/// Two things keep the always-on loop cheap and useful:
+///   - A held-still camera (unchanged OCR) skips the network round-trip entirely.
+///   - When a frame has readable text but the catalog resolves *nothing* (a stylized label OCR'd as
+///     garbage), it auto-invokes the on-device model to name the product — once per distinct frame,
+///     off the tick's critical path only when it's actually stuck.
+///
+/// A persistent natural-language filter ("nothing over 6%") is parsed once into a structured intent
+/// and applied synchronously to every tick, so it keeps filtering as the frame refreshes.
 @MainActor
 public final class ScanCoordinator: ObservableObject {
-    @Published public private(set) var candidates: [ScoredCandidate] = []
+    /// Overlays from the most recent resolve, display-ordered, anchored to their boxes.
+    @Published public private(set) var overlays: [ResolvedOverlay] = []
     @Published public private(set) var lastLatencyMs: Double?
     @Published public private(set) var isScanning = false
+    /// A resolve is in flight (a live tick).
+    @Published public private(set) var isResolving = false
+    /// The on-device model is naming a stylized label (the automatic fallback).
+    @Published public private(set) var isInterpreting = false
+    /// Candidates behind the current overlays (pre-filter), so a filter change can re-pin without
+    /// another round-trip.
+    @Published public private(set) var candidates: [ScoredCandidate] = []
+    /// The active natural-language filter text, for the HUD to display (nil = no filter).
+    @Published public private(set) var filterText: String?
 
     private let engine: ScanEngine
     private let api: APIClientProtocol
     private let telemetry: TelemetryQueue?
-    private var seenTexts: Set<String> = []
-    private var task: Task<Void, Never>?
+    private let llm: LLMProvider?                   // on-device model for the stuck-frame fallback
+    private var latestFrame: [DetectedText] = []    // most recent live detections (with boxes)
+    private var currentFrame: [DetectedText] = []   // the frame the current overlays anchor to
+    private var task: Task<Void, Never>?            // frame-buffer pump
+    private var liveTask: Task<Void, Never>?        // fixed-rate resolve ticker
+    /// Text signature of the last frame we resolved; lets a tick skip a re-resolve when the camera
+    /// is held still (same OCR), keeping the fixed rate cheap and the overlays stable.
+    private var lastResolvedKey: String?
+    /// Text signature of the last frame we auto-ran the on-device model on, so a held-still garbled
+    /// label triggers it once rather than every tick.
+    private var lastInterpretKey: String?
+    /// Parsed chat-bar intent, applied to every tick's candidates.
+    private var filterIntent: QueryIntent?
 
-    public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil) {
+    /// Cap overlays so a busy shelf stays legible (the server caps too).
+    private let maxOverlays = 8
+
+    public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil,
+                llm: LLMProvider? = nil) {
         self.engine = engine
         self.api = api
         self.telemetry = telemetry
+        self.llm = llm
     }
 
+    /// Start the live viewfinder buffering frames. Nothing hits the network until a live tick —
+    /// call `startLive()` for the fixed-rate loop.
     public func start(venueId: String? = nil) {
         guard !isScanning else { return }
         isScanning = true
@@ -30,50 +79,199 @@ public final class ScanCoordinator: ObservableObject {
             guard let self else { return }
             await self.engine.start()
             for await frame in self.engine.frames {
-                await self.handle(frame, venueId: venueId)
+                self.latestFrame = frame
+            }
+        }
+    }
+
+    /// Start the viewfinder **and** the fixed-rate resolve loop: every `intervalMs`, resolve the
+    /// latest frame and replace the overlays. This is the whole scan interaction — no tapping.
+    public func startLive(intervalMs: UInt64 = 700, venueId: String? = nil) {
+        start(venueId: venueId)
+        startTicker(intervalMs: intervalMs, venueId: venueId)
+    }
+
+    private func startTicker(intervalMs: UInt64, venueId: String?) {
+        guard liveTask == nil else { return }
+        liveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalMs * 1_000_000)
+                guard let self, !Task.isCancelled else { return }
+                await self.resolveLatest(venueId: venueId)
             }
         }
     }
 
     public func stop() {
         engine.stop()
-        task?.cancel()
+        task?.cancel(); task = nil
+        liveTask?.cancel(); liveTask = nil
         isScanning = false
     }
 
-    /// Reset dedupe state, e.g. when the user pans to a new shelf.
-    public func resetView() { seenTexts.removeAll(); candidates.removeAll() }
+    /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
+    /// fixed-rate behavior is unit-testable without a real clock.
+    public func resolveLatest(venueId: String? = nil) async {
+        await resolve(frame: latestFrame.filter { !$0.text.isEmpty }, venueId: venueId)
+    }
 
-    private func handle(_ frame: [DetectedText], venueId: String?) async {
-        // Only send detections we haven't already resolved this view — the core cost cut.
-        let fresh = frame.filter { !seenTexts.contains($0.text) && !$0.text.isEmpty }
-        guard !fresh.isEmpty else { return }
-        for d in fresh { seenTexts.insert(d.text) }
+    /// The single resolve path. Resolve the frame, pin an overlay to each detection's box, dedupe
+    /// per product, cap — then, if nothing matched but the label carried text, fall back to the
+    /// on-device model. Always *assigns* overlays, so nothing accumulates.
+    private func resolve(frame: [DetectedText], venueId: String?) async {
+        guard !frame.isEmpty else {
+            // Nothing in view: clear so a stale result doesn't linger over an empty shelf.
+            overlays = []; candidates = []; currentFrame = []
+            lastResolvedKey = nil; lastInterpretKey = nil
+            return
+        }
+        // Skip the round-trip when the OCR is unchanged since the last resolve (camera held still).
+        let key = Self.signature(frame)
+        if key == lastResolvedKey { return }
 
-        let req = ScanResolveRequest(detections: fresh, venueId: venueId, includeScore: true)
+        isResolving = true
+        defer { isResolving = false }
+        let req = ScanResolveRequest(detections: frame, venueId: venueId, includeScore: true)
         do {
             let resp = try await api.resolveScan(req)
-            merge(resp)
             lastLatencyMs = resp.latencyMs
+            candidates = resp.candidates
+            currentFrame = frame
+            overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+                                   to: frame, cap: maxOverlays, presorted: true)
+            lastResolvedKey = key
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
-                "n_detections": .int(fresh.count),
+                "n_detections": .int(frame.count),
                 "n_resolved": .int(resp.candidates.count),
                 "server_latency_ms": .double(resp.latencyMs ?? 0),
-                "ocr_strings": .stringList(fresh.map { $0.text }),
+                "mode": .string("live"),
+                "ocr_strings": .stringList(frame.map { $0.text }),
             ])
+            // Auto-fallback: readable text but nothing matched. Let the on-device model name it,
+            // once per distinct OCR frame (so a held-still garbled label doesn't re-run every tick).
+            if resp.candidates.isEmpty, let llm, key != lastInterpretKey {
+                lastInterpretKey = key
+                await interpret(frame: frame, using: llm, key: key, venueId: venueId)
+            }
         } catch {
-            // Network hiccup: allow these texts to retry on the next frame.
-            for d in fresh { seenTexts.remove(d.text) }
+            // Keep the last good overlays and try again next tick.
         }
     }
 
-    private func merge(_ resp: ScanResolveResponse) {
-        var byId: [String: ScoredCandidate] = [:]
-        for c in candidates { byId[c.resolved.id] = c }
-        for c in resp.candidates { byId[c.resolved.id] = c }
-        // Best predicted enjoyment first; the HUD color-codes by this.
-        candidates = byId.values.sorted {
+    /// Stuck-frame fallback: hand the raw (garbled) OCR to the on-device model, resolve the product
+    /// name it returns, and anchor to the label's most prominent text box.
+    private func interpret(frame: [DetectedText], using llm: LLMProvider,
+                           key: String, venueId: String?) async {
+        isInterpreting = true
+        defer { isInterpreting = false }
+        let guesses = (try? await llm.interpretLabels(frame.map { $0.text })) ?? []
+        guard !guesses.isEmpty else { return }
+        // The model call takes ~1s; if the camera has moved on since, drop this now-stale guess.
+        guard key == lastResolvedKey else { return }
+        let box = frame.max { ($0.w ?? 0) * ($0.h ?? 0) < ($1.w ?? 0) * ($1.h ?? 0) } ?? frame[0]
+        let synthetic = guesses.map {
+            DetectedText(text: $0, kind: "text", x: box.x, y: box.y, w: box.w, h: box.h)
+        }
+        let req = ScanResolveRequest(detections: synthetic, venueId: venueId, includeScore: true)
+        guard let resp = try? await api.resolveScan(req), !resp.candidates.isEmpty else { return }
+        candidates = resp.candidates
+        currentFrame = synthetic
+        overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+                               to: synthetic, cap: maxOverlays, presorted: true)
+        lastLatencyMs = resp.latencyMs
+        await telemetry?.log("scan_frame_batch", tier: .personalization, [
+            "n_detections": .int(frame.count),
+            "n_resolved": .int(resp.candidates.count),
+            "mode": .string("llm_assist"),
+            "llm_guesses": .stringList(guesses),
+            "ocr_strings": .stringList(frame.map { $0.text }),
+        ])
+    }
+
+    // MARK: - persistent natural-language filter (the chat bar)
+
+    /// Set the chat-bar filter. Parse the ask into a structured intent ONCE (via the LLM), then
+    /// apply it synchronously to every live tick — so "nothing over 6%" keeps hiding the 8% IPA as
+    /// the frame refreshes, instead of a one-shot reorder the next tick would wipe.
+    public func setFilter(_ ask: String) async {
+        let trimmed = ask.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { clearFilter(); return }
+        filterText = trimmed
+        if let llm { filterIntent = try? await llm.parseQuery(trimmed) }
+        reanchor()
+    }
+
+    public func clearFilter() {
+        filterText = nil
+        filterIntent = nil
+        reanchor()
+    }
+
+    /// Re-pin the current candidates under the current filter without a new network round-trip.
+    private func reanchor() {
+        overlays = Self.anchor(Self.orderedForDisplay(candidates, filterIntent),
+                               to: currentFrame, cap: maxOverlays, presorted: true)
+    }
+
+    // MARK: - helpers
+
+    private static func signature(_ frame: [DetectedText]) -> String {
+        frame.map { $0.text }.sorted().joined(separator: "\u{1}")
+    }
+
+    /// Filter candidates by the parsed intent, then order them for display. With no intent, order
+    /// by predicted enjoyment (personal, else match). The scan payload carries no price, so a
+    /// `.price` ask falls back to that same order.
+    private static func orderedForDisplay(_ cands: [ScoredCandidate],
+                                          _ intent: QueryIntent?) -> [ScoredCandidate] {
+        var out = cands
+        if let intent {
+            out = out.filter { c in
+                let abv = c.resolved.product.spec.abvPct?.value
+                if let mx = intent.maxAbv, let a = abv, a > mx { return false }
+                if let mn = intent.minAbv, let a = abv, a < mn { return false }
+                if let style = intent.styleContains, !style.isEmpty {
+                    let s = style.lowercased()
+                    let hit = (c.resolved.product.style?.value.lowercased().contains(s) ?? false)
+                        || c.resolved.product.name.lowercased().contains(s)
+                    if !hit { return false }
+                }
+                return true
+            }
+        }
+        switch intent?.sortBy ?? .personal {
+        case .abv:
+            out.sort { ($0.resolved.product.spec.abvPct?.value ?? .greatestFiniteMagnitude)
+                     < ($1.resolved.product.spec.abvPct?.value ?? .greatestFiniteMagnitude) }
+        case .relevance:
+            out.sort { $0.matchScore > $1.matchScore }
+        case .personal, .price:
+            out.sort { ($0.personalScore ?? $0.matchScore) > ($1.personalScore ?? $1.matchScore) }
+        }
+        return out
+    }
+
+    /// Pin candidates to their detection's box center, one per product, capped. `presorted` keeps
+    /// the caller's display order (the filter/sort already decided it).
+    private static func anchor(_ candidates: [ScoredCandidate], to frame: [DetectedText],
+                               cap: Int, presorted: Bool = false) -> [ResolvedOverlay] {
+        let ordered = presorted ? candidates : candidates.sorted {
             ($0.personalScore ?? $0.matchScore) > ($1.personalScore ?? $1.matchScore)
         }
+        var out: [ResolvedOverlay] = []
+        var seen = Set<String>()
+        for c in ordered {
+            let pid = c.resolved.product.id
+            guard !seen.contains(pid),
+                  c.detectionIndex >= 0, c.detectionIndex < frame.count else { continue }
+            let d = frame[c.detectionIndex]
+            out.append(ResolvedOverlay(
+                id: pid, candidate: c,
+                x: (d.x ?? 0) + (d.w ?? 0) / 2,
+                y: (d.y ?? 0) + (d.h ?? 0) / 2))
+            seen.insert(pid)
+            if out.count >= cap { break }
+        }
+        return out
     }
 }

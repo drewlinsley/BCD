@@ -17,6 +17,18 @@ public protocol LLMProvider: Sendable {
 
     /// Rerank candidates given a natural-language ask. Returns product ids best-first.
     func rerank(_ candidates: [ScoredCandidate], for ask: String) async throws -> [String]
+
+    /// Interpret a frame's raw OCR lines — often garbled off a stylized label — into a small
+    /// set of clean product/brand guesses to match against the catalog. Returns [] when nothing
+    /// reads like a drink. This is the fallback for labels that defeat plain OCR matching:
+    /// on-device Apple Intelligence when available, a no-op elsewhere.
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String]
+}
+
+public extension LLMProvider {
+    // Default: no interpretation. Providers without a real model (mock, cloud-less) inherit
+    // this, so the shutter's fallback simply finds nothing rather than failing to compile.
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String] { [] }
 }
 
 public struct QueryIntent: Codable, Sendable, Equatable {

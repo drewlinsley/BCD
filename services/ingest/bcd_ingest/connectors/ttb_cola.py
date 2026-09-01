@@ -134,7 +134,7 @@ class TTBColaConnector(Connector):
             )
 
             category = _category_of(rec.get("class_type", ""))
-            product_name = rec.get("fanciful_name") or brand_name
+            product_name = _display_name(brand_name, rec.get("fanciful_name"))
             pid = f"ttb:{rec['ttb_id']}"
             spec = ProductSpec(
                 abv_pct=Sourced[float](value=float(rec["abv"]), provenance=reg_prov)
@@ -162,6 +162,21 @@ class TTBColaConnector(Connector):
                 )
                 n_sku += 1
         return {"product": n_prod, "producer": n_producer, "sku": n_sku}
+
+
+def _display_name(brand: str, fanciful: str | None) -> str:
+    """Brand-forward product name. TTB's fanciful_name is often just the class/type
+    ("Pale Ale", "Kentucky Straight Bourbon Whiskey") — useless as an overlay label and a weak
+    trigram target — so lead with the brand the COLA always carries: "Sierra Nevada" + "Pale Ale"
+    -> "Sierra Nevada Pale Ale". Skip the prepend only when the fanciful already names the brand
+    (avoids "Sierra Nevada Sierra Nevada ..."). No fanciful -> the brand stands alone."""
+    brand = (brand or "").strip()
+    fanciful = (fanciful or "").strip()
+    if not fanciful:
+        return brand
+    if brand and brand.lower() not in fanciful.lower():
+        return f"{brand} {fanciful}"
+    return fanciful
 
 
 def _category_of(class_type: str) -> Category:

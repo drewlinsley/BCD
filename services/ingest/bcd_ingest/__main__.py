@@ -13,7 +13,7 @@ from .connectors import get_connector
 from .store import open_store
 
 
-async def _run(source: str, limit: int | None, root: str) -> int:
+async def _run(source: str, limit: int | None, root: str, promote_only: bool) -> int:
     store = open_store(root=root)
     try:
         connector = get_connector(store, source)
@@ -21,8 +21,14 @@ async def _run(source: str, limit: int | None, root: str) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"→ ingesting '{source}' (limit={limit}) into {store.db_path}")
-    summary = await connector.run(limit=limit)
+    if promote_only:
+        # Reprocess silver→gold without re-fetching — backfills gold after a connector change
+        # (e.g. newly emitted SKUs) from the raw rows already landed, no network round-trip.
+        print(f"→ re-promoting '{source}' silver→gold in {store.db_path}")
+        summary = {f"gold_{k}": v for k, v in connector.promote().items()}
+    else:
+        print(f"→ ingesting '{source}' (limit={limit}) into {store.db_path}")
+        summary = await connector.run(limit=limit)
     counts = store.counts()
     print("─" * 48)
     print(f"  run summary : {summary}")
@@ -43,8 +49,10 @@ def main() -> int:
     ap.add_argument("source", help="connector id or alias (openbrewerydb, ttb, off)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--root", default="./data")
+    ap.add_argument("--promote-only", action="store_true",
+                    help="skip fetch; re-run the silver→gold promotion (reprocess/backfill)")
     args = ap.parse_args()
-    return asyncio.run(_run(args.source, args.limit, args.root))
+    return asyncio.run(_run(args.source, args.limit, args.root, args.promote_only))
 
 
 if __name__ == "__main__":

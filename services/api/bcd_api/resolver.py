@@ -9,8 +9,12 @@ client codes against and what we optimize behind.
 
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
+    SENSORY_AXES,
     Brand,
     Producer,
     Product,
@@ -22,6 +26,139 @@ from bcd_schema import (
     TasteProfile,
 )
 
+# A text detection resolves to a product only if its name-match clears this floor. Tuned
+# against the real catalog: real beers (Heineken 1.0, Krombacher 0.69, a "GUINNESS DRAUGHT
+# 440ML" line 0.56) clear it; OCR chrome ("12 FL OZ" 0.38, "BREWED AND BOTTLED BY" 0.33) does
+# not — so noise resolves to nothing instead of a confident wrong beer.
+_MIN_MATCH = 0.5
+# A very short catalog name ("J&B", "1664") is low-information and trigram-matches garbled OCR
+# far too easily, so it must clear a near-exact bar instead of the normal floor. Observed live: a
+# mangled Heady-Topper-can frame matched the scotch "J&B" at exactly 0.5.
+_SHORT_MIN_MATCH = 0.8
+_SHORT_NAME_LEN = 5
+# Cap overlays per frame so a busy shelf can't bury the HUD (the client caps + anchors too).
+_MAX_CANDIDATES = 8
+
+# Score bands for the overlay's one-line 'why'. Above _STRONG_MATCH we claim a match;
+# below _MILD_MATCH we say so plainly rather than dressing up a miss.
+_STRONG_MATCH = 0.8
+_MILD_MATCH = 0.6
+
+# A detection is a *product identity* only if it carries a real word — a run of >=3 letters (a
+# brand or name token). A bare number is label chrome, not a name: "15" off a 15th-anniversary
+# can, "40" for proof, "500" for mL, "5" for %ABV. Trigram-matching those resolves to whatever
+# junk shares the digits (a can's "15" once matched a spirit literally named "15"), so they must
+# resolve to nothing. The one numeric exception is a 4+-digit run that IS the identity ("1664").
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_LONGNUM_RE = re.compile(r"^[0-9]{4,}$")
+
+
+def _is_identity_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _WORD_RE.search(t):
+        return True
+    return bool(_LONGNUM_RE.match(t.replace(" ", "")))
+
+
+# Even a line that clears the score floor can be a *coincidental* trigram window rather than a
+# real name hit. OCR mangles the ubiquitous Surgeon-General warning ("...impairs your ability to
+# drive A CAR OR operate machinery") into a fragment like "BACAR OR", which word-similarity-matches
+# "Bacardi" at 0.625 — HIGHER than a legitimately-embedded "GUINNESS DRAUGHT 440ML" line scores
+# (0.56). Measured against the real catalog, no similarity threshold separates the two. What does
+# separate them is token agreement: a genuine match carries an OCR token that *is* a name word
+# ("GUINNESS" == "Guinness"), while the garble only has a truncation ("BACAR" vs "Bacardi" ~ 0.56,
+# "OR" vs "Bacardi" = 0). So a text match must also carry a real name token (>=4 letters) that
+# closely matches some OCR token — otherwise the "brand" is only a coincidental sub-window.
+_TOKEN_SUPPORT_MIN = 0.85
+_MIN_NAME_TOKEN_LEN = 4
+_TOKEN_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)  # runs of >=2 unicode letters
+
+
+def _norm_token(s: str) -> str:
+    """Casefold and strip diacritics so 'Bière' and 'BIERE' compare equal."""
+    decomposed = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _tokens(s: str) -> list[str]:
+    return [_norm_token(t) for t in _TOKEN_RE.findall(s or "")]
+
+
+def _trigrams(token: str) -> set[str]:
+    # pg_trgm-style padding: two leading spaces + one trailing, then 3-grams. Mirrors the
+    # store's similarity() closely enough to calibrate one threshold across both.
+    padded = f"  {token} "
+    return {padded[i:i + 3] for i in range(len(padded) - 2)}
+
+
+def _trigram_sim(a: str, b: str) -> float:
+    ta, tb = _trigrams(a), _trigrams(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _token_supported(query: str, name: str) -> bool:
+    """True if a real name token (>=4 letters) closely matches some OCR token — evidence the
+    brand word is actually present in the line, not a coincidental trigram window. A name with
+    no such token ("J&B", "1664") has nothing to anchor on and defers to the score floors."""
+    name_tokens = [t for t in _tokens(name) if len(t) >= _MIN_NAME_TOKEN_LEN]
+    if not name_tokens:
+        return True
+    q_tokens = _tokens(query)
+    return any(_trigram_sim(nt, qt) >= _TOKEN_SUPPORT_MIN
+               for nt in name_tokens for qt in q_tokens)
+
+
+def _upc_variants(upc: str) -> list[str]:
+    """A barcode's equivalent GTIN forms. A UPC-A (12 digits) and its EAN-13 form differ only by a
+    leading zero and identify the *same* item, but a scanner and the catalog may store different
+    forms — so a lookup tries both. EAN-8 and other lengths are used as-is."""
+    u = (upc or "").strip()
+    out = [u]
+    if u.isdigit():
+        if len(u) == 12:
+            out.append("0" + u)             # UPC-A -> EAN-13
+        elif len(u) == 13 and u.startswith("0"):
+            out.append(u[1:])               # EAN-13 -> UPC-A
+    return list(dict.fromkeys(out))         # de-dup, preserve order
+
+
+_KEY_STRIP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_key(s: str) -> str:
+    """Lowercase, strip accents, keep alphanumerics — digits included. Unlike `_tokens` (which
+    keeps only letters, for word matching), the identity key must preserve numbers: "0.0%", "12
+    ans", "Select 55" are real product distinctions, not noise. "Jupiler 0,0%" -> "jupiler 0 0"."""
+    decomposed = unicodedata.normalize("NFKD", s or "")
+    ascii_ = "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+    return _KEY_STRIP_RE.sub(" ", ascii_).strip()
+
+
+def _identity_key(name: str, brand: str, pid: str) -> str:
+    """One key per *real* product, so duplicate catalog records collapse into a single overlay.
+
+    The catalog carries the same beer under multiple rows — different UPCs of one product (Lagunitas
+    IPA ×2, Heineken ×7), or an OFF pull plus a TTB record. Keyed on the raw id they'd each draw
+    their own overlay; keyed on normalized brand+name they merge. Brand is part of the key on
+    purpose: OFF often names a product only by its class ("Blended Scotch Whisky" for eight
+    different distilleries), and those must stay distinct — their brands (Johnnie Walker vs Queen
+    Margot) are what separate them. A placeholder "Unknown" brand (or one that just echoes the name)
+    carries no identity, so it drops out and the name alone keys — which is what lets the two
+    Unknown-branded "Lagunitas IPA" rows collapse. Digits are kept, so an alcohol-free "0.0%" or an
+    age-stated "12 ans" stays a distinct product from its sibling. A row with no alphanumeric name
+    falls back to its id, so unnamed (e.g. non-Latin) rows never merge into one another."""
+    n = _norm_key(name)
+    if not n:
+        return f"id:{pid}"
+    b = _norm_key(brand)
+    if not b or b == "unknown" or b == n:
+        return n
+    return f"{b}\x1f{n}"
+
 
 class Resolver:
     def __init__(self, store: Store) -> None:
@@ -30,10 +167,11 @@ class Resolver:
     # Matching is delegated to the store: token-overlap on the SQLite dev store,
     # real pg_trgm trigram similarity on Postgres — same signature either way.
     def _resolve_by_upc(self, upc: str) -> dict | None:
-        sku = self.store.get_gold(f"sku:{upc}")
-        if not sku:
-            return None
-        return self.store.get_gold(sku["product_id"])
+        for key in _upc_variants(upc):
+            sku = self.store.get_gold(f"sku:{key}")
+            if sku:
+                return self.store.get_gold(sku["product_id"])
+        return None
 
     def _hydrate(self, product_rec: dict) -> ResolvedProduct | None:
         producer = self.store.get_gold(product_rec.get("producer_id", ""))
@@ -68,9 +206,7 @@ class Resolver:
 
         sim = _cosine(sensory.to_array(), profile.sensory_ideal.to_array())
         score = max(0.0, min(1.0, 0.5 + 0.5 * sim))
-        top = _top_axis(sensory)
-        reason = f"matches your {top} preference" if top else "matches your taste profile"
-        return (round(score, 3), reason, cold_start)
+        return (round(score, 3), _match_reason(score, sensory, profile.sensory_ideal), cold_start)
 
     def resolve(self, req: ScanResolveRequest,
                 profile: TasteProfile | None = None) -> ScanResolveResponse:
@@ -82,10 +218,20 @@ class Resolver:
             if det.kind == "barcode":
                 product_rec = self._resolve_by_upc(det.text)
                 match_score = 1.0 if product_rec else 0.0
-            if product_rec is None:
-                matches = self.store.match_products(det.text)
-                if matches:
-                    product_rec, match_score = matches[0]
+            elif _is_identity_text(det.text):
+                # Text path only for lines that could name a product; a bare number/fragment
+                # (and a failed barcode's digits) is skipped rather than trigram-matched.
+                # Take the best candidate that clears BOTH the score floor and token support.
+                # The floor rejects OCR chrome ("12 FL OZ"); token support rejects a coincidental
+                # sub-window (a garbled warning line that outscores the real product) — iterating
+                # rather than checking only matches[0] means such a coincidence is skipped, not
+                # allowed to block a genuine lower-ranked hit. Short names use a near-exact floor.
+                for rec, sc in self.store.match_products(det.text):
+                    name = rec.get("name") or ""
+                    floor = _SHORT_MIN_MATCH if len(name) < _SHORT_NAME_LEN else _MIN_MATCH
+                    if sc >= floor and _token_supported(det.text, name):
+                        product_rec, match_score = rec, sc
+                        break
             if product_rec is None:
                 unresolved.append(i)
                 continue
@@ -107,6 +253,24 @@ class Resolver:
                     cold_start=cold,
                 )
             )
+        # Collapse to one overlay per *real* product and cap the frame — the server-side backstop
+        # against the crowding (and the duplicate-catalog-record double overlays) the HUD showed.
+        # Keyed on canonical brand+name, not the raw id, so two rows for the same beer merge; the
+        # strongest match wins, and on a tie the richer record (has ABV / sensory) represents it so
+        # the surviving overlay carries the most complete data.
+        def _rank(c: ScoredCandidate) -> tuple:
+            p = c.resolved.product
+            return (c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory))
+
+        best: dict[str, ScoredCandidate] = {}
+        for c in candidates:
+            key = _identity_key(c.resolved.product.name, c.resolved.brand.name,
+                                c.resolved.product.id)
+            if key not in best or _rank(c) > _rank(best[key]):
+                best[key] = c
+        candidates = sorted(
+            best.values(), key=lambda c: c.match_score, reverse=True
+        )[:_MAX_CANDIDATES]
         return ScanResolveResponse(candidates=candidates, unresolved_indices=unresolved)
 
 
@@ -114,3 +278,27 @@ def _top_axis(sv: SensoryVector) -> str | None:
     if not sv.axes:
         return None
     return max(sv.axes.items(), key=lambda kv: kv[1])[0].replace("_", " ")
+
+
+def _match_reason(score: float, sensory: SensoryVector, ideal: SensoryVector) -> str:
+    """Explain the score honestly.
+
+    The axis we name is the one that actually drove the agreement — high on the product
+    *and* high in the profile — not the product's loudest note. Naming the loudest note
+    made a poor match still read "matches your smoky peat preference", which is the
+    overlay telling the user something the score itself contradicts.
+    """
+    shared = _agreeing_axis(sensory, ideal)
+    if score >= _STRONG_MATCH:
+        return f"matches your {shared} preference" if shared else "matches your taste profile"
+    if score >= _MILD_MATCH:
+        return f"some {shared}, which you like" if shared else "a partial match"
+    loud = _top_axis(sensory)
+    return f"outside your usual — mostly {loud}" if loud else "outside your usual"
+
+
+def _agreeing_axis(sensory: SensoryVector, ideal: SensoryVector) -> str | None:
+    """The axis contributing most to the match: argmax of product·profile, per axis."""
+    a, b = sensory.to_array(), ideal.to_array()
+    weight, axis = max((a[i] * b[i], SENSORY_AXES[i]) for i in range(len(SENSORY_AXES)))
+    return axis.replace("_", " ") if weight > 0 else None

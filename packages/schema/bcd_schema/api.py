@@ -9,6 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from .entities import ResolvedProduct
+from .profile import TasteProfile
 
 
 class DetectedText(BaseModel):
@@ -53,3 +54,17 @@ class ScanResolveResponse(BaseModel):
 class ProductSearchResponse(BaseModel):
     query: str
     results: list[ResolvedProduct] = Field(default_factory=list)
+
+
+class FeedbackRequest(BaseModel):
+    """One taste verdict. Recorded as a `rating_submitted` telemetry event, then folded
+    into the caller's TasteProfile — the thumbs the personalization loop learns from."""
+
+    product_id: str
+    rating: float = Field(..., ge=1.0, le=5.0)  # 1-5, neutral at 3
+    aspects: dict[str, float] | None = None  # optional per-axis detail ("too sweet")
+
+
+class FeedbackResponse(BaseModel):
+    accepted: bool
+    profile: TasteProfile  # echo the updated profile so the client can show the shift

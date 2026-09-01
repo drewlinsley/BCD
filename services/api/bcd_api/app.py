@@ -7,10 +7,14 @@ MedallionStore so the whole thing boots with `make api` after an ingest, no serv
 from __future__ import annotations
 
 import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from bcd_ingest.store import Store, open_store
 from bcd_schema import (
+    FeedbackRequest,
+    FeedbackResponse,
     Product,
     ProductSearchResponse,
     ResolvedProduct,
@@ -21,6 +25,7 @@ from bcd_schema import (
 from fastapi import FastAPI, Query
 
 from .resolver import Resolver
+from .taste import TASTE_EVENTS, load_profile, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
 
 _state: dict = {}
@@ -66,7 +71,7 @@ def product_search(q: str = Query(..., min_length=1), limit: int = 20) -> Produc
 @app.post("/v1/scan/resolve", response_model=ScanResolveResponse)
 def scan_resolve(req: ScanResolveRequest, user_id: str = "demo") -> ScanResolveResponse:
     resolver: Resolver = _state["resolver"]
-    profile = _state["profiles"].get(user_id)
+    profile = _profile_for(user_id)
     t0 = time.perf_counter()
     resp = resolver.resolve(req, profile=profile)
     resp.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -81,7 +86,7 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
     (cold user) falls back to scanning the catalog."""
     store: Store = _state["store"]
     resolver: Resolver = _state["resolver"]
-    profile = _state["profiles"].get(user_id)
+    profile = _profile_for(user_id)
     if profile is not None and profile.sensory_ideal is not None:
         # over-fetch (limit*3) so the re-score with style/ABV priors has room to reorder
         candidates = store.nearest_by_sensory(profile.sensory_ideal.to_array(), limit=limit * 3)
@@ -97,13 +102,70 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
     return {"user_id": user_id, "results": scored[:limit]}
 
 
+@app.post("/v1/feedback", response_model=FeedbackResponse)
+def feedback(req: FeedbackRequest, user_id: str = "demo") -> FeedbackResponse:
+    """A thumbs on one product. Recorded as a real `rating_submitted` event and then
+    folded into the profile, so this convenience path and the client's batch telemetry
+    upload converge on exactly the same profile."""
+    collector: TelemetryCollector = _state["telemetry"]
+    store: Store = _state["store"]
+    event = {
+        "name": "rating_submitted",
+        "event_id": str(uuid.uuid4()),
+        "ts": datetime.now(UTC).isoformat(),
+        "install_id": user_id,
+        "consent_tier": "personalization",
+        "product_id": req.product_id,
+        "rating": req.rating,
+    }
+    if req.aspects:
+        event["aspects"] = req.aspects
+    collector.ingest({"events": [event]})
+    profile = rebuild_profile(store, collector.iter_events(TASTE_EVENTS), user_id)
+    return FeedbackResponse(accepted=True, profile=profile)
+
+
+@app.get("/v1/profile", response_model=TasteProfile)
+def get_profile(user_id: str = "demo") -> TasteProfile:
+    """What we think of your taste. Exposed so the client can show it — and so the user
+    can see the same thing we rank with, rather than an opaque score."""
+    profile = _profile_for(user_id)
+    return profile or TasteProfile(user_id=user_id, version=0)
+
+
+@app.post("/v1/profile/rebuild", response_model=TasteProfile)
+def rebuild(user_id: str = "demo") -> TasteProfile:
+    """Recompute from the whole event log — the batch job's entry point, and the repair
+    path if a profile is ever suspect."""
+    collector: TelemetryCollector = _state["telemetry"]
+    return rebuild_profile(_state["store"], collector.iter_events(TASTE_EVENTS), user_id)
+
+
 @app.post("/v1/telemetry")
 async def telemetry(batch: dict) -> dict:
     """Own-collector ingest. Accepts a gzipped-or-plain batch of events from the client.
     Behavioral data is the monetizable asset, so we never route it to a vendor SDK."""
     collector: TelemetryCollector = _state["telemetry"]
-    n = collector.ingest(batch)
-    return {"accepted": n}
+    accepted = collector.ingest(batch)
+    # Ratings can arrive in a batch upload, so the flywheel has to turn here too —
+    # refresh only the installs this batch actually carried taste signal for.
+    touched = {
+        ev.get("install_id")
+        for ev in accepted
+        if ev.get("name") in TASTE_EVENTS and ev.get("install_id")
+    }
+    for install_id in touched:
+        rebuild_profile(_state["store"], collector.iter_events(TASTE_EVENTS), install_id)
+    return {"accepted": len(accepted)}
+
+
+def _profile_for(user_id: str) -> TasteProfile | None:
+    """A learned profile beats the seed as soon as it has a real centroid; before that we
+    keep the demo profile so a fresh install still gets personalized-looking scores."""
+    learned = load_profile(_state["store"], user_id)
+    if learned is not None and learned.sensory_ideal is not None:
+        return learned
+    return _state["profiles"].get(user_id)
 
 
 @app.post("/v1/hooks/parallel")
