@@ -30,6 +30,8 @@ final class AppEnvironment: ObservableObject {
     /// What this install has already rated, so a product can show its own verdict on
     /// recall without a round trip.
     let reactions: ReactionLog
+    /// Drinks the user has opened — the queue the Rate tab works through.
+    let seen: SeenLog
     /// Pseudonymous per-install id. The only identity the server keys a profile on.
     let installId: String
 
@@ -37,6 +39,7 @@ final class AppEnvironment: ObservableObject {
          makeScanEngine: @escaping () -> ScanEngine,
          consent: ConsentStore = ConsentStore(),
          reactions: ReactionLog = ReactionLog(),
+         seen: SeenLog = SeenLog(),
          installId: String = InstallIdentity.current) {
         self.api = api
         self.llm = llm
@@ -44,6 +47,7 @@ final class AppEnvironment: ObservableObject {
         self.makeScanEngine = makeScanEngine
         self.consent = consent
         self.reactions = reactions
+        self.seen = seen
         self.installId = installId
     }
 

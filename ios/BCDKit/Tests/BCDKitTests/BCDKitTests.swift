@@ -259,6 +259,52 @@ import Foundation
     }
 }
 
+@Suite("SeenLog")
+struct SeenLogTests {
+    /// Its own defaults suite per test, so the queue under test is never the simulator's.
+    private func fresh() -> SeenLog {
+        let name = "bcd.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return SeenLog(defaults: defaults, limit: 3)
+    }
+
+    private func stub(_ id: String) -> SeenProduct {
+        SeenProduct(id: id, name: "Beer \(id)", producer: "Brewery", abvPct: 5)
+    }
+
+    @Test func newestOpenedComesFirst() {
+        let log = fresh()
+        log.record(stub("a"))
+        log.record(stub("b"))
+        #expect(log.all().map(\.id) == ["b", "a"])
+    }
+
+    @Test func reopeningMovesToTopWithoutDuplicating() {
+        // The queue is a worklist: looking at something again should surface it, not add a
+        // second copy you would then have to rate twice.
+        let log = fresh()
+        log.record(stub("a"))
+        log.record(stub("b"))
+        log.record(stub("a"))
+        #expect(log.all().map(\.id) == ["a", "b"])
+    }
+
+    @Test func oldestFallsOffTheEnd() {
+        let log = fresh()   // limit 3
+        for id in ["a", "b", "c", "d"] { log.record(stub(id)) }
+        #expect(log.all().map(\.id) == ["d", "c", "b"])
+    }
+
+    @Test func dismissingDropsOnlyThatEntry() {
+        let log = fresh()
+        log.record(stub("a"))
+        log.record(stub("b"))
+        log.remove("a")
+        #expect(log.all().map(\.id) == ["b"])
+    }
+}
+
 // MARK: - test doubles
 
 /// An engine whose frames the test pushes one at a time, so successive ticks can see

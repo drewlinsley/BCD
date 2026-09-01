@@ -34,6 +34,11 @@ struct ProductDetailView: View {
             .navigationTitle(product.name)
             .navigationBarTitleDisplayMode(.inline)
             .task {
+                // Opening a product is the deliberate act that earns it a place in the Rate
+                // queue; merely crossing the viewfinder does not.
+                env.seen.record(SeenProduct(id: product.id, name: product.name,
+                                            producer: producer.name,
+                                            abvPct: product.spec.abvPct?.value))
                 try? await env.telemetry.log("product_view", tier: .analytics,
                     ["product_id": .string(product.id), "referrer": .string("scan")])
             }

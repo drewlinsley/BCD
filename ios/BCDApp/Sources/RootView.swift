@@ -10,6 +10,8 @@ struct RootView: View {
                 .tabItem { Label("Scan", systemImage: "camera.viewfinder") }
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            RateView()
+                .tabItem { Label("Rate", systemImage: "hand.thumbsup") }
             AlertsView()
                 .tabItem { Label("Alerts", systemImage: "bell.badge") }
             ProfileView()
