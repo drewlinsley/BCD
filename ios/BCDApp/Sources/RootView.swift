@@ -15,6 +15,7 @@ struct RootView: View {
             ProfileView()
                 .tabItem { Label("You", systemImage: "person.crop.circle") }
         }
+        .tint(Brand.amber)
         .task { try? await env.telemetry.log("session_start", tier: .analytics) }
     }
 }

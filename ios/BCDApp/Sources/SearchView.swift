@@ -10,12 +10,17 @@ struct SearchView: View {
     var body: some View {
         NavigationStack {
             List(results) { rp in
-                VStack(alignment: .leading) {
-                    Text(rp.product.name).font(.headline)
-                    Text(rp.producer.name).font(.caption).foregroundStyle(.secondary)
-                    if let abv = rp.product.spec.abvPct {
-                        Text("\(abv.value, specifier: "%.1f")% ABV").font(.caption2)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading) {
+                        Text(rp.product.name).font(.headline)
+                        Text(rp.producer.name).font(.caption).foregroundStyle(.secondary)
+                        if let abv = rp.product.spec.abvPct {
+                            Text("\(abv.value, specifier: "%.1f")% ABV").font(.caption2)
+                        }
                     }
+                    Spacer()
+                    // Recall: your own verdict, at the 24pt list size (the heavier stroke).
+                    ReactionBadge(reaction: env.reactions.reaction(for: rp.product.id))
                 }
             }
             .overlay { if results.isEmpty && !searching { ContentUnavailableView(

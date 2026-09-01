@@ -41,8 +41,13 @@ targets:
     info:
       path: BCDApp/Resources/Info.plist
       properties:
-        CFBundleDisplayName: "Bottles Cans Draft"
-        UILaunchScreen: {}
+        CFBundleDisplayName: "BCD"
+        # Launch screen paints the identity: the scan-frame mark on brand ink, both from
+        # the asset catalog so light/dark resolve the same way the app does.
+        UILaunchScreen:
+          UIColorName: BrandInk
+          UIImageName: LaunchMark
+          UIImageRespectsSafeAreaInsets: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         # Camera is the core surface; App Store requires a purpose string.
@@ -61,6 +66,7 @@ targets:
         # out of the shared repo (same pattern as DEVELOPMENT_TEAM).
         PRODUCT_BUNDLE_IDENTIFIER: $(BCD_BUNDLE_ID)
         GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_PREVIEWS: true
 
   BCDAppTests:

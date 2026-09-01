@@ -7,8 +7,8 @@ import BCDKit
 
 struct ProfileView: View {
     @EnvironmentObject var env: AppEnvironment
+    @EnvironmentObject var consent: ConsentStore
     @State private var delta = WeeklyProfileDelta.demo
-    @State private var consent = ConsentUI()
 
     var body: some View {
         NavigationStack {
@@ -23,6 +23,9 @@ struct ProfileView: View {
                     Toggle("Analytics", isOn: $consent.analytics)
                     Toggle("Personalization", isOn: $consent.personalization)
                     Toggle("Data sharing (ads & insights)", isOn: $consent.dataSharing)
+                    Text("Personalization is the tier a reaction needs: with it off, your "
+                         + "verdicts stay on this phone and no profile is built.")
+                        .font(.caption).foregroundStyle(Brand.textMuted)
                     Text("Each tier is a separate opt-in. Raw camera frames are never uploaded.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -47,7 +50,7 @@ struct PredictionRow: View {
     let prediction: WeeklyPrediction
     var body: some View {
         HStack {
-            Image(systemName: "target")
+            Image(systemName: "target").foregroundStyle(Brand.amber)
             VStack(alignment: .leading) {
                 Text(prediction.text)
                 Text("\(Int(prediction.confidence * 100))% sure").font(.caption2)
@@ -58,12 +61,6 @@ struct PredictionRow: View {
             Image(systemName: "xmark.circle").foregroundStyle(.red)
         }
     }
-}
-
-struct ConsentUI {
-    var analytics = true
-    var personalization = false
-    var dataSharing = false
 }
 
 extension WeeklyProfileDelta {

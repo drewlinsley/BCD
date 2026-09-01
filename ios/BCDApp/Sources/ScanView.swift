@@ -24,7 +24,9 @@ struct ScanView: View {
 
             GeometryReader { geo in
                 ForEach(model.overlays) { overlay in
-                    OverlayChip(candidate: overlay.candidate)
+                    OverlayChip(candidate: overlay.candidate,
+                                reaction: env.reactions
+                                    .reaction(for: overlay.candidate.resolved.product.id))
                         .position(x: overlay.anchor.x * geo.size.width,
                                   y: overlay.anchor.y * geo.size.height)
                         .onTapGesture { selected = overlay.candidate }  // optional: open the detail receipt
@@ -101,10 +103,15 @@ struct HUDOverlay: Identifiable {
 
 struct OverlayChip: View {
     let candidate: ScoredCandidate
+    /// This install's own verdict, if it has one — the same five-level scale, shown back.
+    var reaction: Reaction?
 
+    // Match score rides the reaction ramp so the HUD has one good-to-bad colour language
+    // rather than two competing ones.
     private var tint: Color {
-        guard let s = candidate.personalScore else { return .gray }
-        return s > 0.75 ? .green : (s > 0.5 ? .yellow : .orange)
+        guard let s = candidate.personalScore else { return Brand.reactionRest }
+        return s > 0.75 ? Reaction.chuggedIt.tint
+             : (s > 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
     }
 
     var body: some View {
@@ -116,6 +123,11 @@ struct OverlayChip: View {
                 }
                 if candidate.coldStart {
                     Image(systemName: "flask.fill").font(.caption2)  // scored from chemistry
+                }
+                if let reaction {
+                    Divider().frame(height: 10)
+                    ReactionGlyph(reaction: reaction, size: 22)  // 22 is the glyph floor
+                    Text("you").font(.caption2).foregroundStyle(Brand.textMuted)
                 }
             }
             if let reason = candidate.reason {

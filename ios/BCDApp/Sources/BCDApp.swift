@@ -11,7 +11,9 @@ struct BCDApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView().environmentObject(env)
+            RootView()
+                .environmentObject(env)
+                .environmentObject(env.consent)
         }
     }
 }
@@ -22,26 +24,41 @@ final class AppEnvironment: ObservableObject {
     let llm: LLMProvider
     let telemetry: TelemetryQueue
     let makeScanEngine: () -> ScanEngine
+    /// Consent tiers, shared and persisted — the picker has to read a real answer before
+    /// it turns a tap into a personalization-tier event.
+    let consent: ConsentStore
+    /// What this install has already rated, so a product can show its own verdict on
+    /// recall without a round trip.
+    let reactions: ReactionLog
+    /// Pseudonymous per-install id. The only identity the server keys a profile on.
+    let installId: String
 
     init(api: APIClientProtocol, llm: LLMProvider, telemetry: TelemetryQueue,
-         makeScanEngine: @escaping () -> ScanEngine) {
+         makeScanEngine: @escaping () -> ScanEngine,
+         consent: ConsentStore = ConsentStore(),
+         reactions: ReactionLog = ReactionLog(),
+         installId: String = InstallIdentity.current) {
         self.api = api
         self.llm = llm
         self.telemetry = telemetry
         self.makeScanEngine = makeScanEngine
+        self.consent = consent
+        self.reactions = reactions
+        self.installId = installId
     }
 
     static func live() -> AppEnvironment {
         let api = APIClient(baseURL: Self.apiBaseURL())
-        // Consent starts empty; the onboarding sheet flips tiers on explicit opt-in.
-        let telemetry = TelemetryQueue(consent: ConsentState(analytics: true), sink: api,
+        // Consent is read from what the user actually chose last run, not assumed.
+        let consent = ConsentStore()
+        let telemetry = TelemetryQueue(consent: consent.state, sink: api,
                                        storeURL: Self.telemetryStoreURL())
         // Pick the LLM provider available on this device. Foundation Models is used only
         // where it exists AND is ready; otherwise the mock (or a cloud provider) stands in.
         let llm = Self.bestLLMProvider()
         return AppEnvironment(
             api: api, llm: llm, telemetry: telemetry,
-            makeScanEngine: { Self.makeScanEngine() }
+            makeScanEngine: { Self.makeScanEngine() }, consent: consent
         )
     }
 

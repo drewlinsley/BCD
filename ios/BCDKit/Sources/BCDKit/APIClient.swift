@@ -4,6 +4,17 @@ public protocol APIClientProtocol: Sendable {
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
+    func submitFeedback(_ req: FeedbackRequest, userId: String) async throws -> FeedbackResponse
+}
+
+extension APIClientProtocol {
+    /// Defaulted so stubs and previews only implement what they exercise. The live client
+    /// overrides it; anything else reports the route as unimplemented rather than
+    /// pretending a verdict was recorded.
+    public func submitFeedback(_ req: FeedbackRequest,
+                               userId: String) async throws -> FeedbackResponse {
+        throw APIError.http(501)
+    }
 }
 
 public enum APIError: Error, Sendable {
@@ -52,10 +63,28 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         let _: EmptyAck = try await post("/v1/telemetry", body: batch)
     }
 
+    /// A taste verdict. `user_id` is the pseudonymous install id — it selects which
+    /// profile the rating folds into, and is the only identity the server ever sees.
+    public func submitFeedback(_ req: FeedbackRequest,
+                               userId: String) async throws -> FeedbackResponse {
+        try await post("/v1/feedback", body: req,
+                       query: [URLQueryItem(name: "user_id", value: userId)])
+    }
+
     // MARK: - plumbing
 
-    private func post<B: Encodable, R: Decodable>(_ path: String, body: B) async throws -> R {
-        let url = baseURL.appendingPathComponent(path)
+    private func post<B: Encodable, R: Decodable>(
+        _ path: String, body: B, query: [URLQueryItem] = []
+    ) async throws -> R {
+        var url = baseURL.appendingPathComponent(path)
+        if !query.isEmpty {
+            guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                throw APIError.badURL
+            }
+            comps.queryItems = query
+            guard let built = comps.url else { throw APIError.badURL }
+            url = built
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
