@@ -434,3 +434,118 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
         return [guess]
     }
 }
+
+// MARK: - taste copy
+
+/// The vectors here are the exact ones in the gold table, so a change to the copy rules
+/// shows up against real products rather than convenient ones.
+@Suite struct TasteSummaryTests {
+    private let headyTopper = SensoryVector(source: .stylePrior, confidence: 0.25, axes: [
+        "grassy": 0.25, "bitterness": 0.35, "carbonation": 0.55,
+        "malty_bready": 0.45, "body_fullness": 0.4, "dryness_finish": 0.4,
+    ])
+    private let ouzo = SensoryVector(source: .stylePrior, confidence: 0.35, axes: [
+        "sweet": 0.4, "herbal": 0.75, "alcohol_warmth": 0.65,
+        "dryness_finish": 0.4, "spicy_phenolic": 0.6,
+    ])
+
+    @Test func namesOnlyNotesThatClearTheFloor() {
+        // grassy sits at 0.25 — real in the vector, too faint to claim in a sentence.
+        #expect(TasteSummary.notes(headyTopper) == "Bready malt.")
+    }
+
+    @Test func ordersNotesByStrength() {
+        #expect(TasteSummary.notes(ouzo) == "Herbal, peppery spice and sweetness.")
+    }
+
+    @Test func capsTheNoteListAtThree() {
+        let busy = SensoryVector(source: .reconciled, confidence: 0.9, axes: [
+            "citrus": 0.9, "tropical": 0.85, "honey": 0.8, "floral": 0.75, "berry": 0.7,
+        ])
+        #expect(TasteSummary.notes(busy) == "Citrus, tropical fruit and honey.")
+    }
+
+    @Test func structureBecomesItsOwnSentence() {
+        #expect(TasteSummary.structure(headyTopper) == "Medium-bodied and mildly bitter.")
+        #expect(TasteSummary.structure(ouzo) == "Warming.")
+    }
+
+    @Test func finishGetsTheLastClause() {
+        let dry = SensoryVector(source: .stylePrior, confidence: 0.4,
+                                axes: ["body_fullness": 0.7, "dryness_finish": 0.8])
+        #expect(TasteSummary.structure(dry) == "Full-bodied, with a dry finish.")
+    }
+
+    @Test func joinsNotesAndStructure() {
+        #expect(TasteSummary.sentence(for: ouzo)
+                == "Herbal, peppery spice and sweetness. Warming.")
+    }
+
+    @Test func withholdsTheCategoryFallbackTier() {
+        // Heady Topper's own vector sits at 0.25 — no style keyword matched its name, so
+        // enrich handed it the generic "beer" centroid. The parts still assemble, but the
+        // sentence they assemble into describes every beer in the catalog, so the screen
+        // must show nothing rather than tell someone a double IPA is mildly bitter.
+        #expect(headyTopper.confidence == 0.25)
+        #expect(TasteSummary.notes(headyTopper) == "Bready malt.")
+        #expect(TasteSummary.sentence(for: headyTopper) == nil)
+    }
+
+    @Test func keepsTheNamedStyleTier() {
+        // 0.35 is a style that actually matched; that tier is the bulk of the catalog and
+        // has to survive the gate.
+        #expect(ouzo.confidence == 0.35)
+        #expect(TasteSummary.sentence(for: ouzo) != nil)
+    }
+
+    @Test func saysNothingRatherThanGuessing() {
+        // No axes at all: the screen must drop the section, not print an empty flourish.
+        #expect(TasteSummary.sentence(for: SensoryVector(source: .stylePrior)) == nil)
+    }
+
+    @Test func ignoresAxesThisBuildHasNeverHeardOf() {
+        // The server is allowed to append axes ahead of the app; an unknown one is dropped,
+        // not fatal, and must not take a slot from a note we can actually name.
+        let future = SensoryVector(source: .reconciled, confidence: 1.0,
+                                   axes: ["umami_seaweed": 0.99, "citrus": 0.8])
+        #expect(future.ranked.count == 1)
+        #expect(TasteSummary.notes(future) == "Citrus.")
+    }
+}
+
+// MARK: - names fit to read
+
+@Suite struct DisplayNameTests {
+    @Test func stripsTheLegalWrapper() {
+        #expect(DisplayName.producer("The Alchemist LLC") == "The Alchemist")
+        #expect(DisplayName.producer("Lidl US LLC") == "Lidl US")
+    }
+
+    @Test func keepsTradeWordsThatAreActuallyTheName() {
+        // "Brewing" is part of what the business is called; "Co" is paperwork.
+        #expect(DisplayName.producer("Sierra Nevada Brewing Co") == "Sierra Nevada Brewing")
+    }
+
+    @Test func neverStripsANameToNothing() {
+        #expect(DisplayName.producer("Co") == "Co")
+    }
+
+    @Test func dropsTheBrandRepeatedInTheProductName() {
+        #expect(DisplayName.product("The Alchemist Heady Topper",
+                                    producer: "The Alchemist LLC") == "Heady Topper")
+    }
+
+    @Test func keepsTheBrandWhenAllThatIsLeftIsACategory() {
+        // "Ouzo" and "Vodka" under a brand line identify nothing — the repetition is worth
+        // less than the loss.
+        #expect(DisplayName.product("Plomari Ouzo", producer: "Plomari") == "Plomari Ouzo")
+        #expect(DisplayName.product("Titos Vodka", producer: "Titos") == "Titos Vodka")
+    }
+
+    @Test func leavesAnUnrelatedNameAlone() {
+        #expect(DisplayName.product("Heady Topper",
+                                    producer: "The Alchemist LLC") == "Heady Topper")
+        #expect(DisplayName.product("Pliny the Elder",
+                                    producer: "Russian River Brewing Co") == "Pliny the Elder")
+    }
+}
