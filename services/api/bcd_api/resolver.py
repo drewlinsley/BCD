@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from bcd_ingest.dedup import is_generic_token
+from bcd_ingest.dedup import is_generic_token, search_name
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     SENSORY_AXES,
@@ -123,7 +123,13 @@ def _token_supported(query: str, name: str) -> bool:
         return True
     identifying = _identifying_tokens(name)
     if not identifying:
-        return True
+        # Real words, but every one of them is a category word: "Ipa Ipa", "Irish Whiskey".
+        # Such a name can only be what the label names if the label is equally generic. When
+        # the line does carry something specific the row cannot account for, the agreement is
+        # a coincidence — "DOGFISH HEAD 60 MINUTE IPA" resolved to a row literally named "Ipa
+        # Ipa", because containment scores it 1.0 and so the raised floor this used to defer
+        # to never bit.
+        return not _identifying_tokens(query)
     q_tokens = _tokens(query)
     return any(_trigram_sim(nt, qt) >= _TOKEN_SUPPORT_MIN
                for nt in identifying for qt in q_tokens)
@@ -204,6 +210,17 @@ class Resolver:
             brand=Brand.model_validate(brand),
         )
 
+    def _qualified_name(self, rec: dict) -> str:
+        """"<brand> <name>" for a product row, matching what `search_name` stores.
+
+        The catalog splits a label in two, so half of it is invisible to any check that
+        reads only `name`. Resolved through the store rather than a join because there are
+        at most a handful of candidates per detection.
+        """
+        brand_id = rec.get("brand_id")
+        brand = self.store.get_gold(brand_id) if brand_id else None
+        return search_name(rec.get("name") or "", (brand or {}).get("name"))
+
     # ---- scoring ----
     def score(self, product: Product, profile: TasteProfile | None) -> tuple[float, str, bool]:
         """Predicted 0-1 enjoyment + a one-line reason + cold_start flag.
@@ -244,7 +261,11 @@ class Resolver:
                 # rather than checking only matches[0] means such a coincidence is skipped, not
                 # allowed to block a genuine lower-ranked hit. Short names use a near-exact floor.
                 for rec, sc in self.store.match_products(det.text):
-                    name = rec.get("name") or ""
+                    # Judge the evidence on the brand-qualified name, because that is what
+                    # the label actually says. A row named "Irish Whiskey" is anonymous on
+                    # its own and would be thrown out; as "Jameson Irish Whiskey" it is the
+                    # product the line names.
+                    name = self._qualified_name(rec)
                     # Low-information either way: too short to be distinctive, or built only
                     # from category words. Both trigram-match label chrome far too easily, so
                     # they must clear a near-exact bar rather than the normal floor.

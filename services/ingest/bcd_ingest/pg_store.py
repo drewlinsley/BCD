@@ -31,6 +31,7 @@ from bcd_schema import SENSORY_AXES
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
+from .dedup import search_name
 from .store import BronzeDoc  # reuse the shared bronze dataclass
 
 
@@ -125,10 +126,13 @@ class PostgresStore:
                     lon         double precision,
                     updated_at  timestamptz NOT NULL
                 );
+                ALTER TABLE gold ADD COLUMN IF NOT EXISTS search_name text;
                 CREATE INDEX IF NOT EXISTS ix_silver_type ON silver(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_type ON gold(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_name_trgm
                     ON gold USING gin (name gin_trgm_ops);
+                CREATE INDEX IF NOT EXISTS ix_gold_search_name_trgm
+                    ON gold USING gin (search_name gin_trgm_ops);
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
                 """
@@ -242,6 +246,21 @@ class PostgresStore:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def refresh_search_names(self) -> int:
+        """Denormalise the brand-qualified name onto every product, for matching only.
+
+        The rule lives in `dedup.search_name` so this store and the dev store agree; see
+        it for why a brand is sometimes withheld. Idempotent — run after any promote.
+        """
+        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")}
+        rows = [
+            (search_name(p.get("name") or "", brands.get(p.get("brand_id") or "")), p["id"])
+            for p in self.iter_gold("product")
+        ]
+        with self._lock, self._conn.cursor() as cur:
+            cur.executemany("UPDATE gold SET search_name=%s WHERE id=%s", rows)
+        return len(rows)
+
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
         """Best-first name match for an OCR line, scored 0-1.
@@ -276,13 +295,24 @@ class PostgresStore:
                 SELECT record,
                        GREATEST(similarity(coalesce(name,''), %s),
                                 word_similarity(coalesce(name,''), %s),
-                                word_similarity(%s, coalesce(name,''))) AS sim
+                                word_similarity(%s, coalesce(name,'')),
+                                similarity(coalesce(search_name, name, ''), %s),
+                                word_similarity(coalesce(search_name, name, ''), %s),
+                                word_similarity(%s, coalesce(search_name, name, ''))) AS sim
                 FROM gold
                 WHERE entity_type='product'
-                ORDER BY sim DESC
+                -- Ties at the top are the norm, not the exception: `word_similarity` scores
+                -- 1.0 for ANY name wholly contained in the label, so "Handmade Vodka" and
+                -- "Tito's Handmade Vodka" both max out on "TITOS HANDMADE VODKA". Plain
+                -- `similarity` is the tiebreak because it is the only one of the three that
+                -- penalises what the candidate *leaves out* — it drops for the row missing
+                -- "Titos", and rises for the one that accounts for the whole label.
+                ORDER BY sim DESC,
+                         similarity(coalesce(search_name, name, ''), %s) DESC,
+                         id
                 LIMIT %s
                 """,
-                (text, text, text, limit),
+                (text, text, text, text, text, text, text, limit),
             ).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 

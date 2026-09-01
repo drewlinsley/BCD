@@ -50,6 +50,10 @@ class Connector(ABC):
                 sid = f"{doc.id}:{etype}:{i}"
                 self.store.put_silver(sid, self.source_id, etype, doc.id, rec)
         gold_counts = self.promote()
+        # Brand-qualified names are derived from gold, so they go stale the moment a
+        # promote lands new products or brands. Refreshing here means no caller has to
+        # remember to.
+        self.store.refresh_search_names()
         return {"bronze": n_bronze, **{f"gold_{k}": v for k, v in gold_counts.items()}}
 
 

@@ -21,6 +21,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from bcd_schema import SENSORY_AXES
 
+from .dedup import is_generic_token, search_name
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -200,9 +202,16 @@ class MedallionStore:
         want = _tokenize(text)
         if not want:
             return []
+        # A product is scored against its own name *and* its brand-qualified name, because
+        # the catalog splits a label across two rows — brand "Tito's" + name "Handmade
+        # Vodka" for what a bottle simply calls Tito's Handmade Vodka.
+        ident = {t for t in want if not is_generic_token(t)}
+        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")}
         scored: list[tuple[dict, float]] = []
         for p in self.iter_gold("product"):
-            name_tokens = _tokenize(p.get("name", ""))
+            raw = p.get("name", "")
+            qualified = search_name(raw, brands.get(p.get("brand_id") or ""))
+            name_tokens = _tokenize(raw) | _tokenize(qualified)
             if not name_tokens:
                 continue
             overlap = want & name_tokens
@@ -216,9 +225,21 @@ class MedallionStore:
             # instead gives the right answer 1.0.
             score = max(len(overlap) / max(len(name_tokens), 1),
                         len(overlap) / max(len(want), 1))
-            scored.append((p, round(score, 3)))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
+            # How much of the *label* this row accounts for. Ties at the top are the norm
+            # — every name wholly inside the label scores 1.0 — so the row explaining more
+            # of what was read wins, mirroring the plain-similarity tiebreak the Postgres
+            # store uses. Only identifying tokens count: crediting category words would let
+            # a row matching "extra stout" beat one matching the brand.
+            covered = len(ident & _tokenize(qualified)) / max(len(ident), 1) if ident else 0.0
+            scored.append((p, round(score, 3), covered))
+        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        return [(p, sim) for p, sim, _ in scored[:limit]]
+
+    def refresh_search_names(self) -> int:
+        """No-op: this store builds the brand-qualified name per query rather than storing
+        it, so there is nothing to backfill. Present so callers need not know which store
+        they hold."""
+        return 0
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine nearest-neighbor over products that carry a sensory vector, computed in
@@ -255,6 +276,7 @@ class Store(Protocol):
     def counts(self) -> dict[str, int]: ...
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def refresh_search_names(self) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 

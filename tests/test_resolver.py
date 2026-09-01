@@ -336,10 +336,66 @@ def test_a_longer_catalog_name_is_not_penalised_for_being_specific():
 
 
 def test_a_short_name_inside_a_noisy_line_still_wins():
-    """The other direction has to keep working: the OCR line is the noisy one here."""
+    """The other direction has to keep working: here the OCR line is the noisy one.
+
+    The rival is a real rival — another brewery's stout — rather than a brandless
+    "Draught Stout", which is not a row the catalog would contain and which ties on every
+    metric by construction.
+    """
     store = MedallionStore(root=tempfile.mkdtemp())
-    for pid, name in (("off:1", "Guinness"), ("off:2", "Draught Stout")):
-        store.put_gold(pid, "product", {"id": pid, "name": name})
+    store.put_gold("brand:g", "brand", {"id": "brand:g", "name": "Guinness"})
+    store.put_gold("brand:s", "brand", {"id": "brand:s", "name": "Samuel Smith"})
+    store.put_gold("off:1", "product",
+                   {"id": "off:1", "name": "Guinness", "brand_id": "brand:g"})
+    store.put_gold("off:2", "product",
+                   {"id": "off:2", "name": "Extra Stout", "brand_id": "brand:s"})
 
     ranked = store.match_products("GUINNESS DRAUGHT 440ML EXTRA STOUT", limit=2)
     assert ranked[0][0]["name"] == "Guinness"
+
+
+def test_the_brand_half_of_a_split_row_is_matchable():
+    """A label names brand and product together; the catalog stores them apart.
+
+    "Handmade Vodka" under brand Tito's must win "TITOS HANDMADE VODKA" over a rival whose
+    name alone is just as contained in the label.
+    """
+    store = MedallionStore(root=tempfile.mkdtemp())
+    store.put_gold("brand:t", "brand", {"id": "brand:t", "name": "Tito's"})
+    store.put_gold("brand:o", "brand", {"id": "brand:o", "name": "Other Distillery"})
+    store.put_gold("off:1", "product",
+                   {"id": "off:1", "name": "Handmade Vodka", "brand_id": "brand:t"})
+    store.put_gold("off:2", "product",
+                   {"id": "off:2", "name": "Handmade Vodka", "brand_id": "brand:o"})
+
+    ranked = store.match_products("TITOS HANDMADE VODKA", limit=2)
+    assert ranked[0][0]["id"] == "off:1"
+
+
+def test_a_placeholder_brand_is_not_glued_onto_the_name():
+    """OFF writes "Unknown" when it has no brand; prepending it is pure noise."""
+    from bcd_ingest.dedup import search_name
+
+    assert search_name("Bombay Sapphire Gin", "Unknown") == "Bombay Sapphire Gin"
+    assert search_name("Bombay sapphire murcian lemon", "Bombay spirits") == (
+        "Bombay sapphire murcian lemon"
+    )
+    assert search_name("Handmade Vodka", "Tito's") == "Tito's Handmade Vodka"
+
+
+def test_an_all_category_name_needs_an_equally_generic_label():
+    """A row named only with category words cannot claim a label that names something.
+
+    "DOGFISH HEAD 60 MINUTE IPA" resolved to a product literally called "Ipa Ipa": every
+    token in that name is a category word, so token support abstained, and the raised
+    floor it deferred to never bit because containment scores a wholly-contained name 1.0.
+    Dogfish Head is not in the catalog at all — unresolved is the correct answer.
+    """
+    # "Irish Whiskey" is anonymous read alone, and would be refused — which is why the
+    # resolver judges the brand-qualified name instead. Qualified, it is evidence.
+    assert not _token_supported("JAMESON IRISH WHISKEY", "Irish Whiskey")
+    assert _token_supported("JAMESON IRISH WHISKEY", "Jameson Irish Whiskey")
+    # A generic line against a generic name is still allowed to match.
+    assert _token_supported("IRISH WHISKEY", "Irish Whiskey")
+    # A name carrying one real word of its own never depended on the brand.
+    assert _token_supported("TITOS HANDMADE VODKA", "Handmade Vodka")

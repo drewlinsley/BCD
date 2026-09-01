@@ -26,6 +26,7 @@ async def _run(source: str, limit: int | None, root: str, promote_only: bool) ->
         # (e.g. newly emitted SKUs) from the raw rows already landed, no network round-trip.
         print(f"→ re-promoting '{source}' silver→gold in {store.db_path}")
         summary = {f"gold_{k}": v for k, v in connector.promote().items()}
+        store.refresh_search_names()
     else:
         print(f"→ ingesting '{source}' (limit={limit}) into {store.db_path}")
         summary = await connector.run(limit=limit)

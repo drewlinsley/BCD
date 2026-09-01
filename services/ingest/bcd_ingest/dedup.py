@@ -246,3 +246,38 @@ def is_generic_name(name: str) -> bool:
     thing across ingest and resolution."""
     toks = _tokens(name)
     return bool(toks) and not (toks - _STYLE)
+
+
+#: Brand strings that name no brand. Open Food Facts leaves these behind when the field is
+#: missing, and prepending one to a product name adds only noise for the matcher to trip on.
+_PLACEHOLDER_BRAND = {"unknown", "unbranded", "various", "none", "generic", "na"}
+
+
+def search_name(name: str, brand: str | None) -> str:
+    """The string a scanned label should be matched against: "<brand> <name>".
+
+    A label reads "TITO'S HANDMADE VODKA", but the catalog splits it: a brand row called
+    Tito's and a product row called "Handmade Vodka". Matched on its name alone that
+    product can never account for the whole label, and the half it does show is a generic
+    phrase that ties with every other handmade vodka on the shelf.
+
+    The brand is added only when the name does not already carry it. Sharing a single
+    token is enough to count as carrying it, which is what keeps the redundant cases out:
+    brand "Bombay spirits" over "Bombay sapphire murcian lemon" would otherwise produce
+    "Bombay spirits Bombay sapphire murcian lemon", and every extra "Bombay" dilutes the
+    trigram score of the row that deserves to win.
+
+    This is the exact inverse of the client's DisplayName, which strips a repeated brand
+    so a screen reads cleanly. Names are stored for matching and shown for reading, and
+    the two want opposite things.
+    """
+    name = (name or "").strip()
+    brand = (brand or "").strip()
+    if not name or not brand:
+        return name
+    btoks = _tokens(brand)
+    if not btoks or btoks <= _PLACEHOLDER_BRAND:
+        return name
+    if btoks & _tokens(name):
+        return name
+    return f"{brand} {name}"
