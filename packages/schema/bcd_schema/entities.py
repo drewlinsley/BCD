@@ -41,7 +41,8 @@ class Producer(BaseModel):
     name: str
     kind: str | None = None  # brewery | distillery | winery | cidery | contract
     country: str | None = None
-    region: str | None = None
+    region: str | None = None        # state / province
+    city: str | None = None
     lat: float | None = None
     lon: float | None = None
     parent_company: Sourced[str] | None = None  # who really owns it (ABI, Constellation)
