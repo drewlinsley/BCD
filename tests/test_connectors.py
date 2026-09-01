@@ -190,3 +190,33 @@ def test_ttb_parse_range_reads_the_result_header():
 
     assert parse_range("<b>121 to 140 of 140</b>") == (121, 140, 140)
     assert parse_range("no results") is None
+
+
+def test_ttb_category_covers_the_registry_vocabulary():
+    # TTB's class/type descriptions are its own vocabulary, not ours. A thin map filed
+    # 4,019 products under `other` — including every stout, porter, brandy, liqueur and
+    # agave spirit — where they can be neither styled nor recommended.
+    from bcd_ingest.connectors.ttb_cola import _category_of
+
+    for text, want in [
+        ("Stout", "beer"), ("Porter", "beer"), ("Ale", "beer"),
+        ("Malt Beverages Specialities - Flavored", "beer"),
+        ("Agave Spirits", "spirit"), ("Mezcal Fb", "spirit"),
+        ("Cognac (brandy) Fb", "spirit"), ("Apple Brandy (calvados)", "spirit"),
+        ("Triple Sec", "spirit"), ("Peppermint Schnapps", "spirit"),
+        ("Dairy Cream Liqueur/cordial", "spirit"), ("Neutral Spirits - Grain", "spirit"),
+        ("Anisette, Ouzo, Ojen", "spirit"), ("Bitters - Beverage", "spirit"),
+        ("Sake - Imported", "sake"),
+    ]:
+        assert _category_of(text).value == want, text
+
+
+def test_ttb_single_malt_is_a_whisky_not_a_malt_beverage():
+    # The map is matched as substrings, first hit wins, so order is load-bearing:
+    # "Straight American Single Malt" carries no whisky word and must not be reached by
+    # the beer entry that "malt" would otherwise suggest.
+    from bcd_ingest.connectors.ttb_cola import _category_of
+
+    assert _category_of("Straight American Single Malt").value == "spirit"
+    assert _category_of("Single Malt Scotch Whisky").value == "spirit"
+    assert _category_of("Malt Beverages Specialities - Flavored").value == "beer"

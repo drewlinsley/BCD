@@ -148,19 +148,69 @@ _FIXTURE = os.path.join(
     "data", "fixtures", "ttb_cola_sample.json",
 )
 
-# TTB class/type code -> our Category (abbreviated; full map lives in the enrich service)
+# TTB class/type text -> our Category. Matched as substrings against the class/type
+# description, first hit wins, so the order is load-bearing: anything specific has to come
+# before the general word it contains. TTB's own vocabulary is the source — these are the
+# descriptions the registry actually emits, not a guess at what it might say.
 _CLASS_TO_CATEGORY = {
+    # Specific before general: "single malt" is a whisky, "malt beverage" is a beer, and
+    # a bare "malt" key would swallow both.
+    "single malt": Category.SPIRIT,
+
+    # Beer
     "ale": Category.BEER,
     "lager": Category.BEER,
+    "stout": Category.BEER,
+    "porter": Category.BEER,
     "malt beverage": Category.BEER,
     "beer": Category.BEER,
+
+    # Whisky and friends
     "whisky": Category.SPIRIT,
     "whiskey": Category.SPIRIT,
     "bourbon": Category.SPIRIT,
+    "rye": Category.SPIRIT,
+
+    # Agave
+    "tequila": Category.SPIRIT,
+    "mezcal": Category.SPIRIT,
+    "agave": Category.SPIRIT,
+
+    # Brandy family
+    "brandy": Category.SPIRIT,
+    "cognac": Category.SPIRIT,
+    "armagnac": Category.SPIRIT,
+    "calvados": Category.SPIRIT,
+    "pisco": Category.SPIRIT,
+    "grappa": Category.SPIRIT,
+    "slivovitz": Category.SPIRIT,
+
+    # Liqueurs, cordials and the flavoured shelf
+    "liqueur": Category.SPIRIT,
+    "cordial": Category.SPIRIT,
+    "schnapps": Category.SPIRIT,
+    "amaretto": Category.SPIRIT,
+    "triple sec": Category.SPIRIT,
+    "curacao": Category.SPIRIT,
+    "anisette": Category.SPIRIT,
+    "ouzo": Category.SPIRIT,
+    "absinthe": Category.SPIRIT,
+    "bitters": Category.SPIRIT,
+    "arack": Category.SPIRIT,
+    "raki": Category.SPIRIT,
+    "aquavit": Category.SPIRIT,
+
+    # Base spirits
     "vodka": Category.SPIRIT,
     "gin": Category.SPIRIT,
     "rum": Category.SPIRIT,
-    "tequila": Category.SPIRIT,
+    "neutral spirits": Category.SPIRIT,
+    "spirits": Category.SPIRIT,
+
+    # Neither beer nor spirit, and it has its own Category
+    "sake": Category.SAKE,
+    "cider": Category.CIDER,
+    "mead": Category.MEAD,
     "wine": Category.WINE,
 }
 
