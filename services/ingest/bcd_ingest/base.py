@@ -11,7 +11,7 @@ A connector declares its `source_id` (must match a registry yaml) and its `provi
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 from .store import BronzeDoc, Store
@@ -42,7 +42,7 @@ class Connector(ABC):
     async def run(self, limit: int | None = None) -> dict[str, int]:
         """Full pipeline for this connector. Returns a summary of what landed."""
         n_bronze = 0
-        for doc in await _materialize(self.fetch(limit)):
+        async for doc in _stream(self.fetch(limit)):
             self.store.put_bronze(doc)
             n_bronze += 1
             for i, rec in enumerate(self.normalize(doc)):
@@ -57,8 +57,18 @@ class Connector(ABC):
         return {"bronze": n_bronze, **{f"gold_{k}": v for k, v in gold_counts.items()}}
 
 
-async def _materialize(maybe_iter: Any) -> list[BronzeDoc]:
-    """Accept either a sync iterable or an async iterable of BronzeDoc."""
+async def _stream(maybe_iter: Any) -> AsyncIterator[BronzeDoc]:
+    """Accept either a sync or an async iterable of BronzeDoc, and yield as they arrive.
+
+    This used to build the whole list first. That is fine for a fixture and ruinous for a
+    long crawl: a TTB walk over months of the registry would hold every document in memory
+    and write nothing until the last one landed, so any failure — or an interrupt — threw
+    away the entire run. Streaming means rows are durable as they are fetched, and a run
+    that dies partway keeps what it already got.
+    """
     if hasattr(maybe_iter, "__aiter__"):
-        return [d async for d in maybe_iter]
-    return list(maybe_iter)
+        async for doc in maybe_iter:
+            yield doc
+    else:
+        for doc in maybe_iter:
+            yield doc

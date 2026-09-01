@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from bcd_ingest.connectors.openfoodfacts import (
     OpenFoodFactsConnector,
@@ -114,3 +116,77 @@ def test_generic_names_are_brand_qualified(pn, brand, expected):
 def test_generic_name_without_a_brand_is_left_as_is():
     # Nothing to anchor on; the row still exists, it just stays generic.
     assert _off_name("Blended Scotch Whisky", "") == "Blended Scotch Whisky"
+
+
+def _ttb_page(first: int, last: int, total: int) -> str:
+    """A result page shaped like the registry's: a range header and `last - first + 1` rows."""
+    rows = "".join(
+        "<tr>"
+        f'<td><a href="viewColaDetails.do?ttbid={26000000000000 + n}">{n}</a></td>'
+        "<td>DSP-X-1</td><td>1</td><td>08/24/2026</td><td></td>"
+        f"<td>BRAND {n}</td><td>06</td><td>MICHIGAN</td><td>301</td><td>VODKA</td>"
+        "</tr>"
+        for n in range(first, last + 1)
+    )
+    return f"<html><body>{first} to {last} of {total}<table>{rows}</table></body></html>"
+
+
+def test_ttb_pagination_stops_on_an_exact_multiple_of_the_page_size():
+    # The registry's paginator clamps: ask past the end and it re-serves the last page
+    # forever. With 140 records and 20 to a page the final page is full, so "a short page
+    # is the last page" never fires and the walk spins, re-fetching rows it already has.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    pages = [_ttb_page(1 + i * 20, 20 + i * 20, 140) for i in range(7)]
+    served: list[str] = []
+
+    class _Client:
+        def request(self, method, url, data=None):
+            # Past the end, hand back the last page again — exactly what TTB does.
+            page = pages[len(served)] if len(served) < len(pages) else pages[-1]
+            served.append(page)
+
+            class _R:
+                text = page
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return _R()
+
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_day(_Client(), date(2026, 8, 24), "100", "699"))
+
+    assert len(rows) == 140, "every record once"
+    assert len({r["ttb_id"] for r in rows}) == 140, "and none of them twice"
+    assert len(served) == 7, "no request past the last page"
+
+
+def test_ttb_pagination_stops_when_the_header_is_missing():
+    # No range header (a layout change, an error page): fall back to the short-page rule
+    # rather than paging forever.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    page = _ttb_page(1, 5, 5).replace("1 to 5 of 5", "")
+
+    class _Client:
+        def request(self, method, url, data=None):
+            class _R:
+                text = page
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+
+            return _R()
+
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    assert len(list(conn._walk_day(_Client(), date(2026, 8, 24), "100", "699"))) == 5
+
+
+def test_ttb_parse_range_reads_the_result_header():
+    from bcd_ingest.connectors.ttb_cola import parse_range
+
+    assert parse_range("<b>121 to 140 of 140</b>") == (121, 140, 140)
+    assert parse_range("no results") is None
