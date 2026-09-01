@@ -52,7 +52,7 @@ final class AppEnvironment: ObservableObject {
     }
 
     static func live() -> AppEnvironment {
-        let api = APIClient(baseURL: Self.apiBaseURL())
+        let api = APIClient(baseURL: Self.apiBaseURL(), installId: InstallIdentity.current)
         // Consent is read from what the user actually chose last run, not assumed.
         let consent = ConsentStore()
         let telemetry = TelemetryQueue(consent: consent.state, sink: api,

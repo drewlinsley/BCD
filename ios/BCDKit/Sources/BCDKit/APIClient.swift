@@ -27,19 +27,29 @@ public enum APIError: Error, Sendable {
 /// live server (see MockURLProtocol in the tests).
 public final class APIClient: APIClientProtocol, @unchecked Sendable {
     private let baseURL: URL
+    private let installId: String
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
 
-    public init(baseURL: URL, session: URLSession = .shared) {
+    /// `installId` is a property of the client rather than an argument to every call: it
+    /// is the same pseudonymous identity for the whole session, and threading it through
+    /// each request signature would only give callers a way to get it wrong.
+    public init(baseURL: URL, installId: String = InstallIdentity.current,
+                session: URLSession = .shared) {
         self.baseURL = baseURL
+        self.installId = installId
         self.session = session
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
     }
 
+    /// Scoring is personal, so the scan has to say who is asking. Without `user_id` the
+    /// server falls back to its seed profile and every rating the user has ever given is
+    /// invisible to the number on screen.
     public func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
-        try await post("/v1/scan/resolve", body: req)
+        try await post("/v1/scan/resolve", body: req,
+                       query: [URLQueryItem(name: "user_id", value: installId)])
     }
 
     public func searchProducts(_ query: String) async throws -> [ResolvedProduct] {

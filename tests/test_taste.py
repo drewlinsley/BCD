@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import tempfile
 
 import pytest
@@ -24,6 +25,7 @@ from bcd_schema import (
     SensorySource,
     SensoryVector,
     Sourced,
+    TasteProfile,
 )
 
 PROV = Provenance(source_id="test", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
@@ -231,3 +233,54 @@ def test_reason_does_not_claim_a_match_it_did_not_find(store):
     assert "matches your smoky peat" in strong_reason
     assert "matches your" not in weak_reason
     assert "outside your usual" in weak_reason
+
+
+def test_seed_profile_answers_for_any_new_install(monkeypatch):
+    """A real install id must still get the seed profile until it has rated something.
+
+    The fallback used to be keyed on the user id, so it only ever matched the literal
+    "demo". That was invisible while the client sent no id at all; the moment it started
+    sending its own, every fresh install matched no seed, got `None`, and scored a flat
+    0.5 on the entire catalog.
+    """
+    # `bcd_api.__init__` re-exports the FastAPI instance under the name `app`, which
+    # shadows the submodule — reach the module itself rather than the instance.
+    api = importlib.import_module("bcd_api.app")
+
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+
+    seeded = api._profile_for("9f3c-not-demo")
+    assert seeded is not None
+    assert seeded.sensory_ideal is not None
+
+
+def test_learned_profile_beats_the_seed(monkeypatch):
+    """Once an install has a real centroid, the seed must get out of the way — otherwise
+    rating something would never change what the next scan shows."""
+    # `bcd_api.__init__` re-exports the FastAPI instance under the name `app`, which
+    # shadows the submodule — reach the module itself rather than the instance.
+    api = importlib.import_module("bcd_api.app")
+
+    learned = TasteProfile(
+        user_id="mine",
+        version=3,
+        sensory_ideal=SensoryVector(source=SensorySource.RECONCILED, confidence=0.9,
+                                    axes={"smoky_peat": 0.9}),
+    )
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+    monkeypatch.setattr(api, "load_profile", lambda store, uid: learned if uid == "mine" else None)
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+
+    assert api._profile_for("mine") is learned
+    assert api._profile_for("someone-else").user_id == "demo"
+
+
+class _EmptyStore:
+    """Nothing stored, so `load_profile` finds no learned profile."""
+
+    def iter_gold(self, *_a, **_k):
+        return iter(())
+
+    def get_gold(self, *_a, **_k):
+        return None

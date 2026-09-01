@@ -160,12 +160,19 @@ async def telemetry(batch: dict) -> dict:
 
 
 def _profile_for(user_id: str) -> TasteProfile | None:
-    """A learned profile beats the seed as soon as it has a real centroid; before that we
-    keep the demo profile so a fresh install still gets personalized-looking scores."""
+    """A learned profile beats the seed as soon as it has a real centroid; before that the
+    seed answers, so a fresh install still gets personalized-looking scores.
+
+    The fallback is deliberately not keyed on `user_id`. It used to be, which was harmless
+    only while every client sent the literal id "demo" — the moment a real install
+    identified itself it matched no seed, got no profile, and every product scored a flat
+    0.5. The seed is a starting point for anyone who has not rated anything yet, not a
+    profile that belongs to one id.
+    """
     learned = load_profile(_state["store"], user_id)
     if learned is not None and learned.sensory_ideal is not None:
         return learned
-    return _state["profiles"].get(user_id)
+    return _state["profiles"].get(user_id) or _state["profiles"].get("demo")
 
 
 @app.post("/v1/hooks/parallel")
