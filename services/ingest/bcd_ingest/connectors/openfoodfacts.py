@@ -46,12 +46,41 @@ _FIELDS = (
 )
 
 
+#: Category tags to pull, every one verified live against the v2 search API.
+#:
+#: `whiskies` was in this list from the start and returns **zero** — it is not an OFF
+#: English tag, so a third of every pull fetched nothing and the catalog had no whisky at
+#: all. The live tag is the singular `whisky` (702 products). Probe before adding: a
+#: plausible-looking tag that does not exist fails silently as an empty category.
+#:
+#: Wine is deliberately absent. It is the single biggest tag on OFF (16,754) and would
+#: outnumber everything else here combined, while the sensory model behind recommendation
+#: is built on beer and spirit axes — every wine would land on one generic centroid. Add
+#: "wines", "sparkling-wines" and "champagnes" here if that changes.
+_CATEGORIES: tuple[str, ...] = (
+    # beer
+    "beers", "ales", "lagers", "pilsner", "stouts", "porters", "india-pale-ales",
+    "wheat-beers", "craft-beers", "trappist-beers", "non-alcoholic-beers",
+    # whisky
+    "whisky", "scotch-whisky", "bourbon-whiskey",
+    # other spirits
+    "spirits", "vodkas", "gins", "rums", "tequilas", "liqueurs", "brandies", "pastis",
+    # adjacent, in scope
+    "ciders", "sakes",
+)
+
+#: Consecutive page failures before a category leaves the rotation. OFF answers with a
+#: transient HTML outage page often enough that one strike would routinely cost a whole
+#: category — and with 24 of them in play, dropping on first error silently halves a run.
+_MAX_CATEGORY_STRIKES = 3
+
+
 class OpenFoodFactsConnector(Connector):
     source_id = "openfoodfacts"
     provides = ("product", "producer", "sku", "upc", "abv", "ingredients")
 
     def __init__(self, store,
-                 categories: tuple[str, ...] = ("beers", "whiskies", "spirits"),
+                 categories: tuple[str, ...] = _CATEGORIES,
                  country: str | None = None) -> None:
         super().__init__(store)
         self.categories = categories
@@ -96,6 +125,7 @@ class OpenFoodFactsConnector(Connector):
         # first. A category drops out of rotation when it errors or runs dry.
         async with httpx.AsyncClient(timeout=30.0, headers={"User-Agent": _UA}) as client:
             page = {c: 1 for c in self.categories}
+            strikes = {c: 0 for c in self.categories}
             active = list(self.categories)
             while active:
                 for category in list(active):
@@ -103,10 +133,17 @@ class OpenFoodFactsConnector(Connector):
                         data = await self._get_page(client, category, page[category])
                     except httpx.HTTPError as exc:
                         # Degrade gracefully: OFF being down shouldn't abort a run that
-                        # may already have landed the primary (TTB/OBDB) sources.
-                        print(f"  ! openfoodfacts '{category}' page {page[category]} failed: {exc}")
-                        active.remove(category)
+                        # may already have landed the primary (TTB/OBDB) sources. But a
+                        # blip is not the same as a dry category, so give it a few passes
+                        # before writing it off — the page number is kept, so a category
+                        # that recovers resumes where it stalled.
+                        strikes[category] += 1
+                        if strikes[category] >= _MAX_CATEGORY_STRIKES:
+                            print(f"  ! openfoodfacts '{category}' dropped at page "
+                                  f"{page[category]} after {strikes[category]} failures: {exc}")
+                            active.remove(category)
                         continue
+                    strikes[category] = 0
                     products = data.get("products", [])
                     if not products:
                         active.remove(category)
