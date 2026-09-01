@@ -312,3 +312,34 @@ def test_can_chrome_loses_to_the_brand_line():
     names = [c.resolved.product.name for c in resp.candidates]
     assert names == ["The Alchemist Heady Topper"]  # the only line that identifies anything
     assert sorted(resp.unresolved_indices) == [1, 2]
+
+
+def test_a_longer_catalog_name_is_not_penalised_for_being_specific():
+    """"BOMBAY SAPPHIRE" must not resolve to "Gin Bombay".
+
+    Scoring only how much of the *catalog name* the OCR line covers rewards stubby
+    entries: every extra word in the correct answer dilutes it while a short wrong one
+    keeps a high score. Real regression — the label reads BOMBAY SAPPHIRE and the app
+    said Gin Bombay.
+    """
+    store = MedallionStore(root=tempfile.mkdtemp())
+    for pid, name in (
+        ("off:1", "Gin Bombay"),
+        ("off:2", "Bombay Sapphire London Dry Gin"),
+        ("off:3", "Bombay London Dry Gin"),
+    ):
+        store.put_gold(pid, "product", {"id": pid, "name": name})
+
+    ranked = store.match_products("BOMBAY SAPPHIRE", limit=3)
+    assert ranked[0][0]["name"] == "Bombay Sapphire London Dry Gin"
+    assert ranked[0][1] == 1.0
+
+
+def test_a_short_name_inside_a_noisy_line_still_wins():
+    """The other direction has to keep working: the OCR line is the noisy one here."""
+    store = MedallionStore(root=tempfile.mkdtemp())
+    for pid, name in (("off:1", "Guinness"), ("off:2", "Draught Stout")):
+        store.put_gold(pid, "product", {"id": pid, "name": name})
+
+    ranked = store.match_products("GUINNESS DRAUGHT 440ML EXTRA STOUT", limit=2)
+    assert ranked[0][0]["name"] == "Guinness"

@@ -208,8 +208,14 @@ class MedallionStore:
             overlap = want & name_tokens
             if not overlap:
                 continue
-            # Jaccard-ish, biased toward covering the product name.
-            score = len(overlap) / max(len(name_tokens), 1)
+            # Best of both coverages, mirroring the two directions of pg_trgm's
+            # `word_similarity` in the Postgres store. Dividing only by the name length
+            # rewards stubby catalog entries: for "BOMBAY SAPPHIRE", "Gin Bombay" covers
+            # half its own two tokens (0.5) while "Bombay Sapphire London Dry Gin" covers
+            # only two of its five (0.4) — and the wrong one wins. Covering the *query*
+            # instead gives the right answer 1.0.
+            score = max(len(overlap) / max(len(name_tokens), 1),
+                        len(overlap) / max(len(want), 1))
             scored.append((p, round(score, 3)))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]

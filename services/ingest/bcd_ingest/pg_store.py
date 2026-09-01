@@ -244,13 +244,29 @@ class PostgresStore:
 
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Best-first name match for an OCR line, scored 0-1. Uses GREATEST(similarity,
-        word_similarity): plain `similarity` compares the whole strings (great when the OCR
-        *is* the name, e.g. "HEINEKEN"), while `word_similarity` finds the name *inside* a
-        noisy line ("GUINNESS DRAUGHT 440ML EXTRA STOUT" → the Guinness product). The caller
-        applies a confidence floor, so this returns the top few regardless and lets the
-        resolver reject weak ones. Seq-scans the ~hundreds of products (fine at this size); a
-        million-row catalog would gate with the GIN `%`/`%>` operators first."""
+        """Best-first name match for an OCR line, scored 0-1.
+
+        `word_similarity` is directional — it finds its first argument inside a continuous
+        extent of its second — and a label can be noisy in either direction, so both are
+        taken:
+
+          * `word_similarity(name, line)` finds a short catalog name inside a noisy OCR
+            line: "GUINNESS DRAUGHT 440ML EXTRA STOUT" -> Guinness.
+          * `word_similarity(line, name)` finds a short OCR line inside a longer catalog
+            name: "BOMBAY SAPPHIRE" -> "Bombay Sapphire London Dry Gin".
+
+        Only the first was measured for a long time, which quietly biased matching toward
+        stubby catalog entries: every extra word in the *right* answer diluted its score
+        while a short wrong one kept a high one. "BOMBAY SAPPHIRE" returned "Gin Bombay"
+        (0.636) over "Bombay Sapphire London Dry Gin" (0.516), and "HEADY TOPPER" scored
+        the product actually called that only 0.500. Both are 1.000 with the second
+        direction included.
+
+        Plain `similarity` stays for the case where the OCR simply *is* the name
+        ("HEINEKEN"). The caller applies a confidence floor and token-support checks, so
+        this returns the top few regardless and lets the resolver reject weak ones.
+        Seq-scans the ~hundreds of products (fine at this size); a million-row catalog
+        would gate with the GIN `%`/`%>` operators first."""
         text = (text or "").strip()
         if not text:
             return []
@@ -259,13 +275,14 @@ class PostgresStore:
                 """
                 SELECT record,
                        GREATEST(similarity(coalesce(name,''), %s),
-                                word_similarity(coalesce(name,''), %s)) AS sim
+                                word_similarity(coalesce(name,''), %s),
+                                word_similarity(%s, coalesce(name,''))) AS sim
                 FROM gold
                 WHERE entity_type='product'
                 ORDER BY sim DESC
                 LIMIT %s
                 """,
-                (text, text, limit),
+                (text, text, text, limit),
             ).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
