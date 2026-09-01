@@ -50,6 +50,9 @@ public final class ScanCoordinator: ObservableObject {
     private var currentFrame: [DetectedText] = []   // the frame the current overlays anchor to
     private var task: Task<Void, Never>?            // frame-buffer pump
     private var liveTask: Task<Void, Never>?        // fixed-rate resolve ticker
+    /// The on-device-model fallback, if one is in flight. Public so a test can await it
+    /// deterministically — the live loop deliberately does not.
+    public private(set) var interpretation: Task<Void, Never>?
     /// Text signature of the last frame we resolved; lets a tick skip a re-resolve when the camera
     /// is held still (same OCR), keeping the fixed rate cheap and the overlays stable.
     private var lastResolvedKey: String?
@@ -61,6 +64,21 @@ public final class ScanCoordinator: ObservableObject {
 
     /// Cap overlays so a busy shelf stays legible (the server caps too).
     private let maxOverlays = 8
+
+    /// How long an earned result stays up when later ticks resolve nothing. Live OCR jitters
+    /// constantly — glare, a hand shake, a stylized label the catalog can't match — and every
+    /// such tick used to blank the HUD immediately. That made an on-device-model result almost
+    /// impossible to tap: it set the overlay without moving `lastResolvedKey`, so the very next
+    /// tick re-resolved the raw garble, matched nothing, and wiped it. A result now stands until
+    /// something better replaces it, the view empties, or this window passes.
+    private let overlayHoldMs: Double = 2500
+    private var overlaysSetAt: Date?
+
+    /// Whether the overlays on screen are recent enough to keep through an empty resolve.
+    private var isHoldingRecentOverlays: Bool {
+        guard !overlays.isEmpty, let at = overlaysSetAt else { return false }
+        return Date().timeIntervalSince(at) * 1000 < overlayHoldMs
+    }
 
     public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil,
                 llm: LLMProvider? = nil) {
@@ -86,7 +104,7 @@ public final class ScanCoordinator: ObservableObject {
 
     /// Start the viewfinder **and** the fixed-rate resolve loop: every `intervalMs`, resolve the
     /// latest frame and replace the overlays. This is the whole scan interaction — no tapping.
-    public func startLive(intervalMs: UInt64 = 700, venueId: String? = nil) {
+    public func startLive(intervalMs: UInt64 = 350, venueId: String? = nil) {
         start(venueId: venueId)
         startTicker(intervalMs: intervalMs, venueId: venueId)
     }
@@ -106,6 +124,7 @@ public final class ScanCoordinator: ObservableObject {
         engine.stop()
         task?.cancel(); task = nil
         liveTask?.cancel(); liveTask = nil
+        interpretation?.cancel(); interpretation = nil
         isScanning = false
     }
 
@@ -122,6 +141,7 @@ public final class ScanCoordinator: ObservableObject {
         guard !frame.isEmpty else {
             // Nothing in view: clear so a stale result doesn't linger over an empty shelf.
             overlays = []; candidates = []; currentFrame = []
+            overlaysSetAt = nil
             lastResolvedKey = nil; lastInterpretKey = nil
             return
         }
@@ -135,10 +155,19 @@ public final class ScanCoordinator: ObservableObject {
         do {
             let resp = try await api.resolveScan(req)
             lastLatencyMs = resp.latencyMs
-            candidates = resp.candidates
-            currentFrame = frame
-            overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
-                                   to: frame, cap: maxOverlays, presorted: true)
+            // Branch on what the *catalog* returned, not on what survives the filter: an
+            // active filter legitimately hides everything and must keep doing so, while a
+            // tick that resolved nothing at all should not throw away the last good result.
+            if !resp.candidates.isEmpty {
+                candidates = resp.candidates
+                currentFrame = frame
+                overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+                                       to: frame, cap: maxOverlays, presorted: true)
+                overlaysSetAt = Date()
+            } else if !isHoldingRecentOverlays {
+                candidates = []; currentFrame = []; overlays = []
+                overlaysSetAt = nil
+            }
             lastResolvedKey = key
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
                 "n_detections": .int(frame.count),
@@ -149,9 +178,16 @@ public final class ScanCoordinator: ObservableObject {
             ])
             // Auto-fallback: readable text but nothing matched. Let the on-device model name it,
             // once per distinct OCR frame (so a held-still garbled label doesn't re-run every tick).
-            if resp.candidates.isEmpty, let llm, key != lastInterpretKey {
+            if resp.candidates.isEmpty, overlays.isEmpty, let llm, key != lastInterpretKey {
                 lastInterpretKey = key
-                await interpret(frame: frame, using: llm, key: key, venueId: venueId)
+                // The model call takes ~1s; awaiting it here froze the whole HUD for that
+                // long. Detached, the fixed-rate loop keeps ticking and `interpret` drops
+                // its own guess if the camera has moved on. Now that label chrome correctly
+                // resolves to nothing, stuck frames are more common — so this must not block.
+                interpretation?.cancel()
+                interpretation = Task { [weak self] in
+                    await self?.interpret(frame: frame, using: llm, key: key, venueId: venueId)
+                }
             }
         } catch {
             // Keep the last good overlays and try again next tick.
@@ -178,6 +214,7 @@ public final class ScanCoordinator: ObservableObject {
         currentFrame = synthetic
         overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                to: synthetic, cap: maxOverlays, presorted: true)
+        overlaysSetAt = Date()   // starts the hold window, so this one is tappable
         lastLatencyMs = resp.latencyMs
         await telemetry?.log("scan_frame_batch", tier: .personalization, [
             "n_detections": .int(frame.count),

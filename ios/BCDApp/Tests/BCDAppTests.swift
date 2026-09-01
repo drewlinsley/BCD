@@ -16,7 +16,7 @@ final class BCDAppTests: XCTestCase {
             })
         let model = ScanViewModel()
         model.configure(env: env)
-        model.start()
+        model.startLive()
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertFalse(model.overlays.isEmpty)
     }
@@ -34,7 +34,7 @@ private final class PreviewAPI: APIClientProtocol, @unchecked Sendable {
         let resolved = ResolvedProduct(
             product: product,
             producer: Producer(id: "pr", name: "Alchemist", kind: nil, country: nil,
-                               region: nil, lat: nil, lon: nil, website: nil),
+                               region: nil, city: nil, lat: nil, lon: nil, website: nil),
             brand: Brand(id: "b", producerId: "pr", name: "Heady"))
         return ScanResolveResponse(
             candidates: [ScoredCandidate(detectionIndex: 0, resolved: resolved, matchScore: 1,

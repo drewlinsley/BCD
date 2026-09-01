@@ -1,43 +1,33 @@
 import SwiftUI
 import BCDKit
 
-// "The receipt" — the full decomposed product with a provenance chip on every recovered
-// fact. Tapping a chip is the answer to "your data isn't verifiable": it shows the source,
-// the method, the confidence, and the exact supporting quote.
+// The screen you land on from a scan overlay. Its job is a *choice* — is this the one I take
+// off the shelf? — so it leads with the four things that decide that: how likely you are to
+// like it, ABV, style, and where it was made. Rating belongs to a drink you've already had,
+// so it is deliberately not here.
+//
+// Every recovered fact still carries a provenance chip; tapping one is the answer to "your
+// data isn't verifiable" — source, method, confidence, and the exact supporting quote.
 
 struct ProductDetailView: View {
     let candidate: ScoredCandidate
     @EnvironmentObject var env: AppEnvironment
 
     private var product: Product { candidate.resolved.product }
+    private var producer: Producer { candidate.resolved.producer }
 
     var body: some View {
         NavigationStack {
             List {
-                Section {
-                    header
-                }
-                if let abv = product.spec.abvPct {
-                    Section("Specs") {
-                        SourcedRow(label: "ABV", value: "\(abv.value)%", provenance: abv.provenance)
-                        if let style = product.style {
-                            SourcedRow(label: "Style", value: style.value,
-                                       provenance: style.provenance)
-                        }
-                    }
-                }
+                Section { verdict }
+                Section("Details") { details }
                 if !product.recipe.ingredients.isEmpty {
+                    // What the score is actually derived from, for a product no one has
+                    // reviewed yet.
                     Section("Ingredients & process") {
                         ForEach(product.recipe.ingredients) { ing in
                             IngredientRow(ingredient: ing)
                         }
-                    }
-                }
-                Section {
-                    if candidate.coldStart {
-                        Label("Scored from its recipe chemistry — no reviews needed.",
-                              systemImage: "flask.fill")
-                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -50,19 +40,72 @@ struct ProductDetailView: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(candidate.resolved.producer.name).foregroundStyle(.secondary)
-            if let s = candidate.personalScore {
-                HStack {
-                    ProgressView(value: s).tint(s > 0.75 ? .green : .yellow)
-                    Text("\(Int(s * 100))% match").font(.subheadline.bold())
+    // MARK: - the decision
+
+    /// How likely you are to like it, stated plainly and up top — the one number this screen
+    /// exists to deliver.
+    @ViewBuilder private var verdict: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(producer.name)
+                .font(.subheadline)
+                .foregroundStyle(Brand.textMuted)
+
+            if let score = candidate.personalScore {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(Int(score * 100))%")
+                        .font(.system(size: 34, weight: .semibold, design: .rounded))
+                        .foregroundStyle(tint(for: score))
+                    Text("likely you'll like it")
+                        .font(.subheadline)
+                        .foregroundStyle(Brand.textMuted)
                 }
+                ProgressView(value: score)
+                    .tint(tint(for: score))
                 if let reason = candidate.reason {
-                    Text(reason).font(.footnote).foregroundStyle(.secondary)
+                    Text(reason).font(.footnote).foregroundStyle(Brand.textMuted)
                 }
+                if candidate.coldStart {
+                    Label("Scored from its recipe chemistry — no reviews needed.",
+                          systemImage: "flask.fill")
+                        .font(.caption).foregroundStyle(Brand.textMuted)
+                }
+            } else {
+                Text("Not scored for you yet")
+                    .font(.subheadline).foregroundStyle(Brand.textMuted)
             }
         }
+        .padding(.vertical, 4)
+    }
+
+    /// Reuses the reaction ramp, so good-to-bad reads the same everywhere in the app.
+    private func tint(for score: Double) -> Color {
+        score > 0.75 ? Reaction.chuggedIt.tint
+            : (score > 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
+    }
+
+    // MARK: - the facts
+
+    @ViewBuilder private var details: some View {
+        // Each row stands on its own: a product with no ABV should still show its style.
+        if let abv = product.spec.abvPct {
+            SourcedRow(label: "ABV", value: String(format: "%.1f%%", abv.value),
+                       provenance: abv.provenance)
+        }
+        if let style = product.style {
+            SourcedRow(label: "Style", value: style.value, provenance: style.provenance)
+        }
+        if let place = location {
+            LabeledContent("From", value: place)
+        }
+    }
+
+    /// Where it was made, finest-grained first. Omitted entirely rather than shown empty —
+    /// the catalog's producer records don't all carry a location.
+    private var location: String? {
+        let parts = [producer.city, producer.region, producer.country]
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }
 

@@ -141,6 +141,7 @@ import Foundation
         coord.start()
         try await Task.sleep(nanoseconds: 100_000_000)
         await coord.resolveLatest()                     // one live tick, no clicking
+        await coord.interpretation?.value               // fallback is detached; await it here
         #expect(api.resolveCallCount == 2)              // raw OCR (miss) then the LLM guess (hit)
         #expect(llm.calls == 1)
         #expect(coord.overlays.count == 1)
@@ -162,7 +163,77 @@ import Foundation
         await coord.resolveLatest()
         await coord.resolveLatest()
         await coord.resolveLatest()
+        await coord.interpretation?.value                // detached fallback; await it here
         #expect(llm.calls == 1)                          // same frame → interpreted exactly once
+    }
+
+    @MainActor
+    @Test func liveAutoInterpretDoesNotBlockTheTick() async throws {
+        // The on-device call takes ~1s. Awaiting it inside the tick froze the HUD for that
+        // long; it must run off the critical path instead. The stub records whether the tick
+        // had already returned by the time it was invoked — inline, it could not have.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let llm = OrderRecordingLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: CatalogStubAPI(known: ["Heady Topper"]),
+                                    llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        await coord.resolveLatest()
+        llm.tickReturned = true          // set before the detached task can be scheduled
+        await coord.interpretation?.value
+
+        #expect(llm.calls == 1)
+        #expect(llm.sawTickReturned == true)   // false ⇒ it ran inside the tick again
+    }
+
+    @MainActor
+    @Test func interpretedOverlaySurvivesTheNextEmptyTick() async throws {
+        // The reported bug: once the on-device model named the beer, the box vanished before it
+        // could be tapped. `interpret` sets the overlay but leaves `lastResolvedKey` on the
+        // garbled frame, so the very next tick re-resolved the raw OCR, matched nothing, and
+        // blanked the HUD — one tick of visibility, ~350ms.
+        let engine = PushEngine()
+        let coord = ScanCoordinator(engine: engine, api: CatalogStubAPI(known: ["Heady Topper"]),
+                                    llm: StubLLM(guess: "Heady Topper"))
+        coord.start()
+
+        engine.push([DetectedText(text: "FADY TOPP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()
+        await coord.interpretation?.value
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+
+        // Same can, jittered garble — still matches nothing. The earned result must stand.
+        engine.push([DetectedText(text: "FADY T0PP", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+
+        // ...but pointing away from the shelf still clears it at once, so nothing goes stale.
+        engine.push([])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.isEmpty)
+    }
+
+    @MainActor
+    @Test func filterHidingEverythingIsNotUndoneByTheHold() async throws {
+        // The hold keys off what the catalog returned, not what survives the filter — otherwise
+        // a filter that legitimately hides every candidate would look like an empty resolve and
+        // the hidden overlays would be held on screen.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "SHELF", kind: "text", x: 0.2, y: 0.3, w: 0.4, h: 0.1)],
+        ])
+        let coord = ScanCoordinator(engine: engine, api: TwoCandidateAPI(), llm: MockLLMProvider())
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 2)
+        await coord.setFilter("nothing over 3%")   // excludes the 4.2% lager and the 8.5% DIPA
+        #expect(coord.overlays.isEmpty)
     }
 
     @MainActor
@@ -190,6 +261,22 @@ import Foundation
 
 // MARK: - test doubles
 
+/// An engine whose frames the test pushes one at a time, so successive ticks can see
+/// *different* OCR — the jitter a real camera produces, which `MockScanEngine` (it yields its
+/// whole script at once) cannot express.
+private final class PushEngine: ScanEngine, @unchecked Sendable {
+    private var cont: AsyncStream<[DetectedText]>.Continuation?
+    let frames: AsyncStream<[DetectedText]>
+    init() {
+        var c: AsyncStream<[DetectedText]>.Continuation!
+        frames = AsyncStream { c = $0 }
+        cont = c
+    }
+    func start() async {}
+    func stop() { cont?.finish() }
+    func push(_ frame: [DetectedText]) { cont?.yield(frame) }
+}
+
 private func makeCandidate(id: String, name: String, abv: Double,
                           personal: Double, index: Int = 0) -> ScoredCandidate {
     let prov = Provenance(sourceId: "t", url: nil, quote: nil,
@@ -202,7 +289,7 @@ private func makeCandidate(id: String, name: String, abv: Double,
     let resolved = ResolvedProduct(
         product: product,
         producer: Producer(id: "p", name: "P", kind: nil, country: nil, region: nil,
-                           lat: nil, lon: nil, website: nil),
+                           city: nil, lat: nil, lon: nil, website: nil),
         brand: Brand(id: "b", producerId: "p", name: "B"))
     return ScoredCandidate(detectionIndex: index, resolved: resolved, matchScore: 1,
                            personalScore: personal, reason: nil, coldStart: true)
@@ -269,6 +356,25 @@ private final class TwoCandidateAPI: APIClientProtocol, @unchecked Sendable {
 }
 
 /// LLM double: returns a fixed product-name guess and counts how many times it was asked.
+/// Records whether the live tick had already returned when the fallback fired. Both actors
+/// are MainActor-isolated, so the ordering is deterministic rather than timing-dependent.
+private final class OrderRecordingLLM: LLMProvider, @unchecked Sendable {
+    let guess: String
+    var calls = 0
+    var tickReturned = false
+    var sawTickReturned: Bool?
+    init(guess: String) { self.guess = guess }
+    func parseQuery(_ text: String) async throws -> QueryIntent { QueryIntent(freeText: text) }
+    func rerank(_ candidates: [ScoredCandidate], for ask: String) async throws -> [String] {
+        candidates.map { $0.resolved.product.id }
+    }
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String] {
+        calls += 1
+        sawTickReturned = tickReturned
+        return [guess]
+    }
+}
+
 private final class StubLLM: LLMProvider, @unchecked Sendable {
     let guess: String
     var calls = 0

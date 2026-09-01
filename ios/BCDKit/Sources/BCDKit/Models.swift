@@ -52,7 +52,8 @@ public struct Producer: Codable, Sendable, Identifiable {
     public let name: String
     public let kind: String?
     public let country: String?
-    public let region: String?
+    public let region: String?       // state / province
+    public let city: String?
     public let lat: Double?
     public let lon: Double?
     public let website: String?
