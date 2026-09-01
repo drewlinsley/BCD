@@ -68,6 +68,11 @@ _STYLE = {
     "agricole", "canadian", "japanese", "american", "mexican", "caribbean", "highland",
     "speyside", "islay", "anejo", "añejo", "reposado", "blanco", "silver", "ecosse",
     "vsop", "cerveses", "ouzo", "sake", "soju", "london",
+    # packaging chrome: printed on the label, identifies nothing. A Heady Topper can says
+    # "DRINK FROM THE CAN", which trigram-matched a product literally named "Life drink"
+    # and outranked the real beer in the HUD.
+    "drink", "drinks", "beverage", "bottle", "bottled", "canned", "brewed", "contents",
+    "imported", "product",
 }
 
 
@@ -223,6 +228,13 @@ def find_duplicate_merges(products: Iterable[dict],
             canon = max(c, key=_richness)
             out.extend((m["id"], canon["id"]) for m in c if m["id"] != canon["id"])
     return out
+
+
+def is_generic_token(token: str) -> bool:
+    """Whether one word is a category/chrome word rather than something that identifies a
+    product. Exposed so the resolver can ask the same question of a single OCR token that
+    dedup asks of a whole name."""
+    return bool(_tokens(token) and _tokens(token) <= _STYLE)
 
 
 def is_generic_name(name: str) -> bool:

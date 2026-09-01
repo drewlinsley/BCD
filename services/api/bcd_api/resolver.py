@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from bcd_ingest.dedup import is_generic_token
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     SENSORY_AXES,
@@ -100,16 +101,32 @@ def _trigram_sim(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+def _identifying_tokens(name: str) -> list[str]:
+    """Name tokens that could actually pick this product off a shelf: long enough to be a real
+    word, and not a category or packaging word every other label carries too."""
+    return [t for t in _tokens(name)
+            if len(t) >= _MIN_NAME_TOKEN_LEN and not is_generic_token(t)]
+
+
 def _token_supported(query: str, name: str) -> bool:
-    """True if a real name token (>=4 letters) closely matches some OCR token — evidence the
-    brand word is actually present in the line, not a coincidental trigram window. A name with
-    no such token ("J&B", "1664") has nothing to anchor on and defers to the score floors."""
+    """True if an *identifying* name token closely matches some OCR token — evidence the brand
+    word is actually present in the line, not a coincidental trigram window.
+
+    Agreement on a category word is not evidence. A Heady Topper can carries "AMERICAN DOUBLE
+    IPA" and "DRINK FROM THE CAN"; matching on "double" and "drink" pulled in an unrelated hazy
+    IPA and a product named "Life drink", and both outranked the real beer because all three sat
+    within 0.012 of each other just above the floor. A name with nothing identifying in it
+    ("J&B", "1664", "Hazy Double IPA") has nothing to anchor on and defers to the raised floor
+    the caller applies instead."""
     name_tokens = [t for t in _tokens(name) if len(t) >= _MIN_NAME_TOKEN_LEN]
     if not name_tokens:
         return True
+    identifying = _identifying_tokens(name)
+    if not identifying:
+        return True
     q_tokens = _tokens(query)
     return any(_trigram_sim(nt, qt) >= _TOKEN_SUPPORT_MIN
-               for nt in name_tokens for qt in q_tokens)
+               for nt in identifying for qt in q_tokens)
 
 
 def _upc_variants(upc: str) -> list[str]:
@@ -228,7 +245,12 @@ class Resolver:
                 # allowed to block a genuine lower-ranked hit. Short names use a near-exact floor.
                 for rec, sc in self.store.match_products(det.text):
                     name = rec.get("name") or ""
-                    floor = _SHORT_MIN_MATCH if len(name) < _SHORT_NAME_LEN else _MIN_MATCH
+                    # Low-information either way: too short to be distinctive, or built only
+                    # from category words. Both trigram-match label chrome far too easily, so
+                    # they must clear a near-exact bar rather than the normal floor.
+                    low_info = (len(name) < _SHORT_NAME_LEN
+                                or not _identifying_tokens(name))
+                    floor = _SHORT_MIN_MATCH if low_info else _MIN_MATCH
                     if sc >= floor and _token_supported(det.text, name):
                         product_rec, match_score = rec, sc
                         break

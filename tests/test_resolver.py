@@ -256,3 +256,59 @@ def test_does_not_collapse_distinct_products_with_generic_names(store):
     ])
     resp = r.resolve(req)
     assert len(resp.candidates) == 2
+
+
+# ---- label chrome must not outrank the real beer ------------------------------------
+# Live failure on a real Heady Topper can: the can's own printing resolved to two wrong
+# products that both outranked the right one, all three inside a 0.012 band above the floor.
+
+@pytest.mark.parametrize("query, name", [
+    ("DRINK FROM THE CAN", "Life drink"),              # the phrase printed on the can
+    ("DRINK RESPONSIBLY", "Black Spiced Spirit Drink"),
+    ("AMERICAN DOUBLE IPA", "Hazy Double IPA Thing"),
+])
+def test_token_support_rejects_category_word_agreement(query, name):
+    # Agreeing on "drink" or "double" is not evidence of identity — every other label on the
+    # shelf carries those words too. Only a token that identifies something counts.
+    assert _token_supported(query, name) is False
+
+
+def test_wholly_generic_name_needs_a_near_exact_read():
+    # "FML Hazy Double IPA" has no identifying token at all (hazy/double/ipa are category
+    # words, "FML" is under the length floor), so it behaves like a short name: a partial
+    # chrome line must not claim it...
+    store = _FakeMatchStore([(_product("FML Hazy Double IPA", "p:fml"), 0.55)])
+    req = ScanResolveRequest(detections=[DetectedText(text="AMERICAN DOUBLE IPA", kind="text")])
+    assert Resolver(store).resolve(req).unresolved_indices == [0]
+
+    # ...but a clean read of the name itself still resolves, so recall is not lost.
+    clean = _FakeMatchStore([(_product("FML Hazy Double IPA", "p:fml"), 0.95)])
+    resp = Resolver(clean).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="FML HAZY DOUBLE IPA", kind="text")]))
+    assert resp.candidates[0].resolved.product.name == "FML Hazy Double IPA"
+
+
+class _PerTextMatchStore(_FakeMatchStore):
+    """Matches keyed by the detection text, so one frame's several OCR lines can each be
+    scored the way the live pg_trgm backend scored them."""
+
+    def __init__(self, by_text):
+        self._by_text = by_text
+
+    def match_products(self, text, limit=3):
+        return self._by_text.get(text, [])[:limit]
+
+
+def test_can_chrome_loses_to_the_brand_line():
+    frame = {
+        "THE ALCHEMIST": [(_product("The Alchemist Heady Topper", "p:ht"), 0.538)],
+        "AMERICAN DOUBLE IPA": [(_product("FML Hazy Double IPA", "p:fml"), 0.550)],
+        "DRINK FROM THE CAN": [(_product("Life drink", "p:life"), 0.545)],
+    }
+    req = ScanResolveRequest(detections=[
+        DetectedText(text=t, kind="text") for t in frame
+    ])
+    resp = Resolver(_PerTextMatchStore(frame)).resolve(req)
+    names = [c.resolved.product.name for c in resp.candidates]
+    assert names == ["The Alchemist Heady Topper"]  # the only line that identifies anything
+    assert sorted(resp.unresolved_indices) == [1, 2]
