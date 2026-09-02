@@ -123,3 +123,27 @@ def test_open_store_selects_postgres_from_url():
     assert isinstance(s, PostgresStore)
     assert isinstance(s, Store)
     s.close()
+
+
+def test_a_short_catalog_name_is_found_inside_a_noisy_label(pg: PostgresStore):
+    """The case the index gate cannot see, and the reason it probes the line's words.
+
+    `gin_trgm_ops` indexes `%` and `%>` but not `<%`, so `word_similarity(name, line)` —
+    a short catalog name found inside a long label — has no index-usable operator. Gating
+    on the whole line alone drops it: a row named "Guinness" scores word_similarity(line,
+    name) = 0.257 against a real canned label, below any threshold that still
+    discriminates. The identifying word GUINNESS reaches it outright.
+    """
+    _seed_product(pg, "gd", "Guinness", {"roasted_coffee_choc": 0.9})
+    _seed_product(pg, "sn", "Sierra Nevada Pale Ale", {"citrus": 0.6})
+
+    top = pg.match_products("GUINNESS DRAUGHT 440ML EXTRA STOUT")
+    assert top and top[0][0]["name"] == "Guinness"
+
+
+def test_a_label_of_only_style_words_still_answers(pg: PostgresStore):
+    """Every word here is a category word, so the gate probes none of them individually
+    and falls back to the whole-line term. It must still return something rather than
+    error or scan the table."""
+    _seed_product(pg, "ipa", "Hazy IPA", {"citrus": 0.7})
+    assert isinstance(pg.match_products("HAZY IPA"), list)

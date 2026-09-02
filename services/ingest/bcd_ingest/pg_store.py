@@ -21,6 +21,7 @@ this for a psycopg_pool ConnectionPool; the method surface stays identical.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -31,7 +32,7 @@ from bcd_schema import SENSORY_AXES
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
-from .dedup import search_name
+from .dedup import is_generic_token, search_name
 from .store import BronzeDoc  # reuse the shared bronze dataclass
 
 
@@ -90,6 +91,23 @@ class PostgresStore:
             with self._conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {search_path.split(',')[0].strip()}")
         self._init()
+        self._set_trgm_thresholds()
+
+    def _set_trgm_thresholds(self) -> None:
+        """Thresholds for the GIN gate in `match_products`.
+
+        Deliberately below the resolver's own 0.5 floor: the gate only decides what gets
+        scored, so anything it lets through that scores badly is rejected downstream, while
+        anything it wrongly excludes is invisible. Erring low costs a few hundred rows of
+        scoring; erring high silently loses matches.
+        """
+        with self._lock, self._conn.cursor() as cur:
+            cur.execute("SELECT set_limit(0.3)")            # similarity, and loads pg_trgm
+            # 0.4 rather than the 0.5 default, measured: "Guinness Draught" scores 0.486
+            # against a real canned label and would be excluded by a hair. Below 0.35 the
+            # gate stops discriminating — "SIERRA NEVADA PALE ALE" goes from 1,204
+            # candidate rows to 17,336 and the scan costs half a second.
+            cur.execute("SET pg_trgm.word_similarity_threshold = 0.4")
 
     def _init(self) -> None:
         with self._lock, self._conn.cursor() as cur:
@@ -290,36 +308,70 @@ class PostgresStore:
         Plain `similarity` stays for the case where the OCR simply *is* the name
         ("HEINEKEN"). The caller applies a confidence floor and token-support checks, so
         this returns the top few regardless and lets the resolver reject weak ones.
-        Seq-scans the ~hundreds of products (fine at this size); a million-row catalog
-        would gate with the GIN `%`/`%>` operators first."""
+
+        Scoring every row was fine at a few thousand products and is not at 363k: the
+        planner parallel-seq-scans the table and one resolve took 7.4 seconds, against a
+        HUD that ticks every 700ms. So a GIN gate runs first and the six similarity terms
+        are computed only on what survives it — 966 rows rather than 363,014, for the same
+        answer.
+
+        The gate cannot simply mirror the scoring. `gin_trgm_ops` indexes `%` and `%>` but
+        NOT `<%`, so `word_similarity(name, line)` — the Guinness direction — has no
+        index-usable operator at all. Gating on the whole line would therefore drop
+        exactly the case that direction exists to catch. The line's own words are added to
+        the gate to cover it: a catalog row named "Guinness" is reached from the token
+        GUINNESS even though the full noisy line never comes close.
+        """
         text = (text or "").strip()
         if not text:
             return []
-        with self._lock, self._conn.cursor() as cur:
-            rows = cur.execute(
-                """
-                SELECT record,
-                       GREATEST(similarity(coalesce(name,''), %s),
-                                word_similarity(coalesce(name,''), %s),
-                                word_similarity(%s, coalesce(name,'')),
-                                similarity(coalesce(search_name, name, ''), %s),
-                                word_similarity(coalesce(search_name, name, ''), %s),
-                                word_similarity(%s, coalesce(search_name, name, ''))) AS sim
+
+        # Which words are worth an index probe of their own. Style and category words are
+        # not: "PALE" matches 19,203 products and costs 300ms to find them, because
+        # word-similarity is 1.0 against every name containing the word. Dropping them
+        # takes the gate from 20,343 candidate rows to 803. `is_generic_token` is the same
+        # vocabulary dedup and the resolver already judge identity with.
+        toks = [t for t in re.findall(r"[^\W\d_]{4,}", text, re.UNICODE)
+                if not is_generic_token(t)][:6]
+
+        # The whole line, then its identifying words. The line alone is not enough: a
+        # catalog row named just "Guinness" scores word_similarity(line, name) = 0.257
+        # against "GUINNESS DRAUGHT 440ML EXTRA STOUT" and no workable threshold reaches
+        # it, while the token GUINNESS finds it outright.
+        gate = ["name %%> %s", "search_name %%> %s"]
+        params: list[Any] = [text, text]
+        for t in toks:
+            gate += ["name %% %s", "search_name %% %s"]
+            params += [t, t]
+
+        sql = f"""
+            WITH candidate AS (
+                SELECT id, record, name, search_name
                 FROM gold
-                WHERE entity_type='product'
-                -- Ties at the top are the norm, not the exception: `word_similarity` scores
-                -- 1.0 for ANY name wholly contained in the label, so "Handmade Vodka" and
-                -- "Tito's Handmade Vodka" both max out on "TITOS HANDMADE VODKA". Plain
-                -- `similarity` is the tiebreak because it is the only one of the three that
-                -- penalises what the candidate *leaves out* — it drops for the row missing
-                -- "Titos", and rises for the one that accounts for the whole label.
-                ORDER BY sim DESC,
-                         similarity(coalesce(search_name, name, ''), %s) DESC,
-                         id
-                LIMIT %s
-                """,
-                (text, text, text, text, text, text, text, limit),
-            ).fetchall()
+                WHERE entity_type='product' AND ({" OR ".join(gate)})
+            )
+            SELECT record,
+                   GREATEST(similarity(coalesce(name,''), %s),
+                            word_similarity(coalesce(name,''), %s),
+                            word_similarity(%s, coalesce(name,'')),
+                            similarity(coalesce(search_name, name, ''), %s),
+                            word_similarity(coalesce(search_name, name, ''), %s),
+                            word_similarity(%s, coalesce(search_name, name, ''))) AS sim
+            FROM candidate
+            -- Ties at the top are the norm, not the exception: `word_similarity` scores
+            -- 1.0 for ANY name wholly contained in the label, so "Handmade Vodka" and
+            -- "Tito's Handmade Vodka" both max out on "TITOS HANDMADE VODKA". Plain
+            -- `similarity` is the tiebreak because it is the only one of the three that
+            -- penalises what the candidate *leaves out* — it drops for the row missing
+            -- "Titos", and rises for the one that accounts for the whole label.
+            ORDER BY sim DESC,
+                     similarity(coalesce(search_name, name, ''), %s) DESC,
+                     id
+            LIMIT %s
+        """
+        params += [text] * 7 + [limit]
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
