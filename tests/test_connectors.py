@@ -128,7 +128,8 @@ def _ttb_page(first: int, last: int, total: int) -> str:
         "</tr>"
         for n in range(first, last + 1)
     )
-    return f"<html><body>{first} to {last} of {total}<table>{rows}</table></body></html>"
+    return (f"<html><body>{first} to {last} of {total} "
+            f"(Total Matching Records: {total})<table>{rows}</table></body></html>")
 
 
 def test_ttb_pagination_stops_on_an_exact_multiple_of_the_page_size():
@@ -138,13 +139,15 @@ def test_ttb_pagination_stops_on_an_exact_multiple_of_the_page_size():
     from bcd_ingest.connectors.ttb_cola import TTBColaConnector
 
     pages = [_ttb_page(1 + i * 20, 20 + i * 20, 140) for i in range(7)]
-    served: list[str] = []
+    fetched: list[str] = []
 
     class _Client:
         def request(self, method, url, data=None):
+            # Page 1 is already in the caller's hand, so the Nth request serves page N+1.
             # Past the end, hand back the last page again — exactly what TTB does.
-            page = pages[len(served)] if len(served) < len(pages) else pages[-1]
-            served.append(page)
+            i = len(fetched) + 1
+            page = pages[i] if i < len(pages) else pages[-1]
+            fetched.append(page)
 
             class _R:
                 text = page
@@ -156,11 +159,11 @@ def test_ttb_pagination_stops_on_an_exact_multiple_of_the_page_size():
             return _R()
 
     conn = TTBColaConnector(store=None, use_fixture=False)
-    rows = list(conn._walk_day(_Client(), date(2026, 8, 24), "100", "699"))
+    rows = list(conn._paginate(_Client(), pages[0], "08/24/2026", "100", "699"))
 
     assert len(rows) == 140, "every record once"
     assert len({r["ttb_id"] for r in rows}) == 140, "and none of them twice"
-    assert len(served) == 7, "no request past the last page"
+    assert len(fetched) == 6, "six more requests after the page already in hand"
 
 
 def test_ttb_pagination_stops_when_the_header_is_missing():
@@ -182,7 +185,7 @@ def test_ttb_pagination_stops_when_the_header_is_missing():
             return _R()
 
     conn = TTBColaConnector(store=None, use_fixture=False)
-    assert len(list(conn._walk_day(_Client(), date(2026, 8, 24), "100", "699"))) == 5
+    assert len(list(conn._paginate(_Client(), page, "08/24/2026", "100", "699"))) == 5
 
 
 def test_ttb_parse_range_reads_the_result_header():
@@ -220,3 +223,106 @@ def test_ttb_single_malt_is_a_whisky_not_a_malt_beverage():
     assert _category_of("Straight American Single Malt").value == "spirit"
     assert _category_of("Single Malt Scotch Whisky").value == "spirit"
     assert _category_of("Malt Beverages Specialities - Flavored").value == "beer"
+
+
+def _ttb_csv(n: int, start: int = 1) -> str:
+    head = ("TTB ID,Permit No.,Serial Number,Completed Date,Fanciful Name,"
+            "Brand Name,Origin,Origin Desc,Class/Type,Class/Type Desc")
+    rows = "\n".join(
+        f"'{26000000000000 + i}',DSP-X-1,{i},08/24/2026,,BRAND {i},06,MICHIGAN,301,VODKA"
+        for i in range(start, start + n)
+    )
+    return f"{head}\n{rows}\n"
+
+
+def _search_page(total: int) -> str:
+    return f"<html><body>Total Matching Records: {total}<table></table></body></html>"
+
+
+class _Recorder:
+    """Serves a scripted reply per request and records what was asked for."""
+
+    def __init__(self, replies):
+        self.replies, self.calls = list(replies), []
+
+    def request(self, method, url, data=None):
+        self.calls.append((method, url, dict(data or {})))
+        text = self.replies.pop(0)
+
+        class _R:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+        _R.text = text
+        return _R()
+
+
+def test_ttb_uses_the_csv_export_when_the_window_fits():
+    # One request for the whole window instead of one per twenty rows.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([_search_page(140), _ttb_csv(140)])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_range(client, date(2026, 8, 20), date(2026, 8, 24), "100", "699"))
+
+    assert len(rows) == 140
+    assert rows[0]["ttb_id"] == "26000000000001", "quotes stripped from the id"
+    assert rows[0]["brand_name"] == "BRAND 1"
+    assert len(client.calls) == 2, "one search, one export — no paging"
+
+
+def test_ttb_bisects_a_window_the_export_would_truncate():
+    # The export silently returns ~1,000 rows for a search matching more, so an oversized
+    # window must be halved on the search's own stated total, never exported and trusted.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([
+        _search_page(2400),                    # 5-day window: too big
+        _search_page(900), _ttb_csv(900, 1),   # first half fits
+        _search_page(800), _ttb_csv(800, 901),  # second half fits
+    ])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_range(client, date(2026, 8, 20), date(2026, 8, 24), "100", "699"))
+
+    assert len(rows) == 1700
+    assert len({r["ttb_id"] for r in rows}) == 1700, "halves must not overlap"
+    spans = [(c[2].get("searchCriteria.dateCompletedFrom"),
+              c[2].get("searchCriteria.dateCompletedTo"))
+             for c in client.calls if c[0] == "POST"]
+    assert spans == [("08/20/2026", "08/24/2026"),
+                     ("08/20/2026", "08/22/2026"),
+                     ("08/23/2026", "08/24/2026")], "halves must tile the window exactly"
+
+
+def test_ttb_falls_back_to_paging_when_the_export_comes_back_short():
+    # Belt and braces: if the export truncates anyway, the row count disagrees with the
+    # total the search reported, and we page the table rather than accept silent loss.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([
+        _ttb_page(1, 20, 40),    # search says 40, and carries rows 1-20 as TTB's does
+        _ttb_csv(25),            # export gives 25 — short
+        _ttb_page(21, 40, 40),   # ...so page the table instead
+    ])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_range(client, date(2026, 8, 24), date(2026, 8, 24), "100", "699"))
+
+    assert len(rows) == 40, "all rows come from the table, not the short export"
+    assert len({r["ttb_id"] for r in rows}) == 40
+
+
+def test_ttb_empty_window_costs_one_request():
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([_search_page(0)])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    assert list(conn._walk_range(client, date(2026, 8, 20), date(2026, 8, 24), "1", "2")) == []
+    assert len(client.calls) == 1, "no export for an empty result set"
+
+
+def test_ttb_parse_total_reads_the_stated_match_count():
+    from bcd_ingest.connectors.ttb_cola import parse_total
+
+    assert parse_total("<b>Total Matching Records: 29811</b>") == 29811
+    assert parse_total("no records were found") == 0

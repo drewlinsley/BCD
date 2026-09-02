@@ -51,6 +51,19 @@ from ..store import BronzeDoc, doc_id
 _BASE = "https://www.ttbonline.gov/colasonline"
 _SEARCH = f"{_BASE}/publicSearchColasBasicProcess.do?action=search"
 _NEXT = f"{_BASE}/publicPageBasicCola.do?action=page&pgfcn=nextset"
+
+#: The registry will hand back the whole result set as a CSV — the same ten columns the
+#: HTML table carries — for the search currently held in the session. One request instead
+#: of one per twenty rows, which is the difference between a feasible backfill of the full
+#: registry and a day-long crawl.
+_EXPORT = f"{_BASE}/publicSaveSearchResultsToFile.do?path=/publicSearchColasBasicProcess"
+
+#: ...but it truncates at a thousand records and says nothing about it: a search matching
+#: 2,310 exports 1,002 rows with no error and no marker. The search page states the true
+#: total, so the total is checked first and the window bisected until it fits. Never raise
+#: this to match an observed export size — silent loss is the failure being defended
+#: against.
+_EXPORT_CAP = 1000
 _DETAILS = f"{_BASE}/viewColaDetails.do?action=publicDisplaySearchBasic&ttbid={{}}"
 
 #: Identify honestly. ttbonline.gov serves no robots.txt, the data is CC0, and TTB
@@ -141,6 +154,38 @@ def parse_range(page: str) -> tuple[int, int, int] | None:
     if not m:
         return None
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+_TOTAL = re.compile(r"Total Matching Records:\s*(\d+)", re.I)
+
+
+def parse_total(page: str) -> int:
+    """How many records the search actually matched, independent of what any one page or
+    export returns. Absent on a no-results page, which reads as zero."""
+    m = _TOTAL.search(html.unescape(_TAG.sub(" ", page)))
+    return int(m.group(1)) if m else 0
+
+
+def parse_export(text: str) -> list[dict[str, str]]:
+    """Rows from the CSV export, keyed like `parse_results` so both paths feed one
+    normalizer. TTB writes the id as '26051001000586' — quoted so a spreadsheet keeps the
+    leading zeros — and those quotes are not part of the id."""
+    import csv
+    import io
+
+    out: list[dict[str, str]] = []
+    for row in csv.DictReader(io.StringIO(text)):
+        vals = [(row.get(c) or "").strip().strip("'") for c in _EXPORT_COLUMNS]
+        if not vals[0]:
+            continue
+        out.append(dict(zip(_ROW_FIELDS, vals, strict=True)))
+    return out
+
+
+#: The export's header, in the order our _ROW_FIELDS expects.
+_EXPORT_COLUMNS = ("TTB ID", "Permit No.", "Serial Number", "Completed Date",
+                   "Fanciful Name", "Brand Name", "Origin", "Origin Desc",
+                   "Class/Type", "Class/Type Desc")
 
 
 _FIXTURE = os.path.join(
@@ -260,7 +305,7 @@ class TTBColaConnector(Connector):
 
     def __init__(self, store, fixture_path: str | None = None,
                  days: int | None = None, until: date | None = None,
-                 use_fixture: bool | None = None) -> None:
+                 use_fixture: bool | None = None, window: int | None = None) -> None:
         super().__init__(store)
         self.fixture_path = fixture_path or os.path.normpath(_FIXTURE)
         # Explicit fixture_path, or the env flag, means offline. Otherwise: live.
@@ -270,6 +315,10 @@ class TTBColaConnector(Connector):
         )
         self.days = days or int(os.environ.get("BCD_TTB_DAYS", "30"))
         self.until = until or date.today()
+        # Days per search. Sized so a window normally fits the export in one request; an
+        # oversized one is bisected rather than truncated, so this is a speed knob, not a
+        # correctness one.
+        self.window = window or int(os.environ.get("BCD_TTB_WINDOW", "30"))
 
     def fetch(self, limit: int | None = None) -> Iterator[BronzeDoc]:
         rows = self._fixture_rows(limit) if self.use_fixture else self._live_rows(limit)
@@ -289,42 +338,84 @@ class TTBColaConnector(Connector):
         yield from (rows[:limit] if limit is not None else rows)
 
     def _live_rows(self, limit: int | None) -> Iterator[dict]:
-        """Walk the public registry a day at a time, newest first.
+        """Walk the registry newest-first, in windows sized to the export.
 
-        One day per search rather than a wide range, because the result set is paged and
-        session-held: a narrow window keeps each walk short, and a day that fails costs
-        only that day. Newest first so a run cut short still leaves the most current
-        labels rather than an arbitrary slice of history.
+        Newest first so a run cut short still leaves the most current labels rather than
+        an arbitrary slice of history. The window is a span rather than a day because the
+        export returns a whole result set in one request — a day at a time would throw
+        that away and cost one request per twenty rows.
         """
         import httpx
 
         seen = 0
-        with httpx.Client(timeout=60.0, headers={"User-Agent": _UA},
+        with httpx.Client(timeout=180.0, headers={"User-Agent": _UA},
                           verify=_ssl_context(), follow_redirects=True) as client:
-            for offset in range(self.days):
-                day = self.until - timedelta(days=offset)
+            end = self.until
+            while end > self.until - timedelta(days=self.days):
+                start = max(end - timedelta(days=self.window - 1),
+                            self.until - timedelta(days=self.days - 1))
                 for lo, hi in _CLASS_RANGES:
-                    for row in self._walk_day(client, day, lo, hi):
+                    for row in self._walk_range(client, start, end, lo, hi):
                         yield row
                         seen += 1
                         if limit is not None and seen >= limit:
                             return
+                end = start - timedelta(days=1)
 
-    def _walk_day(self, client, day: date, lo: str, hi: str) -> Iterator[dict]:
-        stamp = day.strftime("%m/%d/%Y")
+    def _walk_range(self, client, start: date, end: date, lo: str, hi: str) -> Iterator[dict]:
+        """Every row in [start, end] for one class range.
+
+        The search states its true total, so an oversized window is halved rather than
+        exported and silently truncated. A single day that still overflows cannot be split
+        further and falls back to paging the HTML table, which has no cap.
+        """
         form = {
-            "searchCriteria.dateCompletedFrom": stamp,
-            "searchCriteria.dateCompletedTo": stamp,
+            "searchCriteria.dateCompletedFrom": start.strftime("%m/%d/%Y"),
+            "searchCriteria.dateCompletedTo": end.strftime("%m/%d/%Y"),
             "searchCriteria.productNameSearchType": "U",
             "searchCriteria.classTypeFrom": lo,
             "searchCriteria.classTypeTo": hi,
         }
+        span = (f"{form['searchCriteria.dateCompletedFrom']}"
+                f"..{form['searchCriteria.dateCompletedTo']}")
         try:
             page = self._get(client, "POST", _SEARCH, data=form)
-        except Exception as exc:  # noqa: BLE001 - a bad day must not end the run
-            print(f"  ! ttb {stamp} class {lo}-{hi}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - a bad window must not end the run
+            print(f"  ! ttb {span} class {lo}-{hi}: {exc}")
             return
 
+        total = parse_total(page)
+        if total == 0:
+            return
+
+        if total > _EXPORT_CAP:
+            if start >= end:
+                yield from self._paginate(client, page, span, lo, hi)
+                return
+            mid = start + (end - start) // 2
+            yield from self._walk_range(client, start, mid, lo, hi)
+            yield from self._walk_range(client, mid + timedelta(days=1), end, lo, hi)
+            return
+
+        try:
+            rows = parse_export(self._get(client, "GET", _EXPORT))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! ttb {span} class {lo}-{hi}: export failed ({exc}), paging instead")
+            yield from self._paginate(client, page, span, lo, hi)
+            return
+
+        # The export is the only step that can lose rows without saying so. If it comes
+        # back short of what the search counted, page the table instead of accepting it.
+        if len(rows) < total:
+            print(f"  ! ttb {span} class {lo}-{hi}: export gave "
+                  f"{len(rows)}/{total}, paging instead")
+            yield from self._paginate(client, page, span, lo, hi)
+            return
+        yield from rows
+
+    def _paginate(self, client, page: str, stamp: str, lo: str, hi: str) -> Iterator[dict]:
+        """Page the HTML result table. The fallback for the one case the export cannot
+        serve: a single day holding more records than the export will return."""
         last_first_id = None
         for _ in range(_MAX_PAGES):
             rows = parse_results(page)
