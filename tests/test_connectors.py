@@ -390,3 +390,21 @@ def test_ttb_export_drops_a_row_it_cannot_trust():
 
     csv_text = f"{_CSV_HEAD}\n'25255001000115',TX-I-1,25X,NOT-A-DATE,,BRAND,81,MEXICO,983,X\n"
     assert parse_export(csv_text) == []
+
+
+def test_ttb_export_repairs_an_import_whose_origin_code_is_not_numeric():
+    # Origin codes are not all numeric — Moldova files under "6J" — so the repair anchors
+    # on the three-digit class code alone. Real row; requiring a numeric origin code lost
+    # every import that also carried a comma in its class description.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'26232001000301',IL-I-21021,260040,08/26/2026,SURPRISE 10 YEARS AGED,"
+                "KVINT,6J,MOLDOVA,588,OTHER GRAPE BRANDY (PISCO, GRAPPA) FB\n")
+    (row,) = parse_export(csv_text)
+    assert row["ttb_id"] == "26232001000301"
+    assert row["fanciful_name"] == "SURPRISE 10 YEARS AGED"
+    assert row["brand_name"] == "KVINT"
+    assert row["origin_code"] == "6J"
+    assert row["origin_desc"] == "MOLDOVA"
+    assert row["class_type"] == "OTHER GRAPE BRANDY (PISCO, GRAPPA) FB"

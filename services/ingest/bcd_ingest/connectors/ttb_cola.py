@@ -182,18 +182,24 @@ def _repair(fields: list[str]) -> list[str] | None:
     because a shifted row puts a state in the date column and a class code in the id.
 
     Two anchors make the repair safe. The first four columns are structured and never
-    carry a comma, so they are read from the left. Origin and class codes are numeric and
-    sit two apart near the end, so the rightmost such pair locates the tail — rightmost
-    because the class DESCRIPTION carries commas of its own ("Anisette, Ouzo, Ojen").
-    What is left in the middle is the fanciful name and the brand; the brand is the last
-    of them, which is right whenever the brand itself has no comma.
+    carry a comma, so they are read from the left. The class code is always three digits
+    and sits fourth from the end, so the rightmost three-digit field locates the tail —
+    rightmost, because the class DESCRIPTION carries commas of its own ("Anisette, Ouzo,
+    Ojen"). It cannot sit before index 8 either, since a split only ever pushes columns
+    right. What is left in the middle is the fanciful name and the brand; the brand is the
+    last of them, which is right whenever the brand itself has no comma.
+
+    The ORIGIN code is not an anchor and is not checked: it is usually numeric but not
+    always — Moldova files under "6J" — and requiring it lost every import that also had
+    a comma in its class description.
     """
     if len(fields) == len(_EXPORT_COLUMNS):
         return fields
     if len(fields) < len(_EXPORT_COLUMNS) or not _DATE.match(fields[3].strip()):
         return None
-    for q in range(len(fields) - 1, 5, -1):
-        if not (fields[q].strip().isdigit() and fields[q - 2].strip().isdigit()):
+    for q in range(len(fields) - 1, 7, -1):
+        f = fields[q].strip()
+        if not (len(f) == 3 and f.isdigit()):
             continue
         middle = fields[4:q - 2]
         if not middle:
