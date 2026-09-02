@@ -263,3 +263,26 @@ def test_producer_merge_repoints_products_and_brands_and_keeps_a_region():
     assert store.get_gold("prod:1")["producer_id"] == "p:lag"
     assert store.get_gold("b:1")["producer_id"] == "p:lag"
     store.close()
+
+
+def test_a_misspelled_corporate_suffix_still_folds():
+    # Filers misspell their own suffix, and each misspelling forks a company into its own
+    # producer. All real, from the registry.
+    from bcd_ingest.dedup import producer_core
+
+    for name in ["The Lagunitas Brewing Comany", "Lagunitas Brewing Compnay"]:
+        assert producer_core(name) == "lagunitas", name
+    assert producer_core("Siluria Brewing Companuy, LLC") == "siluria"
+    assert producer_core("The Illusionist Destillery") == "illusionist"
+    assert producer_core("Tenth Ward Distiilling") == "tenth ward"
+
+
+def test_fuzzy_suffix_matching_does_not_eat_short_identity_words():
+    # Only long trailing tokens are fuzzy-matched, so a short real word is never mistaken
+    # for a typo of a suffix.
+    from bcd_ingest.dedup import producer_core
+
+    assert producer_core("Anchor Steam") == "anchor steam"
+    assert producer_core("Amber Ale") == "amber ale"
+    assert producer_core("Ale House Brewing Co") == "ale house"
+    assert producer_core("Sierra Nevada Brewing Company") == "sierra nevada"

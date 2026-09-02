@@ -295,9 +295,9 @@ def search_name(name: str, brand: str | None) -> str:
 #: turns "Ale House Brewing Co" into "house", which then collects unrelated companies in
 #: seven states.
 _PRODUCER_SUFFIX = {
-    "brewing", "brewery", "breweries", "brewers", "brewhouse", "brewpub",
-    "distilling", "distillery", "distilleries", "distillers",
-    "winery", "wineries", "vineyards", "cellars",
+    "brewing", "brewery", "breweries", "brewers", "brewhouse", "brewpub", "brewer",
+    "distilling", "distillery", "distilleries", "distillers", "distiller",
+    "winery", "wineries", "vineyards", "vineyard", "cellars", "cellar",
     "company", "co", "corp", "corporation", "inc", "incorporated",
     "llc", "lc", "llp", "lp", "ltd", "limited", "plc", "pllc",
     "gmbh", "bv", "nv", "srl", "spa", "ag", "kg", "oy", "ab",
@@ -314,6 +314,22 @@ def _producer_tokens(name: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", s) if t]
 
 
+def _is_suffix_token(tok: str) -> bool:
+    """A trailing token that means incorporation — spelled correctly or not.
+
+    Filers misspell their own suffix often enough to matter: "Brewing Comapny",
+    "Companuy", "Destillery", "Disitllery", "Breewery". Each misspelling forks a company
+    into its own producer. Only long tokens are fuzzy-matched, and only against this set,
+    so a real word is not mistaken for a typo of one.
+    """
+    if tok in _PRODUCER_SUFFIX:
+        return True
+    if len(tok) < 6:
+        return False
+    return any(difflib.SequenceMatcher(None, tok, s).ratio() >= 0.85
+               for s in _PRODUCER_SUFFIX if len(s) >= 6)
+
+
 def producer_core(name: str) -> str:
     """The identifying part of a producer name: no leading "The", no trailing incorporation.
 
@@ -324,7 +340,7 @@ def producer_core(name: str) -> str:
     toks = _producer_tokens(name)
     while toks and toks[0] == "the":
         toks = toks[1:]
-    while len(toks) > 1 and toks[-1] in _PRODUCER_SUFFIX:
+    while len(toks) > 1 and _is_suffix_token(toks[-1]):
         toks = toks[:-1]
     return " ".join(toks)
 
