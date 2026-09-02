@@ -326,3 +326,67 @@ def test_ttb_parse_total_reads_the_stated_match_count():
 
     assert parse_total("<b>Total Matching Records: 29811</b>") == 29811
     assert parse_total("no records were found") == 0
+
+
+_CSV_HEAD = ("TTB ID,Permit No.,Serial Number,Completed Date,Fanciful Name,"
+             "Brand Name,Origin,Origin Desc,Class/Type,Class/Type Desc")
+
+
+def test_ttb_export_repairs_a_comma_split_row():
+    # TTB does not quote a field containing a comma, so a fanciful name splits in two and
+    # shifts every column after it — putting a state in the date column and a class code
+    # in the id. Real row from the registry.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'25255001000115',TX-I-21177,25RMCL,09/12/2025,COYOTÁ CAPÓN,"
+                " TOBALÁ CAPÓN,REAL MINERO,81,MEXICO,983,AGAVE SPIRITS\n")
+    (row,) = parse_export(csv_text)
+    assert row["ttb_id"] == "25255001000115"
+    assert row["completed_date"] == "09/12/2025"
+    assert row["brand_name"] == "REAL MINERO"
+    assert row["fanciful_name"] == "COYOTÁ CAPÓN, TOBALÁ CAPÓN"
+    assert row["origin_desc"] == "MEXICO"
+    assert row["class_type"] == "AGAVE SPIRITS"
+
+
+def test_ttb_export_keeps_commas_in_the_class_description():
+    # The tail is found from the RIGHTMOST numeric pair, because the class description
+    # carries commas of its own and must not be mistaken for the shifted middle.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'25255001000999',DSP-CA-1,25X,03/04/2025,SOME, FANCY, NAME,"
+                "BRANDCO,05,CALIFORNIA,255,ANISETTE, OUZO, OJEN\n")
+    (row,) = parse_export(csv_text)
+    assert row["brand_name"] == "BRANDCO"
+    assert row["fanciful_name"] == "SOME, FANCY, NAME"
+    assert row["origin_desc"] == "CALIFORNIA"
+    assert row["class_type"] == "ANISETTE, OUZO, OJEN"
+
+
+def test_ttb_export_rejoins_a_record_split_by_a_newline():
+    # A newline inside an unquoted field tears one record across two physical lines, so
+    # records are segmented on the id column, not on line breaks.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'25269001000226',BR-TX-20212,25WASC,09/29/2025,,THE WANDERING SCAPEGOAT\n"
+                "BARREL AGED SOUR ALE,44,TEXAS,902,ALE\n"
+                "'25269001000340',BR-OH-20080,25FBQU,11/13/2025,FIG BELGIAN QUAD,"
+                "URBAN ARTIFACT,35,OHIO,902,ALE\n")
+    rows = parse_export(csv_text)
+    assert len(rows) == 2, "a torn record is one record, and does not eat the next one"
+    assert rows[0]["brand_name"] == "THE WANDERING SCAPEGOAT BARREL AGED SOUR ALE"
+    assert rows[0]["origin_desc"] == "TEXAS"
+    assert rows[1]["ttb_id"] == "25269001000340"
+    assert rows[1]["brand_name"] == "URBAN ARTIFACT"
+
+
+def test_ttb_export_drops_a_row_it_cannot_trust():
+    # Better to lose one row than to store a shifted one: a shifted row is not visibly
+    # wrong downstream, it is just a product with a state where its date should be.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = f"{_CSV_HEAD}\n'25255001000115',TX-I-1,25X,NOT-A-DATE,,BRAND,81,MEXICO,983,X\n"
+    assert parse_export(csv_text) == []

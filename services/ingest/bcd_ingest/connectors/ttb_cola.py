@@ -166,6 +166,44 @@ def parse_total(page: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+_DATE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+#: A TTB id is a long run of digits, optionally wrapped in the single quotes the export
+#: adds to stop a spreadsheet eating the leading zeros. Nothing else in the row looks
+#: like this, which is what makes it usable as a record boundary.
+_TTB_ID = re.compile(r"^'?\d{10,20}'?$")
+
+
+def _repair(fields: list[str]) -> list[str] | None:
+    """Put a comma-split row back together, or None if it cannot be trusted.
+
+    TTB does not quote a field that contains a comma, so a fanciful name like
+    "COYOTA CAPON, TOBALA CAPON" splits in two and shifts every column after it. Roughly
+    one row in sixty is affected — too many to page around, and far too many to accept,
+    because a shifted row puts a state in the date column and a class code in the id.
+
+    Two anchors make the repair safe. The first four columns are structured and never
+    carry a comma, so they are read from the left. Origin and class codes are numeric and
+    sit two apart near the end, so the rightmost such pair locates the tail — rightmost
+    because the class DESCRIPTION carries commas of its own ("Anisette, Ouzo, Ojen").
+    What is left in the middle is the fanciful name and the brand; the brand is the last
+    of them, which is right whenever the brand itself has no comma.
+    """
+    if len(fields) == len(_EXPORT_COLUMNS):
+        return fields
+    if len(fields) < len(_EXPORT_COLUMNS) or not _DATE.match(fields[3].strip()):
+        return None
+    for q in range(len(fields) - 1, 5, -1):
+        if not (fields[q].strip().isdigit() and fields[q - 2].strip().isdigit()):
+            continue
+        middle = fields[4:q - 2]
+        if not middle:
+            return None
+        return [*fields[:4],
+                ",".join(middle[:-1]), middle[-1],
+                fields[q - 2], fields[q - 1], fields[q], ",".join(fields[q + 1:])]
+    return None
+
+
 def parse_export(text: str) -> list[dict[str, str]]:
     """Rows from the CSV export, keyed like `parse_results` so both paths feed one
     normalizer. TTB writes the id as '26051001000586' — quoted so a spreadsheet keeps the
@@ -174,11 +212,35 @@ def parse_export(text: str) -> list[dict[str, str]]:
     import io
 
     out: list[dict[str, str]] = []
-    for row in csv.DictReader(io.StringIO(text)):
-        vals = [(row.get(c) or "").strip().strip("'") for c in _EXPORT_COLUMNS]
-        if not vals[0]:
-            continue
+    rows = csv.reader(io.StringIO(text))
+    if next(rows, None) is None:
+        return out
+
+    def emit(fields: list[str]) -> None:
+        fixed = _repair(fields)
+        if fixed is None:
+            return
+        vals = [v.strip().strip("'") for v in fixed]
+        if not vals[0] or not _DATE.match(vals[3]):
+            return
         out.append(dict(zip(_ROW_FIELDS, vals, strict=True)))
+
+    # A record is not a line. An unquoted field carrying a newline splits one record
+    # across two physical rows ("THE WANDERING SCAPEGOAT\nBARREL AGED SOUR ALE"), so
+    # records are segmented on the id column instead — the only field whose shape is
+    # unambiguous — and a continuation is rejoined into the field it was torn out of.
+    buf: list[str] = []
+    for row in rows:
+        if not row:
+            continue
+        if _TTB_ID.match(row[0].strip()):
+            if buf:
+                emit(buf)
+            buf = list(row)
+        elif buf:
+            buf = [*buf[:-1], f"{buf[-1]} {row[0]}".strip(), *row[1:]]
+    if buf:
+        emit(buf)
     return out
 
 
