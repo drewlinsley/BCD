@@ -214,6 +214,12 @@ class PostgresStore:
             row = cur.execute("SELECT record FROM gold WHERE id=%s", (gid,)).fetchone()
         return row[0] if row else None
 
+    def delete_gold(self, gid: str) -> None:
+        """Remove a gold row outright. Used where a merge leaves nothing to redirect to —
+        a producer is only ever reached through the rows that name it."""
+        with self._lock, self._conn.cursor() as cur:
+            cur.execute("DELETE FROM gold WHERE id=%s", (gid,))
+
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]:
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(

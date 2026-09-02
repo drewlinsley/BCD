@@ -14,6 +14,7 @@ every `entity_type='product'` query in the same write that makes it redirectable
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from typing import Any
 
 REDIRECT_ENTITY = "product_redirect"
@@ -130,4 +131,60 @@ def merge_products(store: Any, pairs: dict[str, str]) -> dict[str, int]:
         sku["product_id"] = merges[sku["product_id"]]
         store.put_gold(sku["id"], "sku", sku)
         stats["skus_repointed"] += 1
+    return stats
+
+
+_PRODUCER_INHERIT = ("kind", "country", "region", "city", "lat", "lon",
+                     "parent_company", "ttb_permit", "website")
+
+
+def merge_producers(store: Any, pairs: dict[str, str]) -> dict[str, int]:
+    """Fold each alias producer into its canonical, repointing everything that named it.
+
+    Unlike a product merge there is no redirect row: nothing resolves a producer by id from
+    outside, so the alias is simply removed once products and brands point elsewhere. The
+    spellings are kept as aliases, since they are what a label actually says.
+
+    A location is inherited rather than overwritten, and where a cluster disagrees the most
+    common region wins — a company files from wherever it packages, and the address it uses
+    most is the one worth showing.
+    """
+    merges = collapse(pairs)
+    stats = {"merged": 0, "products_repointed": 0, "brands_repointed": 0}
+    if not merges:
+        return stats
+
+    # Most common region per canonical, before anything is absorbed.
+    regions: dict[str, Counter] = defaultdict(Counter)
+    for alias_id, canon_id in merges.items():
+        for pid in (alias_id, canon_id):
+            rec = store.get_gold(pid)
+            if rec and rec.get("region"):
+                regions[canon_id][rec["region"]] += 1
+
+    for alias_id, canon_id in merges.items():
+        alias = store.get_gold(alias_id)
+        canon = store.get_gold(canon_id)
+        if not alias or not canon:
+            continue
+        for key in _PRODUCER_INHERIT:
+            canon[key] = _absorb(canon.get(key), alias.get(key))
+        names = set(canon.get("aliases") or []) | set(alias.get("aliases") or [])
+        if alias.get("name") and alias["name"].casefold() != (canon.get("name") or "").casefold():
+            names.add(alias["name"])
+        canon["aliases"] = sorted(names)
+        if regions[canon_id]:
+            canon["region"] = regions[canon_id].most_common(1)[0][0]
+        store.put_gold(canon_id, "producer", canon)
+        store.delete_gold(alias_id)
+        stats["merged"] += 1
+
+    for kind, field, stat in (("product", "producer_id", "products_repointed"),
+                              ("brand", "producer_id", "brands_repointed")):
+        for rec in list(store.iter_gold(kind)):
+            target = merges.get(rec.get(field))
+            if target:
+                rec[field] = target
+                store.put_gold(rec["id"], kind, rec)
+                stats[stat] += 1
     return stats

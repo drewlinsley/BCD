@@ -162,3 +162,104 @@ def test_style_words_are_identity_not_noise():
         {"id": "off:bavamber", "name": "Bavarian Amber Lager", "brand": "Red Oak"},
     ]
     assert find_substring_merges(cat) == []
+
+
+# --- producers ---------------------------------------------------------------------------
+
+def _prod(pid, name, region=None):
+    return {"id": pid, "name": name, "region": region}
+
+
+def test_producer_spellings_of_one_company_collapse():
+    # TTB names a producer from the brand on each filing, so one brewery arrives once per
+    # spelling it has ever used. A differing location does not make it two companies —
+    # Lagunitas cans in more than one state.
+    from bcd_ingest.dedup import find_producer_merges
+
+    rows = [
+        _prod("p:lagunitas", "Lagunitas", "California"),
+        _prod("p:lag-brew-co", "Lagunitas Brewing Co", "California"),
+        _prod("p:the-lag-brew-co", "The Lagunitas Brewing Co.", "Minnesota"),
+        _prod("p:lag-brew-company", "Lagunitas Brewing Company", "California"),
+    ]
+    merges = dict(find_producer_merges(rows))
+    assert set(merges) == {"p:lag-brew-co", "p:the-lag-brew-co", "p:lag-brew-company"}
+    assert set(merges.values()) == {"p:lagunitas"}, "the plainest spelling survives"
+
+
+def test_a_brewery_and_a_distillery_are_not_one_company():
+    # They may share a name and be unrelated: Mammoth Brewing is in California, Mammoth
+    # Distilling in Michigan. A row that says neither cannot be assigned to either.
+    from bcd_ingest.dedup import find_producer_merges
+
+    rows = [
+        _prod("p:mam-brew", "Mammoth Brewing", "California"),
+        _prod("p:mam-brew-co", "Mammoth Brewing Co.", "California"),
+        _prod("p:mam-dist", "Mammoth Distilling", "Michigan"),
+        _prod("p:mam-dist-co", "Mammoth Distilling Co", "Michigan"),
+        _prod("p:mam", "Mammoth", None),
+    ]
+    merges = dict(find_producer_merges(rows))
+    assert merges == {"p:mam-brew-co": "p:mam-brew", "p:mam-dist-co": "p:mam-dist"}
+    assert "p:mam" not in merges, "an unqualified row is left alone, not guessed at"
+
+
+def test_a_trade_word_inside_a_name_is_identity_not_noise():
+    # Stripping trade words anywhere turns "Ale House Brewing Co" into "house", which then
+    # collects unrelated companies in seven states. Only a TRAILING one is noise.
+    from bcd_ingest.dedup import find_producer_merges, producer_core
+
+    assert producer_core("Ale House Brewing Co") == "ale house"
+    assert producer_core("Amber Ale") == "amber ale"
+    rows = [
+        _prod("p:ale-house", "Ale House"),
+        _prod("p:ale-house-brew", "Ale House Brewing Co"),
+        _prod("p:house", "House"),
+        _prod("p:amber-ale", "Amber Ale"),
+        _prod("p:amber-lager", "Amber Lager"),
+    ]
+    merges = dict(find_producer_merges(rows))
+    assert merges == {"p:ale-house-brew": "p:ale-house"}
+
+
+def test_a_name_the_ascii_fold_erases_is_never_grouped():
+    # Ten producers write their names in Greek or Korean. Folded to ASCII they all become
+    # the empty string, which would merge them into one company.
+    from bcd_ingest.dedup import find_producer_merges, producer_core
+
+    assert producer_core("Άλφα") == ""
+    rows = [_prod("p:alfa", "Άλφα"), _prod("p:eza", "Εζα"), _prod("p:semi", ";")]
+    assert find_producer_merges(rows) == []
+
+
+def test_producer_merge_repoints_products_and_brands_and_keeps_a_region():
+    import tempfile
+
+    from bcd_ingest.dedup import find_producer_merges
+    from bcd_ingest.merge import merge_producers
+    from bcd_ingest.store import MedallionStore
+
+    store = MedallionStore(root=tempfile.mkdtemp())
+    rows = [
+        _prod("p:lag", "Lagunitas", None),
+        _prod("p:lag-brew", "Lagunitas Brewing Co", "California"),
+        _prod("p:lag-brew-2", "The Lagunitas Brewing Company", "California"),
+        _prod("p:lag-mn", "Lagunitas Brewing Co.", "Minnesota"),
+    ]
+    for r in rows:
+        store.put_gold(r["id"], "producer", r)
+    store.put_gold("prod:1", "product", {"id": "prod:1", "name": "IPA", "producer_id": "p:lag-mn"})
+    store.put_gold("b:1", "brand", {"id": "b:1", "name": "Lagunitas", "producer_id": "p:lag-brew"})
+
+    stats = merge_producers(store, dict(find_producer_merges(rows)))
+    assert stats["merged"] == 3
+    assert stats["products_repointed"] == 1
+    assert stats["brands_repointed"] == 1
+
+    assert store.get_gold("p:lag-mn") is None, "absorbed rows are removed"
+    survivor = store.get_gold("p:lag")
+    assert survivor["region"] == "California", "the region it files from most often"
+    assert "Lagunitas Brewing Co" in survivor["aliases"]
+    assert store.get_gold("prod:1")["producer_id"] == "p:lag"
+    assert store.get_gold("b:1")["producer_id"] == "p:lag"
+    store.close()

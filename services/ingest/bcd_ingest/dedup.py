@@ -281,3 +281,106 @@ def search_name(name: str, brand: str | None) -> str:
     if btoks & _tokens(name):
         return name
     return f"{brand} {name}"
+
+
+# --- producers -------------------------------------------------------------------------
+#
+# TTB names a producer by the brand on each filing, so one company arrives once per spelling
+# it has ever used: "Lagunitas", "Lagunitas Brewing Co", "The Lagunitas Brewing Company".
+# Those are one producer, and a differing location does not make them two — a company cans
+# in more than one place.
+
+#: Stripped only from the END of a name, repeatedly ("Brewing Co., LLC"). A trade word is
+#: noise where it trails the name and identity where it does not: stripping it anywhere
+#: turns "Ale House Brewing Co" into "house", which then collects unrelated companies in
+#: seven states.
+_PRODUCER_SUFFIX = {
+    "brewing", "brewery", "breweries", "brewers", "brewhouse", "brewpub",
+    "distilling", "distillery", "distilleries", "distillers",
+    "winery", "wineries", "vineyards", "cellars",
+    "company", "co", "corp", "corporation", "inc", "incorporated",
+    "llc", "lc", "llp", "lp", "ltd", "limited", "plc", "pllc",
+    "gmbh", "bv", "nv", "srl", "spa", "ag", "kg", "oy", "ab",
+    "holdings", "group",
+}
+
+_BREW_WORDS = {"brewing", "brewery", "breweries", "brewers", "brewhouse", "brewpub"}
+_DIST_WORDS = {"distilling", "distillery", "distilleries", "distillers"}
+
+
+def _producer_tokens(name: str) -> list[str]:
+    s = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    s = s.lower().replace("&", " and ").replace("'", "").replace("`", "")
+    return [t for t in re.split(r"[^a-z0-9]+", s) if t]
+
+
+def producer_core(name: str) -> str:
+    """The identifying part of a producer name: no leading "The", no trailing incorporation.
+
+    Returns "" for a name that has nothing left — a punctuation-only name, or one written
+    in a script the ASCII fold erases. Those must never be grouped: ten producers whose
+    names are Greek or Korean all fold to the same empty string.
+    """
+    toks = _producer_tokens(name)
+    while toks and toks[0] == "the":
+        toks = toks[1:]
+    while len(toks) > 1 and toks[-1] in _PRODUCER_SUFFIX:
+        toks = toks[:-1]
+    return " ".join(toks)
+
+
+def producer_trade(name: str) -> str:
+    """'brew', 'dist', or '' when the name does not say.
+
+    A brewery and a distillery are different producers even under one name, so this
+    partitions a cluster rather than describing it.
+    """
+    toks = set(_producer_tokens(name))
+    brew, dist = bool(toks & _BREW_WORDS), bool(toks & _DIST_WORDS)
+    if brew == dist:          # neither, or confusingly both
+        return ""
+    return "brew" if brew else "dist"
+
+
+def _producer_canonical(rows: list[dict]) -> dict:
+    """The row the others fold into: the plainest spelling of the name.
+
+    Shortest wins, because that is the bare brand a label actually carries — "Lagunitas"
+    over "The Lagunitas Brewing Company". Ties break on id so the choice is stable.
+    """
+    return min(rows, key=lambda r: (len(r.get("name") or ""), r.get("id") or ""))
+
+
+def find_producer_merges(producers: Iterable[dict]) -> list[tuple[str, str]]:
+    """(alias_id, canonical_id) for producer rows that name one company."""
+    by_core: dict[str, list[dict]] = defaultdict(list)
+    for p in producers:
+        core = producer_core(p.get("name", ""))
+        if core:
+            by_core[core].append(p)
+
+    out: list[tuple[str, str]] = []
+    for rows in by_core.values():
+        by_trade: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            by_trade[producer_trade(r.get("name", ""))].append(r)
+        known = [k for k in by_trade if k]
+
+        if len(known) == 1:
+            # Only one trade under this name, so a row that does not say which it is can
+            # only be that one.
+            groups = [by_trade[known[0]] + by_trade.get("", [])]
+        elif not known:
+            groups = [by_trade[""]]
+        else:
+            # Both a brewery and a distillery answer to this name. They are different
+            # companies, and a row saying neither cannot be assigned to either, so it is
+            # left alone rather than guessed at.
+            groups = [by_trade[k] for k in known]
+
+        for group in groups:
+            if len(group) < 2:
+                continue
+            canon = _producer_canonical(group)
+            out.extend((r["id"], canon["id"]) for r in group if r["id"] != canon["id"])
+    return out
