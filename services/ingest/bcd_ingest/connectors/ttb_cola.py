@@ -166,11 +166,32 @@ def parse_total(page: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+#: The registry answers some date ranges with its error page instead of a result set —
+#: HTTP 200, no total, so parse_total reads it as zero. Deterministic and data-dependent
+#: rather than transient: 01/01/1992..12/31/1992 errors while every quarter of 1992 but one
+#: returns over a thousand rows, and 1995 errors as a year while June 1995 returns 402.
+_ERROR_PAGE = re.compile(r"An error has occurred in the system", re.I)
+
+
+def is_error_page(page: str) -> bool:
+    """Whether the registry errored rather than returning an empty result set.
+
+    Worth separating because the two are indistinguishable by total alone, and treating an
+    error as "no rows here" loses the window in silence — the failure mode with no symptom.
+    """
+    return bool(_ERROR_PAGE.search(page))
+
+
 _DATE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 #: A TTB id is a long run of digits, optionally wrapped in the single quotes the export
 #: adds to stop a spreadsheet eating the leading zeros. Nothing else in the row looks
 #: like this, which is what makes it usable as a record boundary.
-_TTB_ID = re.compile(r"^'?\d{10,20}'?$")
+#:
+#: The floor is 8, not 10: the id was eight digits ('92093118') before TTB widened it to
+#: fourteen. A floor of 10 matched nothing in a pre-2000 export, so every record boundary
+#: was missed, parse_export returned nothing, and the walk fell back to paging the HTML
+#: twenty rows at a time — correct, but fifty times the requests.
+_TTB_ID = re.compile(r"^'?\d{8,20}'?$")
 
 
 def _repair(fields: list[str]) -> list[str] | None:
@@ -450,6 +471,18 @@ class TTBColaConnector(Connector):
             page = self._get(client, "POST", _SEARCH, data=form)
         except Exception as exc:  # noqa: BLE001 - a bad window must not end the run
             print(f"  ! ttb {span} class {lo}-{hi}: {exc}")
+            return
+
+        if is_error_page(page):
+            # Halve and retry: the error tracks something in the underlying rows, so the
+            # halves that do not contain it still answer. A single day that still errors is
+            # a genuine hole and says so, rather than passing for an empty day.
+            if start >= end:
+                print(f"  ! ttb {span} class {lo}-{hi}: registry error page, day skipped")
+                return
+            mid = start + (end - start) // 2
+            yield from self._walk_range(client, start, mid, lo, hi)
+            yield from self._walk_range(client, mid + timedelta(days=1), end, lo, hi)
             return
 
         total = parse_total(page)

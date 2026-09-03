@@ -408,3 +408,72 @@ def test_ttb_export_repairs_an_import_whose_origin_code_is_not_numeric():
     assert row["origin_code"] == "6J"
     assert row["origin_desc"] == "MOLDOVA"
     assert row["class_type"] == "OTHER GRAPE BRANDY (PISCO, GRAPPA) FB"
+
+
+def _error_page() -> str:
+    """The registry's error page: HTTP 200, no stated total, so it reads as zero rows."""
+    return ("<html><head><title>TTB Online - COLAs Online - Error Message</title></head>"
+            "<body><h1>Error</h1><p>An error has occurred in the system.</p>"
+            "<div class='errorbox'>Unable to process request.</div></body></html>")
+
+
+def test_ttb_error_page_is_not_an_empty_window():
+    from bcd_ingest.connectors.ttb_cola import is_error_page, parse_total
+
+    page = _error_page()
+    assert parse_total(page) == 0, "no total on the page, so the count alone cannot tell"
+    assert is_error_page(page), "...which is exactly why it needs its own test"
+    assert not is_error_page(_search_page(0)), "a real empty result set is not an error"
+
+
+def test_ttb_bisects_an_error_page_rather_than_losing_the_window():
+    # The registry errors on some ranges and returns HTTP 200 with no total, which read as
+    # an empty window and skipped it in silence: 1992 answered 0 for the year while its
+    # quarters held thousands. The halves that do not contain the offending row still answer.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([
+        _error_page(),                        # 5-day window: errors
+        _search_page(3), _ttb_csv(3, 1),      # first half answers
+        _search_page(2), _ttb_csv(2, 4),      # second half answers
+    ])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_range(client, date(2026, 8, 20), date(2026, 8, 24), "100", "699"))
+
+    assert len(rows) == 5, "the window is recovered, not skipped"
+    spans = [(c[2].get("searchCriteria.dateCompletedFrom"),
+              c[2].get("searchCriteria.dateCompletedTo"))
+             for c in client.calls if c[0] == "POST"]
+    assert spans == [("08/20/2026", "08/24/2026"),
+                     ("08/20/2026", "08/22/2026"),
+                     ("08/23/2026", "08/24/2026")], "halves tile the window exactly"
+
+
+def test_ttb_error_page_on_a_single_day_is_reported_not_swallowed(capsys):
+    # A day cannot be halved further. It is a genuine hole, and the run has to say so —
+    # the whole point of the change is that this stops looking like an empty day.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    client = _Recorder([_error_page()])
+    conn = TTBColaConnector(store=None, use_fixture=False)
+    rows = list(conn._walk_range(client, date(1992, 9, 29), date(1992, 9, 29), "100", "699"))
+
+    assert rows == []
+    assert len(client.calls) == 1, "nothing to export, and no half to try"
+    out = capsys.readouterr().out
+    assert "09/29/1992" in out and "error page" in out
+
+
+def test_ttb_export_reads_the_eight_digit_ids_of_the_early_registry():
+    # TTB widened the id from eight digits to fourteen. A floor of ten matched no record
+    # boundary in a pre-2000 export, so it parsed as empty and the walk paged the HTML
+    # twenty rows at a time instead — correct, but fifty times the requests.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'92093118',MI-I-532,92-153,09/28/1992,,LAPHROAIG,5K,SCOTLAND,"
+                "153,SINGLE MALT SCOTCH WHISKY\n")
+    (row,) = parse_export(csv_text)
+    assert row["ttb_id"] == "92093118"
+    assert row["brand_name"] == "LAPHROAIG"
+    assert row["completed_date"] == "09/28/1992"
