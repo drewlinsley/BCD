@@ -6,6 +6,8 @@ MedallionStore so the whole thing boots with `make api` after an ingest, no serv
 
 from __future__ import annotations
 
+import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -75,7 +77,38 @@ def scan_resolve(req: ScanResolveRequest, user_id: str = "demo") -> ScanResolveR
     t0 = time.perf_counter()
     resp = resolver.resolve(req, profile=profile)
     resp.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+    _log_scan(req, resp)
     return resp
+
+
+# Off unless BCD_SCAN_LOG names a file. Diagnosing a scan means knowing what the camera
+# actually read, and the client's own telemetry cannot be relied on for that during a debug
+# session: it batches, and only uploads once twenty events have piled up, so the scan you just
+# did is still sitting on the phone. Every real diagnosis so far — a wordmark read as Cyrillic,
+# a can whose brand never appeared in 30 lines — came from seeing the raw lines, and each time
+# they arrived late or not at all.
+_SCAN_LOG = os.environ.get("BCD_SCAN_LOG")
+
+
+def _log_scan(req: ScanResolveRequest, resp: ScanResolveResponse) -> None:
+    if not _SCAN_LOG:
+        return
+    row = {
+        "ts": datetime.now(UTC).isoformat(),
+        "ocr": [d.text for d in req.detections],
+        "corroborated": resp.corroborated,
+        "latency_ms": resp.latency_ms,
+        "candidates": [
+            {"name": c.resolved.product.name, "producer": c.resolved.producer.name,
+             "score": c.match_score}
+            for c in resp.candidates[:5]
+        ],
+    }
+    try:
+        with open(_SCAN_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    except OSError:
+        pass          # diagnostics must never take the scan path down with them
 
 
 @app.post("/v1/recommend")
