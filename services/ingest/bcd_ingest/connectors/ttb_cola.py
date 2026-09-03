@@ -202,8 +202,10 @@ def _repair(fields: list[str]) -> list[str] | None:
     one row in sixty is affected — too many to page around, and far too many to accept,
     because a shifted row puts a state in the date column and a class code in the id.
 
-    Two anchors make the repair safe. The first four columns are structured and never
-    carry a comma, so they are read from the left. The class code is always three digits
+    Two anchors make the repair safe. The date is located by shape from the left -- the
+    first four columns are NOT all comma-free, as this once assumed: an early serial number
+    carries a thousands separator ("21,142"), and reading the date at a fixed index dropped
+    one row in every window of the 1980s. The class code is always three digits
     and sits fourth from the end, so the rightmost three-digit field locates the tail —
     rightmost, because the class DESCRIPTION carries commas of its own ("Anisette, Ouzo,
     Ojen"). It cannot sit before index 8 either, since a split only ever pushes columns
@@ -216,16 +218,27 @@ def _repair(fields: list[str]) -> list[str] | None:
     """
     if len(fields) == len(_EXPORT_COLUMNS):
         return fields
-    if len(fields) < len(_EXPORT_COLUMNS) or not _DATE.match(fields[3].strip()):
+    if len(fields) < len(_EXPORT_COLUMNS):
         return None
-    for q in range(len(fields) - 1, 7, -1):
+    # The date is found by shape, not by position. It sits at index 3 in a row whose serial
+    # is clean, but an early serial number is written with a thousands separator -- 1988 has
+    # serial "21,142" -- which splits in two and pushes every later column right. Reading
+    # index 3 blindly then found "142", failed the date check, and dropped the row.
+    date_at = next((i for i in range(3, min(len(fields) - 5, 8))
+                    if _DATE.match(fields[i].strip())), None)
+    if date_at is None:
+        return None
+    head = [fields[0], fields[1], ",".join(fields[2:date_at]), fields[date_at]]
+    # The class code sits fourth from the end and cannot appear before its unsplit index,
+    # which shifts right by however much the serial consumed.
+    for q in range(len(fields) - 1, 4 + date_at, -1):
         f = fields[q].strip()
         if not (len(f) == 3 and f.isdigit()):
             continue
-        middle = fields[4:q - 2]
+        middle = fields[date_at + 1:q - 2]
         if not middle:
             return None
-        return [*fields[:4],
+        return [*head,
                 ",".join(middle[:-1]), middle[-1],
                 fields[q - 2], fields[q - 1], fields[q], ",".join(fields[q + 1:])]
     return None

@@ -477,3 +477,35 @@ def test_ttb_export_reads_the_eight_digit_ids_of_the_early_registry():
     assert row["ttb_id"] == "92093118"
     assert row["brand_name"] == "LAPHROAIG"
     assert row["completed_date"] == "09/28/1992"
+
+
+def test_ttb_export_repairs_a_serial_number_written_with_a_thousands_separator():
+    # The repair used to read the completed date at a fixed index 3, on the stated
+    # assumption that the first four columns never carry a comma. An early serial is
+    # written "21,142", which splits and pushes the date to index 4 -- so index 3 held
+    # "142", the date check failed, and the row was dropped. Exactly one row per window
+    # of the 1980s, every time, which the count mismatch then paid for by paging.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'88033310',PHI-RB-523,21,142,03/31/1988,,SCHMIDTS,"
+                "21,PENNSYLVANIA,142,MALT BEVERAGE\n")
+    (row,) = parse_export(csv_text)
+    assert row["ttb_id"] == "88033310"
+    assert row["serial"] == "21,142", "the separator is put back, not dropped"
+    assert row["completed_date"] == "03/31/1988"
+    assert row["brand_name"] == "SCHMIDTS"
+    assert row["class_type_code"] == "142"
+
+
+def test_ttb_export_still_repairs_a_comma_in_the_name_when_the_serial_is_clean():
+    # The common case must be unchanged: date at index 3, comma in the fanciful name.
+    from bcd_ingest.connectors.ttb_cola import parse_export
+
+    csv_text = (f"{_CSV_HEAD}\n"
+                "'26051001000586',DSP-CA-1,26-1,08/24/2026,COYOTA CAPON, TOBALA CAPON,"
+                "BRAND X,06,CALIFORNIA,301,VODKA\n")
+    (row,) = parse_export(csv_text)
+    assert row["fanciful_name"] == "COYOTA CAPON, TOBALA CAPON"
+    assert row["completed_date"] == "08/24/2026"
+    assert row["brand_name"] == "BRAND X"
