@@ -201,3 +201,23 @@ def test_frame_readers_are_closed_with_the_store(pg: PostgresStore):
     other.close()
     assert all(r.closed for r in readers)
     assert other._readers == []
+
+def test_a_nul_byte_does_not_end_the_run(pg: PostgresStore):
+    # A 2008 TTB label carried a NUL in its fanciful name. jsonb refuses it outright, so the
+    # write raised UntranslatableCharacter and took a backfill down 194,101 rows in. The byte
+    # is export padding, never content: drop it and keep the rest of the record.
+    doc = BronzeDoc(id=doc_id("t", "nul"), source_id="t", natural_key="nul", fetched_at="",
+                    url=None,
+                    payload={"fanciful_name": "\x00\x00", "brand_name": "BRAND\x00X",
+                             "nested": [{"k\x00": "v\x00"}]})
+    pg.put_bronze(doc)
+    (got,) = list(pg.iter_bronze("t"))
+    assert got.payload["fanciful_name"] == ""
+    assert got.payload["brand_name"] == "BRANDX", "the rest of the field survives"
+    assert got.payload["nested"] == [{"k": "v"}], "keys and nested values too"
+
+    pg.put_silver("s-nul", "t", "thing", doc.id, {"name": "A\x00B"})
+    assert list(pg.iter_silver("thing")) == [{"name": "AB"}]
+
+    _seed_product(pg, "p-nul", "Nul\x00Beer", {"citrus": 0.4})
+    assert pg.get_gold("p-nul")["name"] == "NulBeer", "the text column rejects it too"

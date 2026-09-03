@@ -77,6 +77,27 @@ def _sensory_array(record: dict[str, Any]) -> list[float] | None:
     return arr if any(arr) else None
 
 
+def _no_nuls(value: Any) -> Any:
+    """Strip U+0000 from anything on its way into Postgres.
+
+    jsonb and text both refuse it outright -- "unsupported Unicode escape sequence: \\u0000
+    cannot be converted to text" -- and one 2008 label whose fanciful name carried a NUL ended
+    a twenty-minute TTB backfill 194,101 rows in. The byte is padding in a fixed-width export,
+    never content, so dropping it loses nothing.
+
+    This sits at the store boundary rather than in the connector that happened to trip it: the
+    constraint is Postgres's, it applies to every source, and a run should not be able to die
+    on one bad byte from a source that has not been taught about it yet.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_no_nuls(k): _no_nuls(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_no_nuls(v) for v in value]
+    return value
+
+
 class PostgresStore:
     def __init__(self, url: str = "postgresql://localhost:5432/bcd", *,
                  search_path: str | None = None) -> None:
@@ -202,7 +223,8 @@ class PostgresStore:
                     source_id=EXCLUDED.source_id, natural_key=EXCLUDED.natural_key,
                     fetched_at=EXCLUDED.fetched_at, url=EXCLUDED.url, payload=EXCLUDED.payload
                 """,
-                (doc.id, doc.source_id, doc.natural_key, fetched, doc.url, Jsonb(doc.payload)),
+                (doc.id, doc.source_id, doc.natural_key, fetched, doc.url,
+                 Jsonb(_no_nuls(doc.payload))),
             )
 
     def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]:
@@ -228,7 +250,7 @@ class PostgresStore:
                     source_id=EXCLUDED.source_id, entity_type=EXCLUDED.entity_type,
                     bronze_id=EXCLUDED.bronze_id, record=EXCLUDED.record
                 """,
-                (sid, source_id, entity_type, bronze_id, Jsonb(record)),
+                (sid, source_id, entity_type, bronze_id, Jsonb(_no_nuls(record))),
             )
 
     def iter_silver(self, entity_type: str) -> Iterator[dict[str, Any]]:
@@ -241,6 +263,7 @@ class PostgresStore:
 
     # ---- gold ----
     def put_gold(self, gid: str, entity_type: str, record: dict[str, Any]) -> None:
+        record = _no_nuls(record)
         name = record.get("name")
         arr = _sensory_array(record) if entity_type == "product" else None
         sensory = _vec_literal(arr) if arr is not None else None
