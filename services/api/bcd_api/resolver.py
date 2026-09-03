@@ -285,6 +285,30 @@ def _frame_support(vocab: list[str], line_tokens: list[list[str]], *,
     return n
 
 
+# A name too short to contain an identifying token has nothing for `_token_supported` to
+# anchor on, so that guard waves it through and only the raised floor stands between it and any
+# fragment that starts with the same letters. That is not enough, because the floor is measured
+# with `word_similarity`, which asks whether the name appears *inside* the line — and a 3-letter
+# name appears inside almost anything. A catalog row literally named `Ver` matched "VERMIKI",
+# "VERMIL" and "VERM" off a Vermont can, all at ~1.0.
+#
+# Plain similarity is the right question for these, because it is the one measure that penalises
+# what the name leaves out: 'ver' scores 1.00 against "VER" and 0.33 against "VERMONT".
+_SHORT_NAME_SIM = 0.8
+
+
+def _short_name_supported(query: str, name: str) -> bool:
+    """Whether a very short name was actually *read*, rather than merely contained.
+
+    A name with no letter tokens at all ("1664", "J&B") cannot be tested this way and defers to
+    the raised floor, exactly as before — those are real products and must stay reachable."""
+    name_toks = _tokens(name)
+    if not name_toks:
+        return True
+    return any(_trigram_sim(nt, qt) >= _SHORT_NAME_SIM
+               for nt in name_toks for qt in _tokens(query))
+
+
 def _upc_variants(upc: str) -> list[str]:
     """A barcode's equivalent GTIN forms. A UPC-A (12 digits) and its EAN-13 form differ only by a
     leading zero and identify the *same* item, but a scanner and the catalog may store different
@@ -384,9 +408,15 @@ class Resolver:
                 pid = prod.get("id") or ""
                 if sc < _PRODUCER_MATCH_MIN or pid in seen:
                     continue
-                # Same coincidental-window guard the product path uses: the producer's name
-                # must actually be a word in the line, not a trigram accident.
-                if not _token_supported(text, prod.get("name") or ""):
+                # Same coincidental-window guards the product path uses: the producer's name
+                # must actually be a word in the line, not a trigram accident — and a very
+                # short one must have been read rather than merely contained. A producer
+                # literally named `Ver` was reached from "VERMIKI" and "VERMONT" here after
+                # the product path had already been taught not to.
+                pname = prod.get("name") or ""
+                if not _token_supported(text, pname):
+                    continue
+                if len(pname) < _SHORT_NAME_LEN and not _short_name_supported(text, pname):
                     continue
                 seen.add(pid)
                 items = products_of(pid)
@@ -488,11 +518,16 @@ class Resolver:
                 # Low-information either way: too short to be distinctive, or built only from
                 # category words. Both trigram-match label chrome far too easily, so they must
                 # clear a near-exact bar rather than the normal floor.
-                low_info = (len(name) < _SHORT_NAME_LEN or not _identifying_tokens(name))
+                too_short = len(name) < _SHORT_NAME_LEN
+                low_info = too_short or not _identifying_tokens(name)
                 floor = _SHORT_MIN_MATCH if low_info else _MIN_MATCH
-                if sc >= floor and _token_supported(det.text, name):
-                    hits.append((i, rec, sc))
-                    resolved_lines.add(i)
+                if sc < floor or not _token_supported(det.text, name):
+                    continue
+                # A very short name additionally has to have been read, not just contained.
+                if too_short and not _short_name_supported(det.text, name):
+                    continue
+                hits.append((i, rec, sc))
+                resolved_lines.add(i)
         # Distinct lines backing each record, read straight off the hits — enough to tell
         # whether the frame agreed on anything, without paying to hydrate first.
         backing: dict[str, set[int]] = {}

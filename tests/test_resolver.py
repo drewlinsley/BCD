@@ -639,3 +639,32 @@ def test_an_ambiguous_label_withholds_the_category_hint():
     assert _category_hint(say("NOTHING CATEGORICAL HERE")) is None
     # A malt-whisky label says both; a wrong filter is worse than none.
     assert _category_hint(say("ALE", "WHISKY")) is None
+
+
+def test_a_three_letter_name_must_be_read_not_merely_contained():
+    """A catalog row literally named `Ver` matched "VERMIKI", "VERMIL" and "VERM" off a Vermont
+    can. Such a name has no token for the support guard to anchor on, so that guard passes it
+    unconditionally and only the raised floor stands — and the floor is measured with
+    word_similarity, which asks whether the name appears *inside* the line. A 3-letter name
+    appears inside almost anything."""
+    ver = Product(id="p:ver", brand_id="b", producer_id="pr:ver",
+                  category=Category.OTHER, name="Ver").model_dump(mode="json")
+    for garble in ("VERM", "VERMIL", "VERMIKI", "VERMONT"):
+        resp = Resolver(_FrameStore({garble: [(ver, 1.0)]})).resolve(
+            ScanResolveRequest(detections=[DetectedText(text=garble, kind="text")]))
+        assert resp.candidates == [], garble
+
+    # ...but a clean read of that same short name still resolves, so recall is not lost.
+    resp = Resolver(_FrameStore({"VER": [(ver, 1.0)]})).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="VER", kind="text")]))
+    assert resp.candidates[0].resolved.product.name == "Ver"
+
+
+def test_a_digit_name_is_still_reachable():
+    """"1664" has no letter tokens at all, so the new test cannot judge it and must defer to
+    the raised floor rather than making a real beer unreachable."""
+    beer = Product(id="p:1664", brand_id="b", producer_id="pr:k",
+                   category=Category.BEER, name="1664").model_dump(mode="json")
+    resp = Resolver(_FrameStore({"1664": [(beer, 1.0)]})).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="1664", kind="text")]))
+    assert resp.candidates[0].resolved.product.name == "1664"
