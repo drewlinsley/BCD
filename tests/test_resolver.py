@@ -490,3 +490,56 @@ def test_a_second_candidate_on_one_line_can_still_win_the_frame():
     req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
     resp = Resolver(_FrameStore(frame, gold)).resolve(req)
     assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_the_frame_is_matched_in_one_batched_call():
+    """The resolver hands the store the whole frame, so a store that can run the lines
+    concurrently gets the chance to. Results must stay aligned with the lines that produced
+    them, or a match gets attributed to the wrong overlay."""
+    frame = {
+        "THE ALCHEMIST": [(_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 1.0)],
+        "HEADY TOPPER": [(_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 1.0)],
+    }
+    calls: list[list[str]] = []
+
+    class _BatchStore(_FrameStore):
+        def match_products_many(self, texts, limit=3):
+            calls.append(list(texts))
+            return [self.match_products(t, limit) for t in texts]
+
+    store = _BatchStore(frame, {"pr:alch": _producer("pr:alch", "Alchemist")})
+    req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
+    resp = Resolver(store).resolve(req)
+
+    assert calls == [["THE ALCHEMIST", "HEADY TOPPER"]]   # one call, not one per line
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_a_store_without_batched_matching_still_resolves():
+    """The dev store and any older Store implementation only have `match_products`; the
+    resolver must not require the batch entry point."""
+    frame = {"HEADY TOPPER": [(_prod_of("Heady Topper", "p:ht", "pr:alch"), 1.0)]}
+    store = _FrameStore(frame, {"pr:alch": _producer("pr:alch", "Alchemist")})
+    assert not hasattr(store, "match_products_many")
+    resp = Resolver(store).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="HEADY TOPPER", kind="text")]))
+    assert resp.candidates[0].resolved.product.name == "Heady Topper"
+
+
+def test_lines_not_worth_matching_are_never_sent_to_the_store():
+    """The packaging filter has to run *before* the query — skipping the work is most of the
+    point, since a short common word is the most expensive thing to match."""
+    asked: list[list[str]] = []
+
+    class _BatchStore(_FrameStore):
+        def match_products_many(self, texts, limit=3):
+            asked.append(list(texts))
+            return [self.match_products(t, limit) for t in texts]
+
+    frame = {"HEADY TOPPER": [(_prod_of("Heady Topper", "p:ht", "pr:alch"), 1.0)]}
+    req = ScanResolveRequest(detections=[
+        DetectedText(text=t, kind="text")
+        for t in ("HEADY TOPPER", "PINT", "12 FL OZ", "CANS")
+    ])
+    Resolver(_BatchStore(frame, {"pr:alch": _producer("pr:alch", "Alchemist")})).resolve(req)
+    assert asked == [["HEADY TOPPER"]]

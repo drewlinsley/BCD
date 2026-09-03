@@ -14,16 +14,20 @@ Every gold row still carries the full canonical `record` as jsonb; `name`, `sens
 search operators have something to bite on. The invariant is unchanged: never lose raw
 bytes, every gold field traces back to a bronze document id.
 
-Concurrency: one connection in autocommit, serialized by a lock — same pragmatic choice
-as the SQLite store, since FastAPI runs sync endpoints in a threadpool. Production swaps
-this for a psycopg_pool ConnectionPool; the method surface stays identical.
+Concurrency: one connection in autocommit, serialized by a lock — same pragmatic choice as
+the SQLite store, since FastAPI runs sync endpoints in a threadpool. The one exception is
+`match_products_many`, which fans a scan frame's lines out over a few read-only connections
+of its own, because those queries are the latency-critical path and are pure reads. A
+psycopg_pool ConnectionPool would subsume both; the method surface stays identical either
+way.
 """
 
 from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -85,8 +89,12 @@ class PostgresStore:
         if search_path:
             # applied at connect, before _init(), so DDL lands in the leading schema
             kwargs["options"] = f"-c search_path={search_path}"
+        self._connect_kwargs = kwargs
         self._conn = psycopg.connect(self.dsn, **kwargs)
         self._lock = threading.Lock()
+        # Idle readers for concurrent frame matching, opened on demand (see `_reader`).
+        self._readers: list[psycopg.Connection] = []
+        self._readers_lock = threading.Lock()
         if search_path:
             with self._conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {search_path.split(',')[0].strip()}")
@@ -101,7 +109,13 @@ class PostgresStore:
         anything it wrongly excludes is invisible. Erring low costs a few hundred rows of
         scoring; erring high silently loses matches.
         """
-        with self._lock, self._conn.cursor() as cur:
+        with self._lock:
+            self._apply_trgm(self._conn)
+
+    @staticmethod
+    def _apply_trgm(conn: psycopg.Connection) -> None:
+        """Every connection that runs the gate needs these, because they are per-session."""
+        with conn.cursor() as cur:
             cur.execute("SELECT set_limit(0.3)")            # similarity, and loads pg_trgm
             # 0.4 rather than the 0.5 default, measured: "Guinness Draught" scores 0.486
             # against a real canned label and would be excluded by a hair. Below 0.35 the
@@ -297,7 +311,8 @@ class PostgresStore:
         return len(rows)
 
     # ---- search (used by the resolver / recommend) ----
-    def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+    def match_products(self, text: str, limit: int = 3, *,
+                       conn: psycopg.Connection | None = None) -> list[tuple[dict, float]]:
         """Best-first name match for an OCR line, scored 0-1.
 
         `word_similarity` is directional — it finds its first argument inside a continuous
@@ -388,9 +403,71 @@ class PostgresStore:
             LIMIT %s
         """
         params += [text] * 7 + [limit]
-        with self._lock, self._conn.cursor() as cur:
-            rows = cur.execute(sql, params).fetchall()
+        if conn is not None:
+            # A reader from the frame pool: already private to this thread, so no lock.
+            with conn.cursor() as cur:
+                rows = cur.execute(sql, params).fetchall()
+        else:
+            with self._lock, self._conn.cursor() as cur:
+                rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
+
+    # ---- frame matching ----
+    # A label is several lines and each one costs a GIN scan sized by how common its
+    # trigrams are, not by how many rows come back — "stowe" costs 534ms to return 20 rows.
+    # Run in series a six-line can takes ~2s against a HUD that ticks every 700ms; run
+    # concurrently it takes about as long as its slowest line. Batching them into a single
+    # query was tried first and measured three times *worse* (13.6s vs 4.8s): one OR'd gate
+    # across every line makes the planner give up on per-term index scans.
+    _MATCH_POOL_SIZE = 4
+
+    def _reader(self) -> psycopg.Connection:
+        """A connection for frame matching, one per worker thread, opened on first use.
+
+        Opened here rather than borrowed from anywhere because the trigram thresholds are
+        *per-session* GUCs: a connection that skipped them would gate differently and
+        silently return different matches for the same label.
+        """
+        with self._readers_lock:
+            if self._readers:
+                return self._readers.pop()
+            conn = psycopg.connect(self.dsn, **self._connect_kwargs)
+        self._apply_trgm(conn)
+        return conn
+
+    def _release(self, conn: psycopg.Connection) -> None:
+        with self._readers_lock:
+            if len(self._readers) < self._MATCH_POOL_SIZE:
+                self._readers.append(conn)
+                return
+        conn.close()
+
+    def match_products_many(
+        self, texts: Sequence[str], limit: int = 3
+    ) -> list[list[tuple[dict, float]]]:
+        """`match_products` for a whole frame at once — same answers, run concurrently.
+
+        Results stay positionally aligned with `texts`, so a caller can keep attributing a
+        match to the line it came from."""
+        texts = list(texts)
+        if len(texts) <= 1:
+            return [self.match_products(t, limit) for t in texts]
+        workers = min(len(texts), self._MATCH_POOL_SIZE)
+        results: list[list[tuple[dict, float]]] = [[] for _ in texts]
+
+        def run(slot: int) -> None:
+            conn = self._reader()
+            try:
+                # Strided rather than chunked so one slow line does not strand a worker
+                # with the rest of its block still to do.
+                for i in range(slot, len(texts), workers):
+                    results[i] = self.match_products(texts[i], limit, conn=conn)
+            finally:
+                self._release(conn)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(run, range(workers)))    # list() so a worker's error propagates
+        return results
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine ANN over the sensory column — the pgvector core of recommendation."""
@@ -408,6 +485,10 @@ class PostgresStore:
         return [r[0] for r in rows]
 
     def close(self) -> None:
+        with self._readers_lock:
+            readers, self._readers = self._readers, []
+        for r in readers:
+            r.close()
         self._conn.close()
 
 

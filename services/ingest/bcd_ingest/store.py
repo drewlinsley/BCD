@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -242,6 +242,14 @@ class MedallionStore:
         scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
         return [(p, sim) for p, sim, _ in scored[:limit]]
 
+    def match_products_many(
+        self, texts: Sequence[str], limit: int = 3
+    ) -> list[list[tuple[dict, float]]]:
+        """Frame matching for the dev store: the same answers, in series. Only the Postgres
+        store has anything to gain from running a frame's lines concurrently — this one is a
+        local file."""
+        return [self.match_products(t, limit) for t in texts]
+
     def refresh_search_names(self) -> int:
         """No-op: this store builds the brand-qualified name per query rather than storing
         it, so there is nothing to backfill. Present so callers need not know which store
@@ -284,6 +292,8 @@ class Store(Protocol):
     def counts(self) -> dict[str, int]: ...
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def match_products_many(self, texts: Sequence[str],
+                            limit: int = 3) -> list[list[tuple[dict, float]]]: ...
     def refresh_search_names(self) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...

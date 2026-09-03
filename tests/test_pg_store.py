@@ -147,3 +147,57 @@ def test_a_label_of_only_style_words_still_answers(pg: PostgresStore):
     error or scan the table."""
     _seed_product(pg, "ipa", "Hazy IPA", {"citrus": 0.7})
     assert isinstance(pg.match_products("HAZY IPA"), list)
+
+
+def test_concurrent_frame_matching_agrees_with_one_line_at_a_time(pg: PostgresStore):
+    """`match_products_many` fans a frame out over its own connections, so the guarantee that
+    matters is that concurrency changes nothing but the clock.
+
+    The trigram thresholds are per-*session* GUCs. A reader that was handed out without them
+    would gate differently and quietly return fewer matches for the same label — the kind of
+    bug that shows up as an intermittently unrecognised beer, not as an error.
+    """
+    for pid, name in (("p1", "Heady Topper"), ("p2", "Sierra Nevada Pale Ale"),
+                      ("p3", "Guinness Draught"), ("p4", "Bombay Sapphire London Dry Gin"),
+                      ("p5", "Pint Cake"), ("p6", "Tootsie Topper")):
+        _seed_product(pg, pid, name, None)
+    pg.refresh_search_names()
+
+    frame = ["HEADY TOPPER", "SIERRA NEVADA PALE ALE", "GUINNESS DRAUGHT EXTRA STOUT",
+             "BOMBAY SAPPHIRE", "PINT", "TOPPER", "NOTHING LIKE THIS IN THE CATALOG"]
+    one_at_a_time = [pg.match_products(t) for t in frame]
+    together = pg.match_products_many(frame)
+
+    assert len(together) == len(frame)          # positionally aligned with the input
+    for line, seq, con in zip(frame, one_at_a_time, together, strict=True):
+        assert [r["id"] for r, _ in con] == [r["id"] for r, _ in seq], line
+        assert [s for _, s in con] == [s for _, s in seq], line
+
+
+def test_frame_matching_handles_the_degenerate_frames(pg: PostgresStore):
+    _seed_product(pg, "p1", "Heady Topper", None)
+    pg.refresh_search_names()
+    assert pg.match_products_many([]) == []
+    assert len(pg.match_products_many(["HEADY TOPPER"])) == 1
+    # More lines than the pool has workers: every line still gets its own answer slot.
+    many = pg.match_products_many(["HEADY TOPPER"] * 9)
+    assert len(many) == 9
+    assert all(m and m[0][0]["name"] == "Heady Topper" for m in many)
+
+
+def test_frame_readers_are_closed_with_the_store(pg: PostgresStore):
+    """The pool holds real connections; leaking them exhausts the server's slots.
+
+    Uses a second store over the same schema so the fixture's own connection survives to
+    tear the schema down.
+    """
+    _seed_product(pg, "p1", "Heady Topper", None)
+    pg.refresh_search_names()
+    other = PostgresStore(_URL, search_path=f"{_SCHEMA},public")
+    other.match_products_many(
+        ["HEADY TOPPER", "SOMETHING ELSE", "A THIRD LINE", "AND A FOURTH"])
+    readers = list(other._readers)
+    assert readers, "expected the frame match to have opened reader connections"
+    other.close()
+    assert all(r.closed for r in readers)
+    assert other._readers == []

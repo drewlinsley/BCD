@@ -291,6 +291,14 @@ class Resolver:
             brand=Brand.model_validate(brand),
         )
 
+    def _match_lines(self, texts: list[str]) -> list[list[tuple[dict, float]]]:
+        """A frame's name matches, concurrently where the store can. The fallback keeps any
+        store that only implements the single-line `match_products` working unchanged."""
+        many = getattr(self.store, "match_products_many", None)
+        if many is not None:
+            return many(texts)
+        return [self.store.match_products(t) for t in texts]
+
     def _qualified_name(self, rec: dict) -> str:
         """"<brand> <name>" for a product row, matching what `search_name` stores.
 
@@ -341,6 +349,7 @@ class Resolver:
         # product could be a line's second candidate and never be considered at all.
         hits: list[tuple[int, dict, float]] = []          # (line, record, that line's score)
         resolved_lines: set[int] = set()
+        to_match: list[int] = []                          # lines worth a name query
         for i, det in enumerate(req.detections):
             if det.kind == "barcode":
                 rec = self._resolve_by_upc(det.text)
@@ -352,7 +361,16 @@ class Resolver:
                 # A bare number/fragment is label chrome, not a name — and so is a line made
                 # only of category and packaging words. Skipped rather than trigram-matched.
                 continue
-            for rec, sc in self.store.match_products(det.text):
+            to_match.append(i)
+
+        # Ask for the frame's lines together. Each one costs a GIN scan sized by how common
+        # its trigrams are, so in series a six-line can spends ~2s against a 700ms HUD tick;
+        # the Postgres store runs them concurrently and the frame costs about its slowest
+        # line instead of their sum.
+        for i, found in zip(to_match, self._match_lines(
+                [req.detections[i].text for i in to_match]), strict=True):
+            det = req.detections[i]
+            for rec, sc in found:
                 # Judge the evidence on the brand-qualified name, because that is what the
                 # label actually says. A row named "Irish Whiskey" is anonymous on its own;
                 # as "Jameson Irish Whiskey" it is the product the line names.
