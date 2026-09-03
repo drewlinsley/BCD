@@ -192,6 +192,64 @@ def _worth_matching(text: str) -> bool:
     return any(t not in _PACKAGING for t in meaningful)
 
 
+# ---- the producer path ----
+# When the camera cannot read the product name, it can often still read the maker. A Heady
+# Topper can's wordmark is a wavy psychedelic script: across 38 live frames Vision returned the
+# beer's own name 3 times out of 100 lines — once as Cyrillic, "АДУ ТОРИ" — while the small rim
+# print, "ALCHEMIST-VER…", came through 23 times. The brewery is the readable half of that
+# label, and a brewery with two products is a far narrower answer than 363k rows.
+_PRODUCER_MATCH_MIN = 0.6
+# Past this many products in the hinted category, the label has identified a *maker* and not a
+# drink. Offering a guess then would be inventing one.
+_PRODUCER_MAX_PRODUCTS = 4
+# A producer hit is indirect evidence, so it must never outrank a product the label actually
+# names — only the nothing it is competing against.
+_PRODUCER_EVIDENCE = 0.6
+# A candidate whose category *contradicts* the label's own fine print. Not merely unsupported —
+# the frame says one thing and the row says another, which is evidence against, not absence of
+# evidence. "A CHEMIST VER" off this can matched a distillery's `Chemist` at 1.00 while the same
+# frame read "ALE"; 17 of that maker's 19 products are spirits. 'other' is never a contradiction,
+# because it means the catalog does not know, not that it disagrees.
+_CATEGORY_CONTRADICTS = 0.5
+
+# The category words a label prints in its fine print. This is the one part of a stylized can
+# the OCR reads reliably — "ALE / ALC. 8% BY VOL / 1 PINT" came through on 25 of those 100
+# lines, unfailingly, while the brand did not. It cannot name a product, but it names a
+# category, and that is exactly what separates the right maker from the wrong one here:
+# Alchemist makes 1 beer, while Chemist makes 17 spirits and Cocktail Chemist 7.
+_CATEGORY_WORDS = {
+    "beer": {"ale", "lager", "stout", "porter", "pilsner", "pilsener", "ipa", "beer",
+             "bock", "saison", "gose", "witbier", "weisse", "hefeweizen", "kolsch",
+             "brew", "brewed", "malt", "pale", "amber", "dunkel", "tripel", "dubbel"},
+    "spirit": {"vodka", "gin", "whiskey", "whisky", "rum", "tequila", "bourbon", "brandy",
+               "cognac", "mezcal", "liqueur", "scotch", "rye", "absinthe", "schnapps",
+               "distilled", "proof"},
+    "wine": {"wine", "vino", "chardonnay", "merlot", "cabernet", "riesling", "rose",
+             "prosecco", "champagne", "sauvignon", "pinot", "syrah", "zinfandel"},
+}
+
+
+def _category_hint(detections) -> str | None:
+    """The category the label's own fine print names, or None if it says nothing or disagrees.
+
+    Counted across the whole frame rather than taken from the first match, because a single
+    word is easy to misread and a can carries several ("ALE", "ALC", "1 PINT"). A tie means the
+    label is ambiguous and the hint is withheld — a wrong category filter is worse than none.
+    """
+    votes: dict[str, int] = {}
+    for det in detections:
+        for tok in _tokens(det.text):
+            for cat, words in _CATEGORY_WORDS.items():
+                if tok in words:
+                    votes[cat] = votes.get(cat, 0) + 1
+    if not votes:
+        return None
+    ranked = sorted(votes.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None
+    return ranked[0][0]
+
+
 def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
     """The identifying words that would name this product on a label: its own name, its brand
     and its producer. The producer is what carries the signal — "THE ALCHEMIST" is the line
@@ -203,17 +261,28 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
     return list(seen)
 
 
-def _frame_support(vocab: list[str], line_tokens: list[list[str]]) -> int:
-    """How many distinct detections in the frame name this candidate.
+def _frame_support(vocab: list[str], line_tokens: list[list[str]], *,
+                   category: str | None = None, hint: str | None = None) -> int:
+    """How many distinct pieces of the frame agree with this candidate.
 
-    Same token-agreement test the per-line guard uses, asked of the whole frame instead of one
-    line — so the answer is directly comparable and one threshold calibrates both."""
-    if not vocab:
-        return 0
-    return sum(
-        any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for v in vocab for t in toks)
-        for toks in line_tokens
-    )
+    Mostly that means detections naming it, using the same token-agreement test the per-line
+    guard uses — so the answer is directly comparable and one threshold calibrates both.
+
+    The label's category counts as one more, because that is what it is: another line of the
+    frame agreeing. It is also the *reliably read* one. A stylized can whose brand OCRs as
+    Cyrillic still prints "ALE / ALC. 8% BY VOL" in plain type, and that line is what separates
+    `The Alchemist Heady Topper` (beer) from `Alchemist Amer` (other) when both come off the
+    same brewery and the name match alone favours the wrong one.
+    """
+    n = 0
+    if vocab:
+        n = sum(
+            any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for v in vocab for t in toks)
+            for toks in line_tokens
+        )
+    if hint and category and category == hint:
+        n += 1
+    return n
 
 
 def _upc_variants(upc: str) -> list[str]:
@@ -291,6 +360,46 @@ class Resolver:
             brand=Brand.model_validate(brand),
         )
 
+    def _by_producer(self, lines: list[tuple[int, str]],
+                     hint: str | None) -> list[tuple[int, dict, float]]:
+        """Products inferred from the maker the label names, when it never named a drink.
+
+        Reached only for a frame nothing corroborates, and discounted, so this competes with
+        the nothing it would otherwise return — never with a product the label actually says.
+
+        The category hint is what makes it safe. "A CHEMIST VER" off a Heady Topper can is a
+        better trigram match for a distillery named `Chemist` (1.00) than for `Alchemist`
+        (0.60), because OCR dropped the "AL" and word-similarity cannot recover a lost prefix.
+        No name threshold separates those. What does is the fine print the same frame read
+        perfectly: the can says ALE, `Chemist` makes 17 spirits, and `Alchemist` makes the beer.
+        """
+        match = getattr(self.store, "match_producers", None)
+        products_of = getattr(self.store, "products_of", None)
+        if match is None or products_of is None:
+            return []                       # a store without the producer path; not an error
+        out: list[tuple[int, dict, float]] = []
+        seen: set[str] = set()
+        for i, text in lines:
+            for prod, sc in match(text):
+                pid = prod.get("id") or ""
+                if sc < _PRODUCER_MATCH_MIN or pid in seen:
+                    continue
+                # Same coincidental-window guard the product path uses: the producer's name
+                # must actually be a word in the line, not a trigram accident.
+                if not _token_supported(text, prod.get("name") or ""):
+                    continue
+                seen.add(pid)
+                items = products_of(pid)
+                if hint:
+                    items = [p for p in items if (p.get("category") or "") == hint]
+                if not items or len(items) > _PRODUCER_MAX_PRODUCTS:
+                    # A maker with a whole shelf has been identified; a drink has not. Saying
+                    # which one would be inventing it.
+                    continue
+                for rec in items:
+                    out.append((i, rec, round(sc * _PRODUCER_EVIDENCE, 3)))
+        return out
+
     def _match_lines(self, texts: list[str]) -> list[list[tuple[dict, float]]]:
         """A frame's name matches, concurrently where the store can. The fallback keeps any
         store that only implements the single-line `match_products` working unchanged."""
@@ -343,6 +452,7 @@ class Resolver:
         """
         line_tokens = [_tokens(d.text) for d in req.detections]
         identity_lines = sum(1 for d in req.detections if _is_identity_text(d.text))
+        hint = _category_hint(req.detections)
 
         # ---- pass 1: every candidate any line supports, not just that line's best ----
         # Keeping only the top hit per line is what let chrome crowd out the beer: the real
@@ -383,6 +493,17 @@ class Resolver:
                 if sc >= floor and _token_supported(det.text, name):
                     hits.append((i, rec, sc))
                     resolved_lines.add(i)
+        # Distinct lines backing each record, read straight off the hits — enough to tell
+        # whether the frame agreed on anything, without paying to hydrate first.
+        backing: dict[str, set[int]] = {}
+        for i, rec, _ in hits:
+            backing.setdefault(rec.get("id") or "", set()).add(i)
+        if not any(len(v) >= _MIN_FRAME_FOR_PENALTY for v in backing.values()):
+            # Nothing the frame corroborates: the label has not named a product to us. Ask who
+            # made it before giving up — on a stylized can the maker is the readable half.
+            hits += self._by_producer([(i, req.detections[i].text) for i in to_match], hint)
+            resolved_lines.update(i for i, _, _ in hits)
+
         unresolved = [i for i in range(len(req.detections)) if i not in resolved_lines]
 
         # ---- pass 2: ask the whole frame about each distinct candidate ----
@@ -398,13 +519,18 @@ class Resolver:
             resolved = self._hydrate(rec)
             if resolved is None:
                 continue
-            support = _frame_support(_candidate_vocabulary(resolved), line_tokens)
+            cat = resolved.product.category.value if resolved.product.category else None
+            support = _frame_support(_candidate_vocabulary(resolved), line_tokens,
+                                     category=cat, hint=hint)
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
             # a frame that had nothing to corroborate with, and the overlay should say so.
             score = sc
+            if hint and cat and cat != hint and cat in _CATEGORY_WORDS:
+                score = sc * _CATEGORY_CONTRADICTS
             if support <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
-                score = round(sc * _UNCORROBORATED, 3)
+                score *= _UNCORROBORATED
+            score = round(score, 3)
             personal, reason, cold = (
                 (*self.score(resolved.product, profile),) if req.include_score
                 else (None, None, False)

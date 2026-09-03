@@ -242,6 +242,32 @@ class MedallionStore:
         scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
         return [(p, sim) for p, sim, _ in scored[:limit]]
 
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """Token-overlap producer match — the dev-store stand-in for pg_trgm, mirroring
+        `match_products` so the resolver's producer path behaves the same on both."""
+        want = _tokenize(text)
+        if not want:
+            return []
+        scored: list[tuple[dict, float]] = []
+        for rec in self.iter_gold("producer"):
+            have = _tokenize(rec.get("name") or "")
+            if not have:
+                continue
+            overlap = len(want & have) / len(want | have)
+            if overlap > 0:
+                scored.append((rec, round(overlap, 3)))
+        scored.sort(key=lambda r: (-r[1], r[0].get("id") or ""))
+        return scored[:limit]
+
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
+        """A producer's catalog, for the producer path."""
+        out = [r for r in self.iter_gold("product")
+               if r.get("producer_id") == producer_id]
+        out.sort(key=lambda r: (r.get("sensory") is None,
+                                (r.get("spec") or {}).get("abv_pct") is None,
+                                r.get("name") or ""))
+        return out[:limit]
+
     def match_products_many(
         self, texts: Sequence[str], limit: int = 3
     ) -> list[list[tuple[dict, float]]]:
@@ -294,6 +320,8 @@ class Store(Protocol):
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
     def match_products_many(self, texts: Sequence[str],
                             limit: int = 3) -> list[list[tuple[dict, float]]]: ...
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]: ...
     def refresh_search_names(self) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...

@@ -176,6 +176,13 @@ class PostgresStore:
                 CREATE INDEX IF NOT EXISTS ix_gold_qualified_trgm_product
                     ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
                     WHERE entity_type='product';
+                -- Same gate, same reason, for `match_producers`.
+                CREATE INDEX IF NOT EXISTS ix_gold_name_trgm_producer
+                    ON gold USING gin (name gin_trgm_ops)
+                    WHERE entity_type='producer';
+                CREATE INDEX IF NOT EXISTS ix_gold_producer_of_product
+                    ON gold ((record->>'producer_id'))
+                    WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
                 """
@@ -411,6 +418,63 @@ class PostgresStore:
             with self._lock, self._conn.cursor() as cur:
                 rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
+
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """Name match against producers — the path for a label whose *product* name the camera
+        cannot read.
+
+        A stylized wordmark can be unreadable while the small rim print survives. On a real
+        Heady Topper can the beer's own name OCR'd as Cyrillic ("АДУ ТОРИ") and appeared in 3
+        of 100 lines, while "ALCHEMIST-VER…" — the brewery and state around the rim — appeared
+        in 23. The brewery is the readable half of that label, and a brewery with a handful of
+        products is a far narrower answer than a 363k-row product search.
+
+        Producers have no brand to qualify with, so this gates on `name` alone.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        toks = [t for t in re.findall(r"[^\W\d_]{4,}", text, re.UNICODE)
+                if not is_generic_token(t)][:6]
+        gate = ["name %%> %s"]
+        params: list[Any] = [text]
+        for t in toks:
+            gate += ["name %% %s"]
+            params += [t]
+        sql = f"""
+            WITH candidate AS (
+                SELECT id, record, name FROM gold
+                WHERE entity_type='producer' AND ({" OR ".join(gate)})
+            )
+            SELECT record, GREATEST(similarity(coalesce(name,''), %s),
+                                    word_similarity(coalesce(name,''), %s),
+                                    word_similarity(%s, coalesce(name,''))) AS sim
+            FROM candidate
+            ORDER BY sim DESC, similarity(coalesce(name,''), %s) DESC, id
+            LIMIT %s
+        """
+        params += [text] * 4 + [limit]
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(sql, params).fetchall()
+        return [(r[0], round(float(r[1]), 3)) for r in rows]
+
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
+        """A producer's catalog, best-known first — what the producer path offers once it has
+        identified the maker. Rows carrying real data (an ABV, a sensory vector) sort first, so
+        a thin duplicate does not represent the brewery."""
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT record FROM gold
+                WHERE entity_type='product' AND record->>'producer_id' = %s
+                ORDER BY (sensory IS NOT NULL) DESC,
+                         (record->'spec'->'abv_pct' IS NOT NULL) DESC,
+                         name
+                LIMIT %s
+                """,
+                (producer_id, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
 
     # ---- frame matching ----
     # A label is several lines and each one costs a GIN scan sized by how common its

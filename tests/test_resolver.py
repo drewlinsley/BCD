@@ -543,3 +543,99 @@ def test_lines_not_worth_matching_are_never_sent_to_the_store():
     ])
     Resolver(_BatchStore(frame, {"pr:alch": _producer("pr:alch", "Alchemist")})).resolve(req)
     assert asked == [["HEADY TOPPER"]]
+
+
+class _MakerStore(_FrameStore):
+    """A store with the producer path wired: name-matched producers and their catalogs."""
+
+    def __init__(self, by_text, gold=None, producers=None, catalog=None):
+        super().__init__(by_text, gold)
+        self._producers = producers or {}     # line -> [(producer_rec, score)]
+        self._catalog = catalog or {}         # producer id -> [product_rec]
+
+    def match_producers(self, text, limit=3):
+        return self._producers.get(text, [])[:limit]
+
+    def products_of(self, producer_id, limit=8):
+        return self._catalog.get(producer_id, [])[:limit]
+
+
+def _beer(name, pid, producer_id):
+    return Product(id=pid, brand_id="b", producer_id=producer_id,
+                   category=Category.BEER, name=name).model_dump(mode="json")
+
+
+def test_the_maker_answers_when_the_product_name_is_unreadable():
+    """The real failure this exists for: a Heady Topper can's wordmark OCR'd as Cyrillic, so
+    the beer's own name never reached the resolver — but "ALCHEMIST-VER" did, 23 times."""
+    line = "ALCHEMIST-VER"
+    store = _MakerStore(
+        by_text={},                                   # no product matches the garbled line
+        gold={"pr:alch": _producer("pr:alch", "Alchemist")},
+        producers={line: [(_producer("pr:alch", "Alchemist"), 1.0)]},
+        catalog={"pr:alch": [_beer("The Alchemist Heady Topper", "p:ht", "pr:alch")]},
+    )
+    resp = Resolver(store).resolve(ScanResolveRequest(detections=[
+        DetectedText(text=line, kind="text"),
+        DetectedText(text="ALE\nALC. 8% BY VOL\n1 PINT", kind="text"),
+    ]))
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+    # Indirect evidence: it must be reported less confidently than a label that named the beer.
+    assert resp.candidates[0].match_score < 1.0
+
+
+def test_a_maker_with_a_whole_shelf_is_not_guessed_from():
+    """Knowing who made it is not knowing what it is. Past a handful of products the honest
+    answer is nothing, not a coin flip between eight of them."""
+    line = "BIG BREWERY CO"
+    store = _MakerStore(
+        by_text={},
+        producers={line: [(_producer("pr:big", "Big Brewery"), 1.0)]},
+        catalog={"pr:big": [_beer(f"Beer {n}", f"p:{n}", "pr:big") for n in range(8)]},
+    )
+    resp = Resolver(store).resolve(
+        ScanResolveRequest(detections=[DetectedText(text=line, kind="text")]))
+    assert resp.candidates == []
+
+
+def test_the_label_category_separates_two_beers_from_one_maker():
+    """Both are that brewery's, and the garbled line names neither. The fine print does: the
+    can says ALE, and only one of them is a beer."""
+    line = "ALCHEMIST-VER"
+    other = Product(id="p:amer", brand_id="b", producer_id="pr:alch",
+                    category=Category.OTHER, name="Alchemist Amer").model_dump(mode="json")
+    store = _MakerStore(
+        by_text={line: [(other, 0.72)]},              # the sibling the *product* path finds
+        gold={"pr:alch": _producer("pr:alch", "Alchemist")},
+        producers={line: [(_producer("pr:alch", "Alchemist"), 1.0)]},
+        catalog={"pr:alch": [_beer("The Alchemist Heady Topper", "p:ht", "pr:alch"), other]},
+    )
+    resp = Resolver(store).resolve(ScanResolveRequest(detections=[
+        DetectedText(text=line, kind="text"),
+        DetectedText(text="ALE\nALC. 8% BY VOL\n1 PINT", kind="text"),
+    ]))
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_a_contradicting_category_is_marked_down():
+    """The frame says ALE and the row is a spirit — evidence against, not merely absent."""
+    spirit = Product(id="p:gin", brand_id="b", producer_id="pr:c",
+                     category=Category.SPIRIT, name="Chemist Gin").model_dump(mode="json")
+    frame = {"CHEMIST GIN": [(spirit, 1.0)]}
+    plain = Resolver(_FrameStore(frame)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="CHEMIST GIN", kind="text")]))
+    contradicted = Resolver(_FrameStore(frame)).resolve(ScanResolveRequest(detections=[
+        DetectedText(text="CHEMIST GIN", kind="text"),
+        DetectedText(text="ALE\nALC. 8% BY VOL", kind="text"),
+    ]))
+    assert contradicted.candidates[0].match_score < plain.candidates[0].match_score
+
+
+def test_an_ambiguous_label_withholds_the_category_hint():
+    from bcd_api.resolver import _category_hint
+    say = lambda *t: [DetectedText(text=x, kind="text") for x in t]  # noqa: E731
+    assert _category_hint(say("ALE", "ALC 8% BY VOL")) == "beer"
+    assert _category_hint(say("LONDON DRY GIN")) == "spirit"
+    assert _category_hint(say("NOTHING CATEGORICAL HERE")) is None
+    # A malt-whisky label says both; a wrong filter is worse than none.
+    assert _category_hint(say("ALE", "WHISKY")) is None
