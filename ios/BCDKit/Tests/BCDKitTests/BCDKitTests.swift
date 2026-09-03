@@ -549,3 +549,52 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
                                     producer: "Russian River Brewing Co") == "Pliny the Elder")
     }
 }
+
+@Suite struct FramePrioritisation {
+    private func line(_ text: String, area: Double, confidence: Double = 0.9) -> DetectedText {
+        // square box of the requested area, so ordering is by size alone
+        let side = area.squareRoot()
+        return DetectedText(text: text, kind: "text", x: 0.5, y: 0.5, w: side, h: side,
+                            confidence: confidence)
+    }
+
+    @MainActor
+    @Test func sendsOnlyTheLargestTextLines() {
+        // A Heady Topper can: the brand and the beer are the big print, the rest is chrome.
+        let frame = [
+            line("DRINK FROM THE CAN", area: 0.01),
+            line("HEADY TOPPER", area: 0.20),
+            line("STOWE VERMONT", area: 0.02),
+            line("THE ALCHEMIST", area: 0.10),
+            line("AMERICAN DOUBLE IPA", area: 0.03),
+            line("PINT", area: 0.005),
+        ]
+        let sent = ScanCoordinator.prioritised(frame).map(\.text)
+        #expect(sent == ["HEADY TOPPER", "THE ALCHEMIST", "AMERICAN DOUBLE IPA"])
+    }
+
+    @MainActor
+    @Test func keepsEveryBarcodeRegardlessOfSize() {
+        // A barcode is a definitive answer and costs a keyed lookup, not a trigram scan, so it
+        // must never be dropped for being small — it is usually the smallest thing on a can.
+        var frame = (1...5).map { line("LINE \($0)", area: Double($0) / 10.0) }
+        frame.append(DetectedText(text: "854416001019", kind: "barcode", symbology: "ean13",
+                                  x: 0.5, y: 0.9, w: 0.01, h: 0.01, confidence: 1.0))
+        let sent = ScanCoordinator.prioritised(frame)
+        #expect(sent.filter { $0.kind == "barcode" }.count == 1)
+        #expect(sent.filter { $0.kind == "text" }.count == ScanCoordinator.maxTextLines)
+    }
+
+    @MainActor
+    @Test func ordersDeterministicallyWhenNoBoxesAreReported() {
+        // A detector that reports no box gives every line an area of zero; the frame must still
+        // send the same three lines every tick rather than whatever order OCR happened to emit.
+        let frame = ["ZEBRA", "APPLE", "MANGO", "CHERRY"].map {
+            DetectedText(text: $0, kind: "text", confidence: 0.5)
+        }
+        let once = ScanCoordinator.prioritised(frame).map(\.text)
+        let twice = ScanCoordinator.prioritised(frame.reversed()).map(\.text)
+        #expect(once == twice)
+        #expect(once.count == 3)
+    }
+}

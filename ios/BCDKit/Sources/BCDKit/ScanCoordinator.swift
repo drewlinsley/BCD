@@ -131,13 +131,49 @@ public final class ScanCoordinator: ObservableObject {
     /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
     /// fixed-rate behavior is unit-testable without a real clock.
     public func resolveLatest(venueId: String? = nil) async {
-        await resolve(frame: latestFrame.filter { !$0.text.isEmpty }, venueId: venueId)
+        let full = latestFrame.filter { !$0.text.isEmpty }
+        await resolve(frame: Self.prioritised(full), full: full, venueId: venueId)
+    }
+
+    /// How many text lines a frame sends to the catalog. A label's brand and product name are
+    /// its largest text; the rest is chrome.
+    ///
+    /// Every extra line costs a trigram scan server-side, priced by how common its words are
+    /// rather than by how many rows come back — on a Heady Topper can "STOWE VERMONT" alone
+    /// cost 1.1s and contributed nothing but a wrong answer. Sending everything made a
+    /// six-line frame ~1.6s against a 700ms tick.
+    static let maxTextLines = 3
+
+    /// The lines worth resolving, largest first. Barcodes are never dropped: one is a
+    /// definitive answer and costs a keyed lookup, not a scan.
+    ///
+    /// The returned array is what gets sent *and* what overlays anchor to, so it must stay the
+    /// single source of truth for a candidate's `detectionIndex`.
+    static func prioritised(_ frame: [DetectedText]) -> [DetectedText] {
+        let barcodes = frame.filter { $0.kind == "barcode" }
+        let text = frame.filter { $0.kind != "barcode" }
+            .sorted(by: preferred)
+            .prefix(maxTextLines)
+        return barcodes + text
+    }
+
+    /// A strict total order, so the same frame always sends the same lines: box area, then
+    /// OCR confidence, then length, then the text itself. Area alone ties too often — a
+    /// detector that reports no box at all gives every line an area of zero.
+    private static func preferred(_ lhs: DetectedText, _ rhs: DetectedText) -> Bool {
+        let (la, ra) = ((lhs.w ?? 0) * (lhs.h ?? 0), (rhs.w ?? 0) * (rhs.h ?? 0))
+        if la != ra { return la > ra }
+        let (lc, rc) = (lhs.confidence ?? 0, rhs.confidence ?? 0)
+        if lc != rc { return lc > rc }
+        if lhs.text.count != rhs.text.count { return lhs.text.count > rhs.text.count }
+        return lhs.text < rhs.text
     }
 
     /// The single resolve path. Resolve the frame, pin an overlay to each detection's box, dedupe
     /// per product, cap — then, if nothing matched but the label carried text, fall back to the
     /// on-device model. Always *assigns* overlays, so nothing accumulates.
-    private func resolve(frame: [DetectedText], venueId: String?) async {
+    private func resolve(frame: [DetectedText], full: [DetectedText],
+                         venueId: String?) async {
         guard !frame.isEmpty else {
             // Nothing in view: clear so a stale result doesn't linger over an empty shelf.
             overlays = []; candidates = []; currentFrame = []
@@ -186,7 +222,9 @@ public final class ScanCoordinator: ObservableObject {
                 // resolves to nothing, stuck frames are more common — so this must not block.
                 interpretation?.cancel()
                 interpretation = Task { [weak self] in
-                    await self?.interpret(frame: frame, using: llm, key: key, venueId: venueId)
+                    // `full`, not `frame`: the model is priced per call, not per line, and
+                    // the chrome the catalog cannot use is context that helps it guess.
+                    await self?.interpret(frame: full, using: llm, key: key, venueId: venueId)
                 }
             }
         } catch {
