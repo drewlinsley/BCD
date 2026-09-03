@@ -24,6 +24,7 @@ way.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections.abc import Iterator, Sequence
@@ -137,12 +138,25 @@ class PostgresStore:
     def _apply_trgm(conn: psycopg.Connection) -> None:
         """Every connection that runs the gate needs these, because they are per-session."""
         with conn.cursor() as cur:
-            cur.execute("SELECT set_limit(0.3)")            # similarity, and loads pg_trgm
+            # BCD_TRGM_LIMIT exists so this can be measured against the recognition
+            # harness rather than argued about: it governs `%`, which is what the per-token
+            # probes use, and at a million products those probes are what the gate costs.
+            cur.execute("SELECT set_limit(%s::real)",
+                        (float(os.environ.get("BCD_TRGM_LIMIT", "0.3")),))
             # 0.4 rather than the 0.5 default, measured: "Guinness Draught" scores 0.486
             # against a real canned label and would be excluded by a hair. Below 0.35 the
             # gate stops discriminating — "SIERRA NEVADA PALE ALE" goes from 1,204
             # candidate rows to 17,336 and the scan costs half a second.
             cur.execute("SET pg_trgm.word_similarity_threshold = 0.4")
+            # The gate ORs one bitmap per probe, and past roughly a million products their
+            # union stops fitting the 4MB default. A bitmap that overflows work_mem does not
+            # degrade gently: it drops from exact tuple pointers to whole-page bitmaps, and
+            # every row on a flagged page is then rechecked with a fresh trigram comparison.
+            # Measured on a 1.05M-row catalog, one line went lossy at 66,903 pages, rechecked
+            # 342,249 rows to return 320, and cost 6.4s -- against 2.5s for the identical plan
+            # with an exact bitmap. It is a cliff, not a slope, which is why the regression
+            # appeared all at once rather than growing with the catalog.
+            cur.execute("SET work_mem = '128MB'")
 
     def _init(self) -> None:
         with self._lock, self._conn.cursor() as cur:
