@@ -212,9 +212,17 @@ public final class ScanCoordinator: ObservableObject {
                 "mode": .string("live"),
                 "ocr_strings": .stringList(frame.map { $0.text }),
             ])
-            // Auto-fallback: readable text but nothing matched. Let the on-device model name it,
-            // once per distinct OCR frame (so a held-still garbled label doesn't re-run every tick).
-            if resp.candidates.isEmpty, overlays.isEmpty, let llm, key != lastInterpretKey {
+            // Auto-fallback: readable text, but the catalog did not really recognise it. Once
+            // per distinct OCR frame, so a held-still garbled label doesn't re-run every tick.
+            //
+            // The trigger is "nothing the frame corroborates", not "nothing came back". Those
+            // were assumed to be the same thing and are not: on a real Heady Topper can the
+            // wordmark OCR'd as Cyrillic, a rim fragment matched a distillery named `Chemist`,
+            // and that single confident-looking row was enough to make `candidates.isEmpty`
+            // false for eleven frames running — so the fallback built for exactly this label
+            // never once ran. A guess off one fragment must not suppress the model; only real
+            // agreement across the frame should.
+            if !resp.corroborated, let llm, key != lastInterpretKey {
                 lastInterpretKey = key
                 // The model call takes ~1s; awaiting it here froze the whole HUD for that
                 // long. Detached, the fixed-rate loop keeps ticking and `interpret` drops

@@ -49,6 +49,13 @@ class ScanResolveResponse(BaseModel):
     candidates: list[ScoredCandidate] = Field(default_factory=list)
     unresolved_indices: list[int] = Field(default_factory=list)
     latency_ms: float | None = None
+    # Whether more than one part of the frame agrees on some candidate — the label naming both
+    # its maker and its drink, or naming one and printing a category that matches it. False
+    # means we returned a guess off a single fragment, which reads the same as a confident
+    # answer once it is an overlay. The client uses it to decide whether to ask the on-device
+    # model, so a wrong-but-plausible row cannot quietly suppress the fallback built for exactly
+    # that case: a Heady Topper can answered "Chemist" 11 frames running and never asked.
+    corroborated: bool = False
 
 
 class ProductSearchResponse(BaseModel):

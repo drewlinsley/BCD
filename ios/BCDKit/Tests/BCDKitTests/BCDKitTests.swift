@@ -598,3 +598,63 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
         #expect(once.count == 3)
     }
 }
+
+/// Answers *something* for any frame — a confident-looking guess off a single fragment, marked
+/// uncorroborated the way the server marks it. Reproduces the real failure: a Heady Topper can
+/// whose garbled rim print matched a distillery named `Chemist` at a plausible score.
+private final class UncorroboratedAPI: APIClientProtocol, @unchecked Sendable {
+    let known: Set<String>
+    var resolveCallCount = 0
+    init(known: Set<String>) { self.known = known }
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        if let hit = req.detections.first(where: { known.contains($0.text) }) {
+            return ScanResolveResponse(
+                candidates: [makeCandidate(id: hit.text, name: hit.text, abv: 8, personal: 0.8)],
+                unresolvedIndices: [], latencyMs: 0.5, corroborated: true)
+        }
+        return ScanResolveResponse(
+            candidates: [makeCandidate(id: "chemist", name: "Chemist", abv: 40, personal: 0.3)],
+            unresolvedIndices: [], latencyMs: 0.5, corroborated: false)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+@Suite struct UncorroboratedFallback {
+    @MainActor
+    @Test func aConfidentLookingGuessDoesNotSuppressTheModel() async throws {
+        // The bug, exactly: the catalog answered *something*, so `candidates.isEmpty` was false
+        // and the fallback never ran — for eleven frames of a can it could not read.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "A CHEMIST VER", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let llm = StubLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        await coord.interpretation?.value
+        #expect(llm.calls == 1)                          // it asked, despite having an answer
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func realAgreementAcrossTheFrameLeavesTheModelAlone() async throws {
+        // The other half: the model costs ~1s and must not run whenever the catalog is merely
+        // unsure. Corroborated means the label named the same thing twice — that is an answer.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+        ])
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let llm = StubLLM(guess: "Something Else")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        await coord.interpretation?.value
+        #expect(llm.calls == 0)
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+}

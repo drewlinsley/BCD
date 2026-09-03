@@ -64,10 +64,34 @@ public struct ScanResolveResponse: Codable, Sendable {
     public let candidates: [ScoredCandidate]
     public let unresolvedIndices: [Int]
     public let latencyMs: Double?
+    /// Whether more than one part of the frame agreed on some candidate — the label naming both
+    /// its maker and its drink, or naming one and printing a category that matches it. False
+    /// means the server returned a guess off a single fragment, which looks identical to a
+    /// confident answer once it is an overlay.
+    public let corroborated: Bool
+
+    public init(candidates: [ScoredCandidate], unresolvedIndices: [Int],
+                latencyMs: Double?, corroborated: Bool = false) {
+        self.candidates = candidates
+        self.unresolvedIndices = unresolvedIndices
+        self.latencyMs = latencyMs
+        self.corroborated = corroborated
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        candidates = try c.decode([ScoredCandidate].self, forKey: .candidates)
+        unresolvedIndices = try c.decodeIfPresent([Int].self, forKey: .unresolvedIndices) ?? []
+        latencyMs = try c.decodeIfPresent(Double.self, forKey: .latencyMs)
+        // Absent from an older server: read as "not corroborated", so a missing field makes the
+        // fallback run more rather than silently switching it off.
+        corroborated = try c.decodeIfPresent(Bool.self, forKey: .corroborated) ?? false
+    }
 
     enum CodingKeys: String, CodingKey {
         case candidates
         case unresolvedIndices = "unresolved_indices"
         case latencyMs = "latency_ms"
+        case corroborated
     }
 }

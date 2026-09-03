@@ -568,8 +568,20 @@ class Resolver:
             if key not in best or _rank(entry) > _rank(best[key]):
                 best[key] = entry
         ranked = sorted(best.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
-        return ScanResolveResponse(candidates=[c for _, c in ranked],
-                                   unresolved_indices=unresolved)
+        return ScanResolveResponse(
+            candidates=[c for _, c in ranked],
+            unresolved_indices=unresolved,
+            # Agreement across the frame, or — where there was no second line to agree with
+            # — a strong read of the only line there was. Mirrors the penalty above: a lone
+            # clean "BOMBAY SAPPHIRE LONDON DRY GIN" is not weak evidence, it is the whole
+            # label, and asking the model about it would spend a second to confirm a 1.00.
+            corroborated=any(
+                s >= _MIN_FRAME_FOR_PENALTY
+                or (identity_lines < _MIN_FRAME_FOR_PENALTY
+                    and c.match_score >= _STRONG_MATCH)
+                for s, c in ranked
+            ),
+        )
 
 
 
