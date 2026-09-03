@@ -61,6 +61,9 @@ public final class ScanCoordinator: ObservableObject {
     private var lastInterpretKey: String?
     /// Parsed chat-bar intent, applied to every tick's candidates.
     private var filterIntent: QueryIntent?
+    /// Whether the last resolve found something the frame agreed on. An in-flight model guess
+    /// is dropped only if this became true while it was thinking.
+    private var lastResolveCorroborated = false
 
     /// Cap overlays so a busy shelf stays legible (the server caps too).
     private let maxOverlays = 8
@@ -125,6 +128,9 @@ public final class ScanCoordinator: ObservableObject {
         task?.cancel(); task = nil
         liveTask?.cancel(); liveTask = nil
         interpretation?.cancel(); interpretation = nil
+        // The flag is raised before the task starts, so a task cancelled before its body ran
+        // would otherwise leave it stuck up and block the fallback for the rest of the session.
+        isInterpreting = false
         isScanning = false
     }
 
@@ -205,6 +211,7 @@ public final class ScanCoordinator: ObservableObject {
                 overlaysSetAt = nil
             }
             lastResolvedKey = key
+            lastResolveCorroborated = resp.corroborated
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
                 "n_detections": .int(frame.count),
                 "n_resolved": .int(resp.candidates.count),
@@ -222,13 +229,22 @@ public final class ScanCoordinator: ObservableObject {
             // false for eleven frames running — so the fallback built for exactly this label
             // never once ran. A guess off one fragment must not suppress the model; only real
             // agreement across the frame should.
-            if !resp.corroborated, let llm, key != lastInterpretKey {
+            if !resp.corroborated, !isInterpreting, let llm, key != lastInterpretKey {
                 lastInterpretKey = key
                 // The model call takes ~1s; awaiting it here froze the whole HUD for that
-                // long. Detached, the fixed-rate loop keeps ticking and `interpret` drops
-                // its own guess if the camera has moved on. Now that label chrome correctly
-                // resolves to nothing, stuck frames are more common — so this must not block.
-                interpretation?.cancel()
+                // long. Detached, the fixed-rate loop keeps ticking.
+                //
+                // Crucially it is NOT cancelled and restarted when the frame changes. It was,
+                // and at a 350ms tick against a ~1s call that meant every attempt was killed
+                // by the next tick: on a real Focal Banger can the model completed **once in
+                // 19 frames**, because garbled OCR is never byte-identical three ticks running
+                // and only an unchanged frame let a call survive. Starting one only when none
+                // is in flight is what actually lets the fallback run.
+                //
+                // `isInterpreting` is set here rather than inside the task: the tick that
+                // would clobber it can run before the task body starts, so the flag has to go
+                // up synchronously at the moment we decide to think.
+                isInterpreting = true
                 interpretation = Task { [weak self] in
                     // `full`, not `frame`: the model is priced per call, not per line, and
                     // the chrome the catalog cannot use is context that helps it guess.
@@ -244,12 +260,17 @@ public final class ScanCoordinator: ObservableObject {
     /// name it returns, and anchor to the label's most prominent text box.
     private func interpret(frame: [DetectedText], using llm: LLMProvider,
                            key: String, venueId: String?) async {
-        isInterpreting = true
+        // Raised synchronously by the caller so a tick cannot start a second call; lowered
+        // here on every path out, including the guards below.
         defer { isInterpreting = false }
         let guesses = (try? await llm.interpretLabels(frame.map { $0.text })) ?? []
         guard !guesses.isEmpty else { return }
-        // The model call takes ~1s; if the camera has moved on since, drop this now-stale guess.
-        guard key == lastResolvedKey else { return }
+        // Staleness used to mean "the OCR changed while we were thinking". On a label the
+        // camera cannot read, the OCR changes every single tick — same can, different garble —
+        // so that test threw away nearly every guess it did manage to produce. What actually
+        // makes a guess stale is the catalog having recognised something on its own since we
+        // asked; a re-read of the same unreadable can has not.
+        guard !lastResolveCorroborated else { return }
         let box = frame.max { ($0.w ?? 0) * ($0.h ?? 0) < ($1.w ?? 0) * ($1.h ?? 0) } ?? frame[0]
         let synthetic = guesses.map {
             DetectedText(text: $0, kind: "text", x: box.x, y: box.y, w: box.w, h: box.h)

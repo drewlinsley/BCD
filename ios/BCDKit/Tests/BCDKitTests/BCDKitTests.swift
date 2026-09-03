@@ -658,3 +658,87 @@ private final class UncorroboratedAPI: APIClientProtocol, @unchecked Sendable {
         #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
     }
 }
+
+/// A model that blocks until released, so a call can be held in flight across several ticks.
+private final class SlowLLM: LLMProvider, @unchecked Sendable {
+    let guess: String
+    var calls = 0
+    private let gate = AsyncStream<Void>.makeStream()
+    init(guess: String) { self.guess = guess }
+    func release() { gate.continuation.yield(); gate.continuation.finish() }
+    func parseQuery(_ text: String) async throws -> QueryIntent { QueryIntent(freeText: text) }
+    func rerank(_ candidates: [ScoredCandidate], for ask: String) async throws -> [String] {
+        candidates.map { $0.resolved.product.id }
+    }
+    func interpretLabels(_ ocrLines: [String]) async throws -> [String] {
+        calls += 1
+        for await _ in gate.stream { break }          // wait for release()
+        return [guess]
+    }
+}
+
+/// A scan engine the test drives one frame at a time, so a model call can be held in flight
+/// across several ticks the way the live ticker does. `MockScanEngine` yields its whole script
+/// at start and finishes, which cannot express "the OCR changed while we were thinking".
+private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
+    private var continuation: AsyncStream<[DetectedText]>.Continuation?
+    let frames: AsyncStream<[DetectedText]>
+    init() {
+        var cont: AsyncStream<[DetectedText]>.Continuation!
+        self.frames = AsyncStream { cont = $0 }
+        self.continuation = cont
+    }
+    func start() async {}
+    func stop() { continuation?.finish() }
+    func push(_ frame: [DetectedText]) { continuation?.yield(frame) }
+}
+
+@Suite struct FallbackSurvivesTheTick {
+    @MainActor
+    @Test func aChangingFrameDoesNotKillTheModelMidThought() async throws {
+        // The regression this exists for. The fallback used to be cancelled and restarted on
+        // every new uncorroborated frame; at a 350ms tick against a ~1s call that meant it was
+        // killed by the next tick every time. On a real Focal Banger can it completed once in
+        // 19 frames, because garbled OCR is never identical three ticks running.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Focal Banger"])
+        let llm = SlowLLM(guess: "Focal Banger")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        engine.push([DetectedText(text: "DRINK FRO", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()                    // tick 1 — starts the model
+        let started = coord.interpretation
+        engine.push([DetectedText(text: "HAN! DRINK FRO MAL31", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()                    // tick 2 — a different garble
+        #expect(started?.isCancelled == false)         // the first call is still thinking
+        #expect(llm.calls == 1)                        // and no second call piled on
+        llm.release()
+        await coord.interpretation?.value
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Focal Banger")
+    }
+
+    @MainActor
+    @Test func aGuessIsDroppedOnceTheCatalogRecognisesSomethingItself() async throws {
+        // The other direction: if the catalog corroborated a real answer while the model was
+        // thinking, the model's guess is stale and must not overwrite it.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let llm = SlowLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+        engine.push([DetectedText(text: "DRINK FRO", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()                    // weak frame — model starts
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()                    // the catalog now recognises it outright
+        llm.release()
+        await coord.interpretation?.value
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+        #expect(coord.isInterpreting == false)         // flag comes back down on the dropped path
+    }
+}
