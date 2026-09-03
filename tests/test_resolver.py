@@ -399,3 +399,94 @@ def test_an_all_category_name_needs_an_equally_generic_label():
     assert _token_supported("IRISH WHISKEY", "Irish Whiskey")
     # A name carrying one real word of its own never depended on the brand.
     assert _token_supported("TITOS HANDMADE VODKA", "Handmade Vodka")
+
+
+class _FrameStore(_PerTextMatchStore):
+    """Per-line matches *plus* the producer rows behind them — frame corroboration reads a
+    candidate's producer name, which the plain fake leaves as a placeholder."""
+
+    def __init__(self, by_text, gold=None):
+        super().__init__(by_text)
+        self._gold = gold or {}
+
+    def get_gold(self, gid):
+        return self._gold.get(gid)
+
+
+def _prod_of(name, pid, producer_id):
+    return Product(id=pid, brand_id="b", producer_id=producer_id,
+                   category=Category.BEER, name=name).model_dump(mode="json")
+
+
+def _producer(pid, name):
+    return Producer(id=pid, name=name).model_dump(mode="json")
+
+
+def test_the_frame_promotes_the_beer_two_lines_name():
+    """The reported bug: a can of Heady Topper answered "Chemist".
+
+    Every line is a *perfect* word match for something — "CHEMIST" (a bad read of ALCHEMIST) is
+    1.0 against a row literally named "Chemist", exactly as "HEADY TOPPER" is 1.0 against the
+    real beer. Per-line scoring has nothing left to break that tie. Read as one frame the
+    difference is plain: two lines name the Alchemist beer, one line names the other thing.
+    """
+    frame = {
+        "THE ALCHEMIST": [(_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 1.0)],
+        "HEADY TOPPER": [(_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 1.0)],
+        "CHEMIST": [(_prod_of("Chemist", "p:chem", "pr:chem"), 1.0)],
+    }
+    gold = {"pr:alch": _producer("pr:alch", "Alchemist"),
+            "pr:chem": _producer("pr:chem", "Chemist")}
+    req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
+    resp = Resolver(_FrameStore(frame, gold)).resolve(req)
+
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+    # ...and the coincidence is not merely second, it is reported less confidently, so the
+    # overlay stops claiming a certainty the frame does not support.
+    assert resp.candidates[0].match_score > resp.candidates[1].match_score
+
+
+def test_a_lone_line_keeps_its_confidence():
+    """The corroboration penalty must not fire when there was nothing to corroborate with.
+
+    A barcode, or a single clean brand line, is one piece of evidence because that is all the
+    frame holds — not because the rest of the frame disagreed."""
+    frame = {"HEADY TOPPER": [(_prod_of("Heady Topper", "p:ht", "pr:alch"), 1.0)]}
+    gold = {"pr:alch": _producer("pr:alch", "Alchemist")}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="HEADY TOPPER", kind="text")]))
+    assert resp.candidates[0].match_score == 1.0
+
+
+def test_a_pure_packaging_line_is_never_matched():
+    """"PINT" is the size of the can, not a drink. It resolved to a product named "Pint Cake" —
+    at 1.0, and at 1.5s, because a short common word matches tens of thousands of rows."""
+    frame = {"PINT": [(_prod_of("Pint Cake", "p:cake", "pr:cake"), 1.0)]}
+    resp = Resolver(_FrameStore(frame)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="PINT", kind="text")]))
+    assert resp.candidates == []
+    assert resp.unresolved_indices == [0]
+
+
+def test_a_category_line_is_still_matched():
+    """The packaging filter is narrower than "nothing identifying in it" on purpose: a catalog
+    name can be pure category, so a clean read of one must still resolve."""
+    frame = {"FML HAZY DOUBLE IPA": [(_prod_of("FML Hazy Double IPA", "p:fml", "pr:fml"), 0.95)]}
+    resp = Resolver(_FrameStore(frame)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="FML HAZY DOUBLE IPA", kind="text")]))
+    assert resp.candidates[0].resolved.product.name == "FML Hazy Double IPA"
+
+
+def test_a_second_candidate_on_one_line_can_still_win_the_frame():
+    """Keeping only each line's best hit is what let chrome crowd out the beer: the right
+    product can be a line's *second* candidate, and per-line scoring would never look at it."""
+    frame = {
+        "ALCHEMIST": [(_prod_of("Axis Alchemist", "p:axis", "pr:axis"), 1.0),
+                      (_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 0.62)],
+        "HEADY TOPPER": [(_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch"), 1.0)],
+    }
+    gold = {"pr:axis": _producer("pr:axis", "Axis"),
+            "pr:alch": _producer("pr:alch", "Alchemist")}
+    req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
+    resp = Resolver(_FrameStore(frame, gold)).resolve(req)
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"

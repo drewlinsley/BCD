@@ -135,6 +135,87 @@ def _token_supported(query: str, name: str) -> bool:
                for nt in identifying for qt in q_tokens)
 
 
+# ---- frame-level corroboration ----
+# A real label corroborates itself. A can carries its brewery *and* its beer, so the product
+# it names is named by more than one line: "THE ALCHEMIST" and "HEADY TOPPER" agree. Label
+# chrome does not corroborate — "PINT" names exactly one catalog row ("Pint Cake") and nothing
+# else on the can agrees with it.
+#
+# Scoring each line in isolation cannot see that difference. Word-similarity asks how well a
+# line matches *part of* a name, not how much of the name it accounts for, so "PINT" is a
+# flawless hit inside "Pint Cake" and scores 1.00 — identical to the real beer. At 4.7k
+# products that was harmless because no row was named "Pint Cake"; at 363k every common word
+# stamped on a can (PINT, CAN, DRINK, DOUBLE) is a perfect word-match for *something*, four
+# candidates tie at 1.00, and the right one ranks by luck. Counting how many distinct lines
+# name a candidate is what separates the beer from the chrome.
+_UNCORROBORATED = 0.75
+# Below this many identity-bearing lines there is no corroborating evidence to be had, so a
+# lone hit is not evidence of weakness — a barcode or a single clean brand line must stay
+# confident. The penalty applies only where other lines *could* have agreed and none did.
+_MIN_FRAME_FOR_PENALTY = 2
+
+
+# Packaging and measure words. The shared dedup vocabulary already knows the *style* words a
+# label carries ("american", "double", "ipa", "stout", "drink"); it does not know the words that
+# describe the container, because a container word is a perfectly good part of a catalog *name*
+# and dedup must not fold "Proper Pint" into "Proper". Here the question is different — whether
+# an OCR line is worth matching at all — so the resolver keeps its own list rather than widening
+# dedup's and changing how the catalog merges.
+#
+# This is where "PINT" was getting in. It is not a beer, it is the size of the can, and matching
+# it cost 1.5s to return "Pint Cake".
+_PACKAGING = {
+    "pint", "pints", "can", "cans", "canned", "bottle", "bottled", "bottles",
+    "draft", "draught", "keg", "growler", "crowler", "ounce", "ounces",
+    "milliliter", "milliliters", "litre", "litres", "liter", "liters",
+    "pack", "sixpack", "contents", "volume", "net", "vol", "alc",
+}
+
+
+def _worth_matching(text: str) -> bool:
+    """Whether an OCR line could name a product at all — asked *before* the trigram query.
+
+    A line built only from container words names a size, not a drink, so matching it can only
+    produce a coincidence — "PINT" cost 1.5s to return "Pint Cake". Filtering before the query
+    is what makes it cheap: a short common word is also the most expensive thing to match,
+    because it matches tens of thousands of rows.
+
+    Deliberately narrower than "has nothing identifying in it". A line of pure *category* words
+    must still be matched, because a catalog name can be pure category too: "FML Hazy Double
+    IPA" is a real product and a clean read of it has to resolve. Those lines are already
+    handled — `_token_supported` lets a generic line match a generic name and nothing else — so
+    widening this to category words costs recall and buys nothing the frame does not already
+    fix by ranking."""
+    meaningful = [t for t in _tokens(text) if len(t) >= _MIN_NAME_TOKEN_LEN]
+    if not meaningful:
+        return True                      # nothing to judge; leave it to the existing guards
+    return any(t not in _PACKAGING for t in meaningful)
+
+
+def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
+    """The identifying words that would name this product on a label: its own name, its brand
+    and its producer. The producer is what carries the signal — "THE ALCHEMIST" is the line
+    that tells the real Heady Topper apart from a one-word coincidence."""
+    seen: dict[str, None] = {}
+    for part in (resolved.product.name, resolved.brand.name, resolved.producer.name):
+        for t in _identifying_tokens(part or ""):
+            seen[t] = None
+    return list(seen)
+
+
+def _frame_support(vocab: list[str], line_tokens: list[list[str]]) -> int:
+    """How many distinct detections in the frame name this candidate.
+
+    Same token-agreement test the per-line guard uses, asked of the whole frame instead of one
+    line — so the answer is directly comparable and one threshold calibrates both."""
+    if not vocab:
+        return 0
+    return sum(
+        any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for v in vocab for t in toks)
+        for toks in line_tokens
+    )
+
+
 def _upc_variants(upc: str) -> list[str]:
     """A barcode's equivalent GTIN forms. A UPC-A (12 digits) and its EAN-13 form differ only by a
     leading zero and identify the *same* item, but a scanner and the catalog may store different
@@ -244,77 +325,108 @@ class Resolver:
 
     def resolve(self, req: ScanResolveRequest,
                 profile: TasteProfile | None = None) -> ScanResolveResponse:
-        candidates: list[ScoredCandidate] = []
-        unresolved: list[int] = []
+        """Resolve a whole frame, not a list of independent lines.
+
+        A label is one object photographed once, so its lines are evidence about the *same*
+        product and are strongest read together. Two passes: per line, every candidate that
+        clears the existing guards; then per candidate, what the rest of the frame says about
+        it. The guards are unchanged — they decide what may be evidence at all — and the frame
+        decides which evidence wins.
+        """
+        line_tokens = [_tokens(d.text) for d in req.detections]
+        identity_lines = sum(1 for d in req.detections if _is_identity_text(d.text))
+
+        # ---- pass 1: every candidate any line supports, not just that line's best ----
+        # Keeping only the top hit per line is what let chrome crowd out the beer: the real
+        # product could be a line's second candidate and never be considered at all.
+        hits: list[tuple[int, dict, float]] = []          # (line, record, that line's score)
+        resolved_lines: set[int] = set()
         for i, det in enumerate(req.detections):
-            product_rec = None
-            match_score = 0.0
             if det.kind == "barcode":
-                product_rec = self._resolve_by_upc(det.text)
-                match_score = 1.0 if product_rec else 0.0
-            elif _is_identity_text(det.text):
-                # Text path only for lines that could name a product; a bare number/fragment
-                # (and a failed barcode's digits) is skipped rather than trigram-matched.
-                # Take the best candidate that clears BOTH the score floor and token support.
-                # The floor rejects OCR chrome ("12 FL OZ"); token support rejects a coincidental
-                # sub-window (a garbled warning line that outscores the real product) — iterating
-                # rather than checking only matches[0] means such a coincidence is skipped, not
-                # allowed to block a genuine lower-ranked hit. Short names use a near-exact floor.
-                for rec, sc in self.store.match_products(det.text):
-                    # Judge the evidence on the brand-qualified name, because that is what
-                    # the label actually says. A row named "Irish Whiskey" is anonymous on
-                    # its own and would be thrown out; as "Jameson Irish Whiskey" it is the
-                    # product the line names.
-                    name = self._qualified_name(rec)
-                    # Low-information either way: too short to be distinctive, or built only
-                    # from category words. Both trigram-match label chrome far too easily, so
-                    # they must clear a near-exact bar rather than the normal floor.
-                    low_info = (len(name) < _SHORT_NAME_LEN
-                                or not _identifying_tokens(name))
-                    floor = _SHORT_MIN_MATCH if low_info else _MIN_MATCH
-                    if sc >= floor and _token_supported(det.text, name):
-                        product_rec, match_score = rec, sc
-                        break
-            if product_rec is None:
-                unresolved.append(i)
+                rec = self._resolve_by_upc(det.text)
+                if rec is not None:
+                    hits.append((i, rec, 1.0))
+                    resolved_lines.add(i)
                 continue
-            resolved = self._hydrate(product_rec)
+            if not _is_identity_text(det.text) or not _worth_matching(det.text):
+                # A bare number/fragment is label chrome, not a name — and so is a line made
+                # only of category and packaging words. Skipped rather than trigram-matched.
+                continue
+            for rec, sc in self.store.match_products(det.text):
+                # Judge the evidence on the brand-qualified name, because that is what the
+                # label actually says. A row named "Irish Whiskey" is anonymous on its own;
+                # as "Jameson Irish Whiskey" it is the product the line names.
+                name = self._qualified_name(rec)
+                # Low-information either way: too short to be distinctive, or built only from
+                # category words. Both trigram-match label chrome far too easily, so they must
+                # clear a near-exact bar rather than the normal floor.
+                low_info = (len(name) < _SHORT_NAME_LEN or not _identifying_tokens(name))
+                floor = _SHORT_MIN_MATCH if low_info else _MIN_MATCH
+                if sc >= floor and _token_supported(det.text, name):
+                    hits.append((i, rec, sc))
+                    resolved_lines.add(i)
+        unresolved = [i for i in range(len(req.detections)) if i not in resolved_lines]
+
+        # ---- pass 2: ask the whole frame about each distinct candidate ----
+        best_hit: dict[str, tuple[int, float, dict]] = {}   # record id -> best (line, score)
+        for i, rec, sc in hits:
+            rid = rec.get("id") or ""
+            prev = best_hit.get(rid)
+            if prev is None or sc > prev[1]:
+                best_hit[rid] = (i, sc, rec)
+
+        scored: list[tuple[int, ScoredCandidate]] = []
+        for line_i, sc, rec in best_hit.values():
+            resolved = self._hydrate(rec)
             if resolved is None:
-                unresolved.append(i)
                 continue
+            support = _frame_support(_candidate_vocabulary(resolved), line_tokens)
+            # Report a score the frame actually justifies. One line naming a candidate while
+            # several others sit there disagreeing is weaker evidence than the same number in
+            # a frame that had nothing to corroborate with, and the overlay should say so.
+            score = sc
+            if support <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
+                score = round(sc * _UNCORROBORATED, 3)
             personal, reason, cold = (
                 (*self.score(resolved.product, profile),) if req.include_score
                 else (None, None, False)
             )
-            candidates.append(
+            scored.append((
+                support,
                 ScoredCandidate(
-                    detection_index=i,
+                    detection_index=line_i,
                     resolved=resolved,
-                    match_score=match_score,
+                    match_score=score,
                     personal_score=personal,
                     reason=reason,
                     cold_start=cold,
-                )
-            )
-        # Collapse to one overlay per *real* product and cap the frame — the server-side backstop
-        # against the crowding (and the duplicate-catalog-record double overlays) the HUD showed.
-        # Keyed on canonical brand+name, not the raw id, so two rows for the same beer merge; the
-        # strongest match wins, and on a tie the richer record (has ABV / sensory) represents it so
-        # the surviving overlay carries the most complete data.
-        def _rank(c: ScoredCandidate) -> tuple:
-            p = c.resolved.product
-            return (c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory))
+                ),
+            ))
 
-        best: dict[str, ScoredCandidate] = {}
-        for c in candidates:
+        # Collapse to one overlay per *real* product and cap the frame — the server-side
+        # backstop against the crowding (and the duplicate-catalog-record double overlays) the
+        # HUD showed. Keyed on canonical brand+name, not the raw id, so two rows for the same
+        # beer merge. Corroboration outranks similarity: two independent lines naming a product
+        # is stronger evidence than one perfect match on a fragment, which is exactly the
+        # comparison a tie at 1.00 cannot make. On a tie the richer record (has ABV / sensory)
+        # represents it, so the surviving overlay carries the most complete data — and that
+        # also picks the better-linked of two duplicate rows.
+        def _rank(entry: tuple[int, ScoredCandidate]) -> tuple:
+            support, c = entry
+            p = c.resolved.product
+            return (support, c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory))
+
+        best: dict[str, tuple[int, ScoredCandidate]] = {}
+        for entry in scored:
+            c = entry[1]
             key = _identity_key(c.resolved.product.name, c.resolved.brand.name,
                                 c.resolved.product.id)
-            if key not in best or _rank(c) > _rank(best[key]):
-                best[key] = c
-        candidates = sorted(
-            best.values(), key=lambda c: c.match_score, reverse=True
-        )[:_MAX_CANDIDATES]
-        return ScanResolveResponse(candidates=candidates, unresolved_indices=unresolved)
+            if key not in best or _rank(entry) > _rank(best[key]):
+                best[key] = entry
+        ranked = sorted(best.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
+        return ScanResolveResponse(candidates=[c for _, c in ranked],
+                                   unresolved_indices=unresolved)
+
 
 
 def _top_axis(sv: SensoryVector) -> str | None:

@@ -151,6 +151,17 @@ class PostgresStore:
                     ON gold USING gin (name gin_trgm_ops);
                 CREATE INDEX IF NOT EXISTS ix_gold_search_name_trgm
                     ON gold USING gin (search_name gin_trgm_ops);
+                -- The gate `match_products` runs, and the only index it can use. Partial
+                -- because scan resolution only ever asks about products: indexed over every
+                -- entity type the planner BitmapANDs the trigram hit against ix_gold_type and
+                -- walks all 457k entries, which is most of the 7.4s a resolve used to cost.
+                -- Over the *coalesced* expression because `search_name` is filled by a batch
+                -- refresh, so a freshly promoted row has none and must still be reachable by
+                -- its plain name -- and because one probe of this costs half what separate
+                -- `name` and `search_name` probes do, for provably identical rows.
+                CREATE INDEX IF NOT EXISTS ix_gold_qualified_trgm_product
+                    ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
+                    WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
                 """
@@ -338,11 +349,18 @@ class PostgresStore:
         # catalog row named just "Guinness" scores word_similarity(line, name) = 0.257
         # against "GUINNESS DRAUGHT 440ML EXTRA STOUT" and no workable threshold reaches
         # it, while the token GUINNESS finds it outright.
-        gate = ["name %%> %s", "search_name %%> %s"]
-        params: list[Any] = [text, text]
+        # One probe per term, against the brand-qualified name the index is built on. Probing
+        # `name` separately is redundant: search_name is "<brand> <name>", so every row the
+        # name probe finds the qualified probe finds too — measured across the live catalog,
+        # eight probes, zero rows lost — and each probe costs 100-600ms, because a GIN
+        # trigram scan walks a posting list sized by how common the *trigrams* are, not by how
+        # many rows come back ("stowe" costs 534ms to return 20 rows).
+        qualified = "coalesce(search_name, name, '')"
+        gate = [f"{qualified} %%> %s"]
+        params: list[Any] = [text]
         for t in toks:
-            gate += ["name %% %s", "search_name %% %s"]
-            params += [t, t]
+            gate += [f"{qualified} %% %s"]
+            params += [t]
 
         sql = f"""
             WITH candidate AS (
