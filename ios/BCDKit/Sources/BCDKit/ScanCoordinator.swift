@@ -237,6 +237,18 @@ public final class ScanCoordinator: ObservableObject {
     /// close read rather than a passing resemblance.
     nonisolated static let loneTokenMatch = 0.7
 
+    /// Whether the reply is shaped like a product name at all.
+    ///
+    /// Asked for a name it cannot read, the model sometimes hands the input back instead --
+    /// the log has it replying with the whole fragment list, "ECAN! DRINKER | CAN! DRINK FROM
+    /// FICALSE DIN | THE ALCHEMIST | THE ALEH ASTAVER". An echo passes every check that asks
+    /// whether the frame supports the answer, because it *is* the frame. A brand and a product
+    /// are a few words and carry no punctuation the OCR picked up off a can.
+    nonisolated static func looksLikeAName(_ guess: String) -> Bool {
+        if guess.contains("|") || guess.contains("!") { return false }
+        return (1...6).contains(guess.split(whereSeparator: \.isWhitespace).count)
+    }
+
     /// Whether the camera actually saw what the model says it read.
     ///
     /// The fallback resolves the model's guess *instead of* the OCR, so the guess reaches the
@@ -247,6 +259,7 @@ public final class ScanCoordinator: ObservableObject {
     /// label it cannot read will hand back the example it was shown, and no amount of prompt
     /// wording reliably stops that -- so the answer is checked against the frame instead.
     nonisolated static func frameSupports(guess: String, ocr: [String]) -> Bool {
+        guard looksLikeAName(guess) else { return false }
         let seen = ocr.flatMap { identifyingWords($0, minLength: 3) }
         let wanted = identifyingWords(guess)
         guard !seen.isEmpty, !wanted.isEmpty else { return false }

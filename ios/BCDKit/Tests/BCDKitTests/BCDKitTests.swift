@@ -901,3 +901,21 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         #expect(!ScanCoordinator.frameSupports(guess: "The Alchemist Heady Topper", ocr: focal))
     }
 }
+
+@Suite struct ModelEchoIsNotAnAnswer {
+    @Test func handingTheFragmentsBackIsNotANameAndIsRejected() {
+        // Straight from the scan log. An echo defeats every check that asks whether the frame
+        // supports the answer, because it *is* the frame -- so it has to be caught on shape.
+        let echo = "ECAN! DRINKER | CAN! DRINK FROM FICALSE DIN | THE ALCHEMIST | THE ALEH ASTAVER"
+        #expect(!ScanCoordinator.looksLikeAName(echo))
+        #expect(!ScanCoordinator.frameSupports(guess: echo, ocr: ["ECAN! DRINKER",
+                                                                 "THE ALCHEMIST"]))
+        #expect(!ScanCoordinator.looksLikeAName("ECAN! DE"))
+    }
+
+    @Test func realNamesAreStillNames() {
+        #expect(ScanCoordinator.looksLikeAName("Heady Topper"))
+        #expect(ScanCoordinator.looksLikeAName("The Alchemist Heady Topper"))
+        #expect(ScanCoordinator.looksLikeAName("Bombay Sapphire London Dry Gin"))
+    }
+}

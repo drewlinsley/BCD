@@ -42,6 +42,11 @@ targets:
       path: BCDApp/Resources/Info.plist
       properties:
         CFBundleDisplayName: "BCD"
+        # Wired to the build setting so `xcodebuild CURRENT_PROJECT_VERSION=<n>` stamps the
+        # bundle. Without it every build installed as version 1, and `devicectl device info
+        # apps` could not tell one from another -- which is how several rounds of camera
+        # testing ran against a build that was installed but never relaunched.
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # Launch screen paints the identity: the scan-frame mark on brand ink, both from
         # the asset catalog so light/dark resolve the same way the app does.
         UILaunchScreen:
