@@ -310,14 +310,20 @@ public final class ScanCoordinator: ObservableObject {
         }
         let req = ScanResolveRequest(detections: synthetic, venueId: venueId, includeScore: true)
         guard let resp = try? await api.resolveScan(req), !resp.candidates.isEmpty else { return }
+        // The model naming a label does not make the catalog's match of that name right, and
+        // this path wrote to the screen without the check the live path enforces. The model
+        // read a Heady Topper can as "Alchemist Vermont Ale"; the catalog matched a product
+        // literally called `Vermont`, uncorroborated, and it went up with full confidence.
+        // Reported from the camera as "I got VERMONT and BRINK". One rule, both paths.
+        guard resp.corroborated else { return }
         candidates = resp.candidates
         currentFrame = synthetic
         overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                to: synthetic, cap: maxOverlays, presorted: true)
         overlaysSetAt = Date()   // starts the hold window, so this one is tappable
-        // The model read the label the catalog could not, so this result gets the same
-        // protection a corroborated one does: the next garbled tick must not evict it.
-        displayedCorroborated = resp.corroborated
+        // The model read the label the catalog could not, and the catalog agreed with the
+        // name it gave: the next garbled tick must not evict it.
+        displayedCorroborated = true
         lastLatencyMs = resp.latencyMs
         await telemetry?.log("scan_frame_batch", tier: .personalization, [
             "n_detections": .int(frame.count),

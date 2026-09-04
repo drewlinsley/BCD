@@ -380,7 +380,10 @@ private final class CatalogStubAPI: APIClientProtocol, @unchecked Sendable {
                 unresolved.append(i)
             }
         }
-        return ScanResolveResponse(candidates: candidates, unresolvedIndices: unresolved, latencyMs: 0.5)
+        // A hit here is an exact match on a name the catalog knows, which is the case the
+        // server corroborates. The stub predated the flag.
+        return ScanResolveResponse(candidates: candidates, unresolvedIndices: unresolved,
+                                   latencyMs: 0.5, corroborated: !candidates.isEmpty)
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}
@@ -795,6 +798,28 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         // and the model's answer, which is the one that reads a stylized can, does show
         await coord.interpretation?.value
         #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func theModelsGuessAlsoHasToBeCorroboratedToShow() async throws {
+        // The hole the live-path rule left open: this path wrote to the screen without the
+        // check. The model read a Heady Topper can as "Alchemist Vermont Ale", the catalog
+        // matched a product literally called `Vermont` at a plausible score, and it went up
+        // with full confidence -- reported from the camera as "I got VERMONT and BRINK".
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api,
+                                    llm: StubLLM(guess: "Alchemist Vermont Ale"))
+        coord.start()
+
+        engine.push([DetectedText(text: "CHEMIST-VERMONT", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        await coord.interpretation?.value
+
+        #expect(coord.overlays.isEmpty,
+                "the model named it, but the catalog did not corroborate the name it gave")
     }
 
     @MainActor
