@@ -115,8 +115,12 @@ struct OverlayChip: View {
     // rather than two competing ones.
     private var tint: Color {
         guard let s = candidate.personalScore else { return Brand.reactionRest }
+        // `>=` on the middle band: 0.5 is the neutral score the recommender returns when it
+        // has no strong view, and `> 0.5` dropped it into the "poured it out" colour -- so a
+        // correctly identified beer the engine simply has no opinion about was painted with
+        // the worst verdict on the scale. Focal Banger scores exactly 0.5.
         return s > 0.75 ? Reaction.chuggedIt.tint
-             : (s > 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
+             : (s >= 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
     }
 
     var body: some View {

@@ -62,12 +62,19 @@ public struct FoundationModelsProvider: LLMProvider {
         // Focal Banger can -- the same frame's raw OCR reads "FOCAL BAN". A one-shot example
         // naming a real beer is the answer the model reaches for whenever the fragments are
         // too garbled to read, which is precisely when it gets asked.
+        //
+        // Taking the example away is not enough on its own, and the first attempt over-steered:
+        // told to "use only words you can actually see", the model answered NONE for a whole
+        // session and the HUD went silent, because reading letters that are *not* there is the
+        // entire job -- a Heady Topper can OCRs as "FADY TOPPE" and "ПУТОРРЕ". The licence to
+        // infer is restored and pointed at the fragments instead of at fame.
         let prompt = """
-        These are OCR fragments from ONE alcoholic-drink label (beer or spirits), possibly \
-        garbled or partial. Use only words you can actually see in the fragments. If you \
-        recognize the product, reply with just its brand and name on a single line, in the \
-        form "<brand> <product>". If you cannot, reply exactly NONE. Do not fall back on a \
-        well-known drink the fragments do not support.
+        These are OCR fragments from ONE alcoholic-drink label (beer or spirits), usually \
+        badly garbled: the letters are misread, dropped or transliterated, so match them by \
+        shape and sound rather than exact spelling. Work out which single product they came \
+        from and reply with just the brand and name on one line, in the form \
+        "<brand> <product>". If the fragments do not point at one particular product, reply \
+        exactly NONE -- but do not answer with a famous drink the fragments do not resemble.
         Fragments: \(fragments.joined(separator: " | "))
         """
         let response = try await session.respond(to: prompt)

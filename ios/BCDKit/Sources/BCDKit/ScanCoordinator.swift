@@ -74,7 +74,14 @@ public final class ScanCoordinator: ObservableObject {
     /// impossible to tap: it set the overlay without moving `lastResolvedKey`, so the very next
     /// tick re-resolved the raw garble, matched nothing, and wiped it. A result now stands until
     /// something better replaces it, the view empties, or this window passes.
-    private let overlayHoldMs: Double = 2500
+    ///
+    /// Ten seconds, not the original 2.5: an overlay is the tap target for the whole app, and
+    /// 2.5s was not long enough to notice one and reach for it. Reported from the camera as
+    /// Focal Banger appearing and then fading "before I could click it". The risk a short
+    /// window was guarding against -- a stale answer sitting over a bottle it does not belong
+    /// to -- is much smaller now that only a corroborated result is ever drawn, and pointing
+    /// the camera away still clears it at once through the empty-frame path.
+    private let overlayHoldMs: Double = 10000
     private var overlaysSetAt: Date?
 
     /// Whether the result currently on screen was one the frame corroborated. Tracked apart
