@@ -63,24 +63,34 @@ public struct FoundationModelsProvider: LLMProvider {
         // naming a real beer is the answer the model reaches for whenever the fragments are
         // too garbled to read, which is precisely when it gets asked.
         //
-        // Nothing else here changes, and that is deliberate. Two attempts at rewording the
-        // rest of it -- "use only words you can actually see", then "match by shape and sound
-        // ... but do not answer with a famous drink the fragments do not resemble" -- each
-        // silenced the model completely: two sessions, a hundred and twenty frames, not one
-        // answer. Reading letters that are *not* there is the entire job, since a Heady Topper
-        // can OCRs as "FADY TOPPE" and "ПУТОРРЕ", and every added caution reads as a reason to
-        // say NONE. This is the wording that demonstrably worked, with only the example
-        // replaced by its own shape.
+        // Concrete examples, from producers nobody here is scanning.
+        //
+        // The example does more than anchor an answer: it teaches the answer's *shape*.
+        // Replacing it with a placeholder ("<brand> <product name>") made the model stop naming
+        // products and start echoing the input -- it replied "**HEMIST-VERME** **ALE**", then
+        // "**CAN! DRINK FROM THEO**", and once handed the entire fragment list back. Across 124
+        // frames of Heady Topper and Focal Banger it named nothing at all.
+        //
+        // Two examples rather than one, so neither becomes the default answer, and from an
+        // unrelated brewery and distillery so that a parroted example cannot survive the
+        // server: "Sierra Nevada Pale Ale" off an Alchemist can shares no word with the frame,
+        // so nothing corroborates it and it is dropped. That safety net is exactly what the old
+        // `Heady Topper The Alchemist` example defeated -- it names the same brewery as Focal
+        // Banger, so the ALCHEMIST printed on the chrome corroborated the wrong beer.
         let prompt = """
         These are OCR fragments from ONE alcoholic-drink label (beer or spirits), possibly \
         garbled or partial. If you recognize the product, reply with just its brand and name \
-        on a single line, like "<brand> <product name>". If you can't, reply exactly NONE.
+        on a single line, e.g. "Sierra Nevada Pale Ale" or "Bombay Sapphire London Dry Gin". \
+        If you can't, reply exactly NONE.
         Fragments: \(fragments.joined(separator: " | "))
         """
         let response = try await session.respond(to: prompt)
         let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
         let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
-        let guess = firstLine.trimmingCharacters(in: .whitespaces)
+        // It answers in markdown -- every reply in the logs comes back as "**Heady Topper**".
+        // Trigram flattening happened to ignore the asterisks, but the catalog should not be
+        // asked to resolve them.
+        let guess = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: " *\"'`"))
         if guess.isEmpty || guess.uppercased().contains("NONE") { return [] }
         return [guess]
     }
