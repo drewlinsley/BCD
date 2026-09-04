@@ -57,10 +57,17 @@ public struct FoundationModelsProvider: LLMProvider {
             .filter { !$0.isEmpty }
         guard isAvailable, !fragments.isEmpty else { return [] }
         let session = LanguageModelSession()
+        // The example is a *shape*, not a product. This used to read `e.g. "Heady Topper The
+        // Alchemist"`, and the model returned that string verbatim while the camera was on a
+        // Focal Banger can -- the same frame's raw OCR reads "FOCAL BAN". A one-shot example
+        // naming a real beer is the answer the model reaches for whenever the fragments are
+        // too garbled to read, which is precisely when it gets asked.
         let prompt = """
         These are OCR fragments from ONE alcoholic-drink label (beer or spirits), possibly \
-        garbled or partial. If you recognize the product, reply with just its brand and name \
-        on a single line, e.g. "Heady Topper The Alchemist". If you can't, reply exactly NONE.
+        garbled or partial. Use only words you can actually see in the fragments. If you \
+        recognize the product, reply with just its brand and name on a single line, in the \
+        form "<brand> <product>". If you cannot, reply exactly NONE. Do not fall back on a \
+        well-known drink the fragments do not support.
         Fragments: \(fragments.joined(separator: " | "))
         """
         let response = try await session.respond(to: prompt)

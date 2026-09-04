@@ -112,7 +112,7 @@ def _flatten(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-def _accounts_for_the_line(name: str, line: str) -> bool:
+def _accounts_for_the_line(name: str, line: str, *, threshold: float | None = None) -> bool:
     """Whether the candidate is the whole of what was read, or only a piece of it.
 
     Containment cannot tell the difference: `word_similarity` is 1.0 for ANY name wholly
@@ -126,7 +126,21 @@ def _accounts_for_the_line(name: str, line: str) -> bool:
     "GUINNESS DRAUGHT STOUT": that row is not the whole label either, and the frame should
     say so rather than certify itself.
     """
-    return _trigram_sim(_flatten(name), _flatten(line)) >= _ACCOUNTS_FOR_LINE
+    return _trigram_sim(_flatten(name), _flatten(line)) >= (threshold or _ACCOUNTS_FOR_LINE)
+
+
+# Proving a product off one line alone is a stronger claim than "this row accounts for what
+# the line says", so it answers to a higher bar. At 0.7 a rim fragment reading "CHEMIST-VE"
+# (0.73) certified a distillery named `Chemist` on every other tick. The closest real label has
+# to come is "HEADY TOPPER THE ALCHEMIST" against its catalog name, at 0.86.
+_SELF_PROOF_SIM = 0.8
+
+# ...and a name with too little identifying substance cannot name a product on its own however
+# exactly it matches, because a short garble matches something exactly: "BALE" off a Focal
+# Banger can is a perfect 1.00 against a catalog row called `Bale`. Five characters keeps
+# "STONE IPA" -- the least substantial label the recogniser is meant to know -- and drops the
+# four-letter coincidences the log is full of: `Bale`, `Vern`, `Mist`, `Topo`, `Ver`.
+_MIN_SELF_PROOF_CHARS = 5
 
 
 def _identifying_tokens(name: str) -> list[str]:
@@ -307,8 +321,15 @@ def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
     fuzzy because each re-read is garbled differently -- "LITTLE WILLOW BREWING COMPANT" and
     "LITTLE / KEWING" are the same text off two cans.
     """
+    def _substance(toks: list[str]) -> int:
+        return sum(len(t) for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN)
+
     kept: list[list[str]] = []
-    for toks in sorted(line_tokens, key=len, reverse=True):
+    # By identifying substance, not token count: "PDY TOPP" and "FADY-TOPP" both hold two
+    # tokens, so counting them left the poorer reading first and the fuller one then looked
+    # like new evidence rather than the same words read again. Two halves of one wordmark
+    # certified `Snipes Mountain Lefty Topp's` off a Heady Topper can.
+    for toks in sorted(line_tokens, key=_substance, reverse=True):
         sig = [t for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN]
         if not sig:
             continue
@@ -631,8 +652,11 @@ class Resolver:
             judgement, and when they were written separately they contradicted each other: the
             penalty pushed the score under the very bar the proof required.
             """
+            qualified = qualified_by_id.get(rid, name)
+            if sum(len(t) for t in _identifying_tokens(qualified)) < _MIN_SELF_PROOF_CHARS:
+                return False
             return raw_score >= _STRONG_MATCH and _accounts_for_the_line(
-                qualified_by_id.get(rid, name), req.detections[line_i].text)
+                qualified, req.detections[line_i].text, threshold=_SELF_PROOF_SIM)
 
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
