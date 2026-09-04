@@ -395,7 +395,7 @@ private final class TwoCandidateAPI: APIClientProtocol, @unchecked Sendable {
         return ScanResolveResponse(candidates: [
             makeCandidate(id: "dipa", name: "Big DIPA", abv: 8.5, personal: 0.9, index: 0),
             makeCandidate(id: "lager", name: "Light Lager", abv: 4.2, personal: 0.4, index: 0),
-        ], unresolvedIndices: [], latencyMs: 0.5)
+        ], unresolvedIndices: [], latencyMs: 0.5, corroborated: true)
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}
@@ -774,9 +774,55 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
     }
 
     @MainActor
+    @Test func anUnprovenGuessIsNotShownWhileTheModelCanStillAnswer() async throws {
+        // Capping unproven frames to one candidate was not enough: the one guess still took
+        // the screen, and a different wrong one took it 350ms later. Reported from the camera
+        // as "seven or eight different answers". Across two live sessions off a real can, 120
+        // unproven frames returned a candidate and none was the product in front of it.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let llm = StubLLM(guess: "Heady Topper")
+        let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
+        coord.start()
+
+        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.isEmpty,
+                "an unproven guess does not take the screen while the model is still reading")
+
+        // and the model's answer, which is the one that reads a stylized can, does show
+        await coord.interpretation?.value
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func anUnprovenGuessDoesNotEraseTheAnswerAlreadyEarned() async throws {
+        // Withholding it must not clear what is already up: the frame after a good one is
+        // usually garbled, and blanking on it would flicker the earned answer away.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api, llm: StubLLM(guess: "Heady Topper"))
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+
+        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
     @Test func anUncorroboratedTickStillShowsWhenNothingBetterIsUp() async throws {
-        // The hold must not become a refusal to ever show a guess: with nothing on screen,
-        // an uncorroborated answer is still the best we have.
+        // The rule must not become a refusal to ever answer: with no model configured, an
+        // uncorroborated guess is the best there is, so it still shows.
         let engine = ManualScanEngine()
         let api = UncorroboratedAPI(known: ["Heady Topper"])
         let coord = ScanCoordinator(engine: engine, api: api)

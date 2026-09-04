@@ -214,16 +214,31 @@ public final class ScanCoordinator: ObservableObject {
             // the camera as "the right answer popped up for a second but was behind a bunch of
             // other incorrect things". Measured server-side over 78 uncorroborated frames off
             // a real can: the answer was wrong on 77 of them.
+            //
+            // Capping those frames to a single guess was not enough: the guess still took the
+            // screen, and a *different* wrong one took it 350ms later. Measured across two live
+            // sessions off a real can, 120 uncorroborated frames returned a candidate and none
+            // of them was the product in front of the camera — 29 distinct names, cycling.
+            // Reported from the camera as "seven or eight different answers". Every label the
+            // recogniser is meant to know corroborates (12/12 on the harness), so holding an
+            // unproven guess back costs no real answer, and the HUD says nothing rather than
+            // something wrong. A guess still shows when there is no model to do better.
+            //
+            // The condition is `llm == nil` rather than "the model already failed on this
+            // frame": a garbled label never yields the same frame twice, so a per-frame
+            // decline flag gets recorded against a key that never comes back — the same trap
+            // the staleness check and the cancellation policy below each fell into once.
+            let showable = resp.corroborated || llm == nil
             let evictsBetter = !resp.corroborated && displayedCorroborated
                 && isHoldingRecentOverlays
-            if !resp.candidates.isEmpty && !evictsBetter {
+            if !resp.candidates.isEmpty && showable && !evictsBetter {
                 candidates = resp.candidates
                 currentFrame = frame
                 overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                        to: frame, cap: maxOverlays, presorted: true)
                 overlaysSetAt = Date()
                 displayedCorroborated = resp.corroborated
-            } else if resp.candidates.isEmpty && !isHoldingRecentOverlays {
+            } else if (resp.candidates.isEmpty || !showable) && !isHoldingRecentOverlays {
                 candidates = []; currentFrame = []; overlays = []
                 overlaysSetAt = nil
                 displayedCorroborated = false
