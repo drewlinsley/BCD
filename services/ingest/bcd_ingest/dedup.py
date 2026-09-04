@@ -79,6 +79,19 @@ _STYLE = {
     # and outranked the real beer in the HUD.
     "drink", "drinks", "beverage", "bottle", "bottled", "canned", "brewed", "contents",
     "imported", "product",
+    # "from" belongs with the prepositions at the top, and was the one missing. A Heady
+    # Topper can reads "DRINK FROM THE CAN": FROM was the line's only identifying token, so
+    # it earned an index probe and then supported "From Away" and "There From Here" -- nine
+    # wrong top answers in one session at the camera.
+    "from",
+    # The rest of the resolver's _PACKAGING vocabulary. It already refuses to match a line
+    # made only of these, but the store's gate asks a different object the same question and
+    # was still probing for them, so a catalog row named "Pint Cake" stayed reachable from
+    # "1 PINT". Two vocabularies drifting apart is the bug; the words themselves are chrome
+    # either way.
+    "alc", "bottles", "can", "cans", "crowler", "draft", "draught", "growler", "keg",
+    "liter", "liters", "litre", "litres", "milliliter", "milliliters", "net", "ounce",
+    "ounces", "pack", "pint", "pints", "sixpack", "volume",
 }
 
 

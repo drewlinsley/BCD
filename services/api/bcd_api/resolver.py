@@ -432,6 +432,13 @@ class Resolver:
         out: list[tuple[int, dict, float]] = []
         seen: set[str] = set()
         for i, text in lines:
+            # A line with nothing identifying in it cannot name a maker either. Without this
+            # the two generic halves agree with each other: _token_supported accepts a
+            # styleless name against a styleless line, so "DRINK FROM" -- now that both words
+            # are known chrome -- reached a producer literally registered as "drink drink!"
+            # and offered its beer at 0.60.
+            if not _identifying_tokens(text):
+                continue
             for prod, sc in match(text):
                 pid = prod.get("id") or ""
                 if sc < _PRODUCER_MATCH_MIN or pid in seen:

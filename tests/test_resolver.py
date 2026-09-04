@@ -725,3 +725,34 @@ def test_accounts_for_the_line_separates_a_fragment_from_a_whole_label():
     assert _accounts_for_the_line("Heady Topper", "**Heady Topper**")
     # leaves out the brand the label shows -- correctly not "the whole label"
     assert not _accounts_for_the_line("Draught Stout", "GUINNESS DRAUGHT STOUT")
+
+
+def test_a_line_of_pure_chrome_names_no_maker():
+    """"DRINK FROM" is what a Heady Topper can prints, not a brand.
+
+    Both words are known chrome, so the line carries no identity -- and _token_supported
+    accepts a styleless *name* against a styleless *line*, which is right for a product
+    ("Irish Whiskey" read off a label that says only that) and wrong here: the two generic
+    halves simply agree with each other. A producer registered as "drink drink!" was reached
+    this way and its beer offered at 0.60.
+    """
+    producers = {"DRINK FROM": [(_producer("pr:dd", "drink drink!"), 1.0)]}
+    catalog = {"pr:dd": [_prod_of("Trotinette", "p:tro", "pr:dd")]}
+    gold = {"pr:dd": _producer("pr:dd", "drink drink!")}
+    req = ScanResolveRequest(detections=[DetectedText(text="DRINK FROM", kind="text")])
+    resp = Resolver(_MakerStore({}, gold, producers, catalog)).resolve(req)
+
+    assert resp.candidates == []
+    assert not resp.corroborated
+
+
+def test_the_maker_path_still_answers_a_line_that_names_one():
+    """The guard must not close the door the producer path exists to open."""
+    producers = {"ALCHEMIST VER": [(_producer("pr:alch", "The Alchemist LLC"), 0.9)]}
+    catalog = {"pr:alch": [_prod_of("The Alchemist Heady Topper", "p:ht", "pr:alch")]}
+    gold = {"pr:alch": _producer("pr:alch", "The Alchemist LLC")}
+    req = ScanResolveRequest(detections=[DetectedText(text="ALCHEMIST VER", kind="text")])
+    resp = Resolver(_MakerStore({}, gold, producers, catalog)).resolve(req)
+
+    assert resp.candidates, "a line that does name a maker still reaches its catalog"
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
