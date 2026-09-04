@@ -668,3 +668,60 @@ def test_a_digit_name_is_still_reachable():
     resp = Resolver(_FrameStore({"1664": [(beer, 1.0)]})).resolve(
         ScanResolveRequest(detections=[DetectedText(text="1664", kind="text")]))
     assert resp.candidates[0].resolved.product.name == "1664"
+
+
+def test_the_category_line_cannot_certify_a_fragment():
+    """The reported bug: a Heady Topper can answered "Ache" and "Mist", at 1.00.
+
+    The recognizer split the wordmark mid-word -- THE ALCHEMIST VERMONT came off the can as
+    "ACHE MIST-VERM" and "ALCHE MIST VERM" -- and both halves are real registered product
+    names. Containment scores them 1.0, and the short-name guard cannot object because the
+    token genuinely was read.
+
+    What made it worse than a bad guess is that the frame *certified* itself: one line named
+    the fragment and the "ALE / ALC. 8% BY VOL" line agreed on the category, which reached the
+    corroboration bar. A certified frame is exactly the one the client does not ask the model
+    about -- so the answer that would have been right never got asked for.
+    """
+    frame = {"ACHE MIST-VERM": [(_prod_of("Ache", "p:ache", "pr:ache"), 1.0)]}
+    gold = {"pr:ache": _producer("pr:ache", "Ache")}
+    req = ScanResolveRequest(detections=[
+        DetectedText(text="ACHE MIST-VERM", kind="text"),
+        DetectedText(text="ALE\nALC. 8% BY VOL\n1 PINT", kind="text"),
+        DetectedText(text="DRINK FROM", kind="text"),
+    ])
+    resp = Resolver(_FrameStore(frame, gold)).resolve(req)
+
+    assert resp.candidates, "still offered, just not trusted"
+    assert resp.candidates[0].resolved.product.name == "Ache"
+    assert not resp.corroborated, "the category is not one of the frame's lines naming it"
+    assert resp.candidates[0].match_score < 1.0, "and the overlay must not read as certainty"
+
+
+def test_a_whole_label_read_on_one_line_still_certifies_itself():
+    """The exemption this must not break: one clean line that IS the label. Asking the model
+    to confirm a 1.00 spends a second to learn nothing."""
+    frame = {"BLUE MOON BELGIAN WHITE": [
+        (_prod_of("Blue Moon Belgian White", "p:bm", "pr:bm"), 1.0)]}
+    gold = {"pr:bm": _producer("pr:bm", "Blue Moon")}
+    req = ScanResolveRequest(detections=[
+        DetectedText(text="BLUE MOON BELGIAN WHITE", kind="text")])
+    resp = Resolver(_FrameStore(frame, gold)).resolve(req)
+
+    assert resp.corroborated
+    assert resp.candidates[0].match_score == 1.0
+
+
+def test_accounts_for_the_line_separates_a_fragment_from_a_whole_label():
+    from bcd_api.resolver import _accounts_for_the_line
+
+    # measured off the real can: every one of these is a piece of THE ALCHEMIST VERMONT
+    assert not _accounts_for_the_line("Mist", "ACHE MIST-VERM")
+    assert not _accounts_for_the_line("Ache", "ACHE MISTVERN")
+    assert not _accounts_for_the_line("Chemist", "CHEMIST VER")
+    # the whole label, however it was cased or punctuated
+    assert _accounts_for_the_line("Bombay Sapphire London Dry Gin",
+                                  "BOMBAY SAPPHIRE LONDON DRY GIN")
+    assert _accounts_for_the_line("Heady Topper", "**Heady Topper**")
+    # leaves out the brand the label shows -- correctly not "the whole label"
+    assert not _accounts_for_the_line("Draught Stout", "GUINNESS DRAUGHT STOUT")

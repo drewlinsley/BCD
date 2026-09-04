@@ -101,6 +101,34 @@ def _trigram_sim(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+#: How much of the line a candidate must account for before a frame with nothing to
+#: corroborate against is allowed to certify itself. Measured on real frames: the fragments
+#: top out at 0.667 ("Chemist" against "CHEMIST VER") and the whole-label reads start at
+#: 0.862, so 0.7 sits in the gap rather than on either population.
+_ACCOUNTS_FOR_LINE = 0.7
+
+
+def _flatten(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _accounts_for_the_line(name: str, line: str) -> bool:
+    """Whether the candidate is the whole of what was read, or only a piece of it.
+
+    Containment cannot tell the difference: `word_similarity` is 1.0 for ANY name wholly
+    inside the line, so a catalog row named "Mist" scores 1.0 against "ACHE MIST-VERM" --
+    which is THE ALCHEMIST VERMONT with the wordmark split mid-word by the recognizer. The
+    can produced "ALCHE MIST VERM" and "ACHE MISTVERN" too, and every one of those pieces is
+    a real product name someone has registered.
+
+    Plain similarity is the measure that penalises what the name leaves out, which is exactly
+    the question here. It also, correctly, denies the exemption to "Draught Stout" read off
+    "GUINNESS DRAUGHT STOUT": that row is not the whole label either, and the frame should
+    say so rather than certify itself.
+    """
+    return _trigram_sim(_flatten(name), _flatten(line)) >= _ACCOUNTS_FOR_LINE
+
+
 def _identifying_tokens(name: str) -> list[str]:
     """Name tokens that could actually pick this product off a shelf: long enough to be a real
     word, and not a category or packaging word every other label carries too."""
@@ -543,27 +571,42 @@ class Resolver:
 
         # ---- pass 2: ask the whole frame about each distinct candidate ----
         best_hit: dict[str, tuple[int, float, dict]] = {}   # record id -> best (line, score)
+        qualified_by_id: dict[str, str] = {}
         for i, rec, sc in hits:
             rid = rec.get("id") or ""
             prev = best_hit.get(rid)
             if prev is None or sc > prev[1]:
                 best_hit[rid] = (i, sc, rec)
+            qualified_by_id.setdefault(rid, self._qualified_name(rec))
 
         scored: list[tuple[int, ScoredCandidate]] = []
+        named_by_id: dict[str, int] = {}
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
             if resolved is None:
                 continue
             cat = resolved.product.category.value if resolved.product.category else None
-            support = _frame_support(_candidate_vocabulary(resolved), line_tokens,
-                                     category=cat, hint=hint)
+            vocab = _candidate_vocabulary(resolved)
+            support = _frame_support(vocab, line_tokens, category=cat, hint=hint)
+            # The same count without the category's point. Agreeing on the category is real
+            # evidence for *ranking* -- it is what separates `The Alchemist Heady Topper` from
+            # `Alchemist Amer` -- but it cannot certify a frame, because on a can that prints
+            # "ALE" every beer in the catalog earns it. Counting it here let a row named "Ache"
+            # reach the corroboration bar off one mis-segmented fragment, and a certified frame
+            # is precisely the one the client does not ask the model about.
+            named = _frame_support(vocab, line_tokens)
+            named_by_id[resolved.product.id] = named
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
             # a frame that had nothing to corroborate with, and the overlay should say so.
             score = sc
             if hint and cat and cat != hint and cat in _CATEGORY_WORDS:
                 score = sc * _CATEGORY_CONTRADICTS
-            if support <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
+            # `named`, not `support`, for the same reason corroboration uses it: the
+            # category's point is not one of the frame's lines agreeing that this is the
+            # product. A fragment match that only the category backs showed 1.00 in the HUD,
+            # which is the number a user reads as certainty.
+            if named <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
                 score *= _UNCORROBORATED
             score = round(score, 3)
             personal, reason, cold = (
@@ -611,10 +654,13 @@ class Resolver:
             # clean "BOMBAY SAPPHIRE LONDON DRY GIN" is not weak evidence, it is the whole
             # label, and asking the model about it would spend a second to confirm a 1.00.
             corroborated=any(
-                s >= _MIN_FRAME_FOR_PENALTY
+                named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
                 or (identity_lines < _MIN_FRAME_FOR_PENALTY
-                    and c.match_score >= _STRONG_MATCH)
-                for s, c in ranked
+                    and c.match_score >= _STRONG_MATCH
+                    and _accounts_for_the_line(
+                        qualified_by_id.get(c.resolved.product.id, c.resolved.product.name),
+                        req.detections[c.detection_index].text))
+                for _s, c in ranked
             ),
         )
 
