@@ -756,3 +756,57 @@ def test_the_maker_path_still_answers_a_line_that_names_one():
 
     assert resp.candidates, "a line that does name a maker still reaches its catalog"
     assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_a_shelf_returns_every_beer_on_it():
+    """The HUD's actual job, and the case the suite never covered: several labels in one frame.
+
+    Corroboration was reachable two ways — two lines naming one product, or a strong read of a
+    line in a frame holding fewer than two identity lines. A shelf is neither. Every bottle gets
+    exactly one line naming it and no second line to agree with it, and the frame has many
+    identity lines, so *nothing* could corroborate; the unproven-frame cap then kept a single
+    guess and the client withheld even that. Three beers in view, an empty screen.
+    """
+    frame = {
+        "SIERRA NEVADA PALE ALE": [(_prod_of("Sierra Nevada Pale Ale", "p:sn", "pr:sn"), 1.0)],
+        "LAGUNITAS IPA": [(_prod_of("Lagunitas IPA", "p:lag", "pr:lag"), 1.0)],
+        "GUINNESS DRAUGHT STOUT": [(_prod_of("Guinness Draught Stout", "p:gui", "pr:gui"), 1.0)],
+    }
+    req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
+    resp = Resolver(_FrameStore(frame)).resolve(req)
+
+    assert resp.corroborated
+    assert {c.resolved.product.name for c in resp.candidates} == {
+        "Sierra Nevada Pale Ale", "Lagunitas IPA", "Guinness Draught Stout"}
+
+
+def test_one_line_yields_one_overlay():
+    """Two catalog rows for the same beer — a brand-level row beside the product one — both
+    account for the same line, so on a shelf each proved itself against it and one bottle drew
+    two overlays. Three beers drew five, five drew eight."""
+    frame = {
+        "LAGUNITAS IPA": [(_prod_of("Lagunitas IPA", "p:lag", "pr:lag"), 1.0),
+                          (_prod_of("Lagunitas", "p:lagb", "pr:lag"), 1.0)],
+    }
+    req = ScanResolveRequest(detections=[DetectedText(text="LAGUNITAS IPA", kind="text")])
+    resp = Resolver(_FrameStore(frame)).resolve(req)
+
+    assert len(resp.candidates) == 1
+
+
+def test_a_four_pack_does_not_corroborate_itself():
+    """A four-pack prints its brand once per can, so one phrase arrives as several detections.
+    Counting each as independent agreement certified whatever they happened to share: "LITTLE"
+    read twice off a Little Willow pack proved six unrelated products with `little` in the name,
+    and "DRINK FROM THE CAN!" read three times proved one called `Now & Then` off the word THEN.
+    """
+    echo = _prod_of("Now & Then", "p:nt", "pr:nt")
+    frame = {
+        "ECAN! DRINK FROM THEN": [(echo, 0.9)],
+        "AN! DRINK FROM THEN": [(echo, 0.9)],
+        "FROM THE CAN! DRIN": [(echo, 0.9)],
+    }
+    req = ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in frame])
+    resp = Resolver(_FrameStore(frame)).resolve(req)
+
+    assert not resp.corroborated, "three readings of one slogan are one piece of evidence"

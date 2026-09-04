@@ -289,6 +289,39 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
     return list(seen)
 
 
+# Two lines that read the same printed phrase are one piece of evidence, not two.
+_LINE_REREAD = 0.7
+
+
+def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
+    """Collapse detections that are re-reads of one another.
+
+    Corroboration is supposed to mean separate parts of the frame agreeing. A four-pack prints
+    its brand once per can, so a single phrase arrives as three detections -- and whatever they
+    happened to share got certified by its own echo. "LITTLE" read twice off a Little Willow
+    pack proved six unrelated products with `little` in the name, and "DRINK FROM THE CAN!"
+    read three times proved one called `Now & Then`, off the word THEN.
+
+    Longest reading first, so the fullest version of a repeated phrase is the one kept: a line
+    whose identifying tokens are nearly all already accounted for is an echo of it. Matching is
+    fuzzy because each re-read is garbled differently -- "LITTLE WILLOW BREWING COMPANT" and
+    "LITTLE / KEWING" are the same text off two cans.
+    """
+    kept: list[list[str]] = []
+    for toks in sorted(line_tokens, key=len, reverse=True):
+        sig = [t for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN]
+        if not sig:
+            continue
+        echo = any(
+            sum(any(_trigram_sim(t, k) >= _TOKEN_SUPPORT_MIN for k in seen) for t in sig)
+            / len(sig) >= _LINE_REREAD
+            for seen in kept
+        )
+        if not echo:
+            kept.append(sig)
+    return kept
+
+
 def _frame_support(vocab: list[str], line_tokens: list[list[str]], *,
                    category: str | None = None, hint: str | None = None) -> int:
     """How many distinct pieces of the frame agree with this candidate.
@@ -516,6 +549,8 @@ class Resolver:
         decides which evidence wins.
         """
         line_tokens = [_tokens(d.text) for d in req.detections]
+        # What corroboration is allowed to count: the frame's distinct readings, not its echoes.
+        independent = _independent_lines(line_tokens)
         identity_lines = sum(1 for d in req.detections if _is_identity_text(d.text))
         hint = _category_hint(req.detections)
 
@@ -588,8 +623,20 @@ class Resolver:
                 best_hit[rid] = (i, sc, rec)
             qualified_by_id.setdefault(rid, self._qualified_name(rec))
 
+        def _is_whole_label(rid: str, name: str, raw_score: float, line_i: int) -> bool:
+            """True when the line this candidate matched is its name and essentially nothing
+            else -- proof on its own, needing no second line to agree.
+
+            Shared by the penalty and the corroboration test below because they are the same
+            judgement, and when they were written separately they contradicted each other: the
+            penalty pushed the score under the very bar the proof required.
+            """
+            return raw_score >= _STRONG_MATCH and _accounts_for_the_line(
+                qualified_by_id.get(rid, name), req.detections[line_i].text)
+
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
+        whole_label: dict[str, bool] = {}
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
             if resolved is None:
@@ -603,7 +650,7 @@ class Resolver:
             # "ALE" every beer in the catalog earns it. Counting it here let a row named "Ache"
             # reach the corroboration bar off one mis-segmented fragment, and a certified frame
             # is precisely the one the client does not ask the model about.
-            named = _frame_support(vocab, line_tokens)
+            named = _frame_support(vocab, independent)
             named_by_id[resolved.product.id] = named
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
@@ -615,6 +662,14 @@ class Resolver:
             # category's point is not one of the frame's lines agreeing that this is the
             # product. A fragment match that only the category backs showed 1.00 in the HUD,
             # which is the number a user reads as certainty.
+            # Whether the line *is* this product's name, judged on the raw similarity before
+            # any markdown. Corroboration and confidence are different questions: the reported
+            # score still says "one line, others disagreeing" -- a coincidence like `Chemist`
+            # off "CHEMIST" beside two lines naming the Alchemist beer must still rank below it
+            # -- while proof asks only whether some line is wholly this label, which is what a
+            # shelf gives every product on it.
+            whole_label[resolved.product.id] = _is_whole_label(
+                resolved.product.id, resolved.product.name, sc, line_i)
             if named <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
                 score *= _UNCORROBORATED
             score = round(score, 3)
@@ -654,21 +709,38 @@ class Resolver:
                                 c.resolved.product.id)
             if key not in best or _rank(entry) > _rank(best[key]):
                 best[key] = entry
-        ranked = sorted(best.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
-        corroborated = any(
+        ranked = sorted(best.values(), key=_rank, reverse=True)
+        # One line names one product. Identity-keying collapses duplicate rows for the same
+        # beer, but not a brand-level row sitting beside a product one -- `Lagunitas` next to
+        # `Lagunitas IPA`, three Blue Moon variants next to each other. Each accounts for the
+        # same line and so each proves itself against it, and a shelf of three beers drew five
+        # overlays. Best candidate per line represents that line; the rest are readings of text
+        # already spoken for.
+        per_line: dict[int, tuple[int, ScoredCandidate]] = {}
+        for entry in ranked:
+            per_line.setdefault(entry[1].detection_index, entry)
+        ranked = sorted(per_line.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
+        def _is_proven(c: ScoredCandidate) -> bool:
             # A barcode is an identifier, not a reading of one. Nothing in the frame needs to
             # agree with it, and a scan that succeeded must not be sent to the model to be
             # second-guessed -- nor capped below, since two barcodes legitimately name two
             # products.
-            c.resolved.product.id in by_upc
-            or named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
-            or (identity_lines < _MIN_FRAME_FOR_PENALTY
-                and c.match_score >= _STRONG_MATCH
-                and _accounts_for_the_line(
-                    qualified_by_id.get(c.resolved.product.id, c.resolved.product.name),
-                    req.detections[c.detection_index].text))
-            for _s, c in ranked
-        )
+            return (
+                c.resolved.product.id in by_upc
+                or named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
+                # A line this candidate accounts for *entirely* proves it on its own, however
+                # many other labels share the frame. This used to require the frame to hold
+                # fewer than two identity lines -- which is to say, it only worked on a single
+                # label photographed alone, and switched itself off on the one input the HUD
+                # exists for. A shelf gives every product one line naming it and no second line
+                # to agree, so nothing could corroborate, and the unproven-frame cap then threw
+                # away all but one: three beers in view returned a single guess the client
+                # withheld, and the shelf showed nothing at all.
+                or whole_label.get(c.resolved.product.id, False)
+            )
+
+        proven = [e for e in ranked if _is_proven(e[1])]
+        corroborated = bool(proven)
         # A frame nothing corroborates has no evidence to rank a list with, so offering one
         # implies a differentiation we cannot make. Measured over 78 such frames from a real
         # can: the right answer was first once, deeper never, and absent 77 times -- while the
@@ -676,7 +748,15 @@ class Resolver:
         # of the label, they were the same wrong guess spelled five ways ("Chemist", "Chemist
         # 151", "Chemist Spirits", "Chemist Bierbrand"). One guess is as much as this frame has
         # earned the right to say, and the client is about to ask the model anyway.
-        if not corroborated:
+        if corroborated:
+            # Corroboration is a property of a candidate, but it was only ever applied to the
+            # frame -- so the unproven candidates rode in on the proven one's coat-tails. Three
+            # four-packs in view is a frame that legitimately corroborates *something*, and that
+            # opened the gate for every junk match beside it: reported from the camera as "a
+            # number of answers stacked on top of each other", with the right answer behind
+            # them. A shelf of real products still returns all of them -- each proves itself.
+            ranked = proven
+        else:
             ranked = ranked[:1]
         return ScanResolveResponse(
             candidates=[c for _, c in ranked],

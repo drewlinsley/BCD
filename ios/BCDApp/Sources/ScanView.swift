@@ -23,12 +23,17 @@ struct ScanView: View {
                 .ignoresSafeArea()
 
             GeometryReader { geo in
-                ForEach(model.overlays) { overlay in
+                ForEach(Array(model.overlays.enumerated()), id: \.element.id) { idx, overlay in
                     OverlayChip(candidate: overlay.candidate,
                                 reaction: env.reactions
                                     .reaction(for: overlay.candidate.resolved.product.id))
                         .position(x: overlay.anchor.x * geo.size.width,
                                   y: overlay.anchor.y * geo.size.height)
+                        // Overlays arrive best-first and SwiftUI draws later views on top, so
+                        // the best match was landing *underneath* every weaker one anchored
+                        // near it. Reported from the camera as a green box briefly visible but
+                        // "obscured by an orange/yellow box in front".
+                        .zIndex(Double(model.overlays.count - idx))
                         .onTapGesture { selected = overlay.candidate }  // optional: open the detail receipt
                 }
             }
