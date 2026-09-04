@@ -188,6 +188,75 @@ public final class ScanCoordinator: ObservableObject {
         return lhs.text < rhs.text
     }
 
+    /// Style and category words. Every label of a type carries them, so agreeing on one is no
+    /// evidence that the model read *this* label.
+    nonisolated private static let categoryWords: Set<String> = [
+        "ale", "ales", "ipa", "apa", "pale", "india", "indian", "beer", "beers", "lager",
+        "stout", "porter", "pilsner", "wheat", "gin", "vodka", "whiskey", "whisky", "bourbon",
+        "rum", "tequila", "dry", "london", "brewing", "brewery", "company", "double",
+        "imperial", "hazy", "session", "draught", "draft", "original", "premium", "reserve",
+        "drink", "from", "cans", "pint", "pints", "vol", "alc",
+    ]
+
+    /// The words in `text` that could actually pick a product off a shelf.
+    ///
+    /// `minLength` is 4 for a name, which has to carry real substance to be worth matching, and
+    /// 3 for what the camera read, where the evidence arrives truncated: a Focal Banger can
+    /// OCRs as "FOCAL BAN", and dropping that three-letter stub rejected the right answer.
+    nonisolated static func identifyingWords(_ text: String, minLength: Int = 4) -> [String] {
+        text.lowercased()
+            .split { !$0.isLetter }
+            .map(String.init)
+            .filter { $0.count >= minLength && !categoryWords.contains($0) }
+    }
+
+    /// Bigram Dice coefficient. OCR never spells a word the way the catalog does -- a Heady
+    /// Topper can reads "FADY TOPPE" -- so agreement has to be measured, not tested for.
+    nonisolated static func similarity(_ a: String, _ b: String) -> Double {
+        if a == b { return 1 }
+        func bigrams(_ s: String) -> [String] {
+            let c = Array(s)
+            guard c.count >= 2 else { return [s] }
+            return (0..<(c.count - 1)).map { String(c[$0...($0 + 1)]) }
+        }
+        let right = bigrams(b)
+        var left = bigrams(a)
+        let total = left.count + right.count
+        guard total > 0 else { return 0 }
+        var shared = 0
+        for g in right where left.firstIndex(of: g) != nil {
+            left.remove(at: left.firstIndex(of: g)!)
+            shared += 1
+        }
+        return 2 * Double(shared) / Double(total)
+    }
+
+    /// How close a word has to read for the frame to count as having seen it.
+    nonisolated static let guessTokenMatch = 0.5
+    /// A one-word name has nothing beside it to corroborate, so its single word has to be a
+    /// close read rather than a passing resemblance.
+    nonisolated static let loneTokenMatch = 0.7
+
+    /// Whether the camera actually saw what the model says it read.
+    ///
+    /// The fallback resolves the model's guess *instead of* the OCR, so the guess reaches the
+    /// catalog as the only line in its own frame and matches itself at 1.00 -- corroborated,
+    /// certain, and drawn over whatever is in shot. That is how "Bombay Sapphire" and "Sierra
+    /// Nevada Pale Ale", both of them examples out of this app's own prompt, and a "Heineken"
+    /// from nowhere, ended up on screen over a can of Focal Banger. A model asked to name a
+    /// label it cannot read will hand back the example it was shown, and no amount of prompt
+    /// wording reliably stops that -- so the answer is checked against the frame instead.
+    nonisolated static func frameSupports(guess: String, ocr: [String]) -> Bool {
+        let seen = ocr.flatMap { identifyingWords($0, minLength: 3) }
+        let wanted = identifyingWords(guess)
+        guard !seen.isEmpty, !wanted.isEmpty else { return false }
+        if wanted.count == 1 {
+            return seen.contains { similarity(wanted[0], $0) >= loneTokenMatch }
+        }
+        let grounded = wanted.filter { w in seen.contains { similarity(w, $0) >= guessTokenMatch } }
+        return grounded.count >= 2
+    }
+
     /// The single resolve path. Resolve the frame, pin an overlay to each detection's box, dedupe
     /// per product, cap — then, if nothing matched but the label carried text, fall back to the
     /// on-device model. Always *assigns* overlays, so nothing accumulates.
@@ -305,6 +374,10 @@ public final class ScanCoordinator: ObservableObject {
         defer { isInterpreting = false }
         let guesses = (try? await llm.interpretLabels(frame.map { $0.text })) ?? []
         guard !guesses.isEmpty else { return }
+        // Only the guesses the frame actually supports. Everything downstream treats a model
+        // answer as a clean read of the label, and it is the one thing here nobody checks.
+        let grounded = guesses.filter { Self.frameSupports(guess: $0, ocr: frame.map { $0.text }) }
+        guard !grounded.isEmpty else { return }
         // Staleness used to mean "the OCR changed while we were thinking". On a label the
         // camera cannot read, the OCR changes every single tick — same can, different garble —
         // so that test threw away nearly every guess it did manage to produce. What actually
@@ -312,7 +385,7 @@ public final class ScanCoordinator: ObservableObject {
         // asked; a re-read of the same unreadable can has not.
         guard !lastResolveCorroborated else { return }
         let box = frame.max { ($0.w ?? 0) * ($0.h ?? 0) < ($1.w ?? 0) * ($1.h ?? 0) } ?? frame[0]
-        let synthetic = guesses.map {
+        let synthetic = grounded.map {
             DetectedText(text: $0, kind: "text", x: box.x, y: box.y, w: box.w, h: box.h)
         }
         let req = ScanResolveRequest(detections: synthetic, venueId: venueId, includeScore: true)

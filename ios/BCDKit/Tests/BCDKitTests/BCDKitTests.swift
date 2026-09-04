@@ -630,7 +630,7 @@ private final class UncorroboratedAPI: APIClientProtocol, @unchecked Sendable {
         // The bug, exactly: the catalog answered *something*, so `candidates.isEmpty` was false
         // and the fallback never ran — for eleven frames of a can it could not read.
         let engine = MockScanEngine(scripted: [
-            [DetectedText(text: "A CHEMIST VER", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
+            [DetectedText(text: "FADY TOPPE", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)],
         ])
         let api = UncorroboratedAPI(known: ["Heady Topper"])
         let llm = StubLLM(guess: "Heady Topper")
@@ -708,11 +708,15 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         let llm = SlowLLM(guess: "Focal Banger")
         let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
         coord.start()
-        engine.push([DetectedText(text: "DRINK FRO", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        // Real garble off the can, not a placeholder: the model's answer is now checked
+        // against the frame that produced it, so a stub the guess cannot be grounded in would
+        // be rejected before this test got to the thing it is about.
+        engine.push([DetectedText(text: "THE CAN! DRINKF FOCAL BAN", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
         try await Task.sleep(nanoseconds: 100_000_000)
         await coord.resolveLatest()                    // tick 1 — starts the model
         let started = coord.interpretation
-        engine.push([DetectedText(text: "HAN! DRINK FRO MAL31", kind: "text",
+        engine.push([DetectedText(text: "HAN! DRINK FRO FOCALB 3I", kind: "text",
                                   x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
         try await Task.sleep(nanoseconds: 50_000_000)
         await coord.resolveLatest()                    // tick 2 — a different garble
@@ -788,7 +792,7 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         let coord = ScanCoordinator(engine: engine, api: api, llm: llm)
         coord.start()
 
-        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+        engine.push([DetectedText(text: "FADY TOPPE", kind: "text",
                                   x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
         try await Task.sleep(nanoseconds: 60_000_000)
         await coord.resolveLatest()
@@ -859,5 +863,41 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         await coord.resolveLatest()
 
         #expect(coord.overlays.first?.candidate.resolved.product.name == "Chemist")
+    }
+}
+
+@Suite struct ModelGuessIsCheckedAgainstTheFrame {
+    /// Real OCR off a Focal Banger can, from the scan log.
+    let focal = ["HECAN! DRINK FRO TALB", "THE CAN! DRINKF FOCAL BAN", "IL CHEMIST VERNA"]
+    /// Real OCR off a Heady Topper can, from the same log.
+    let heady = ["FADY TOPPE", "CHEMIST-VER", "CAN! DRINK FROM THE"]
+
+    @Test func aParrotedPromptExampleIsRejected() {
+        // Both of these are examples out of the app's own prompt, and both were displayed over
+        // a can of Focal Banger. A model asked to name a label it cannot read hands back the
+        // example it was shown; the guess then reached the catalog as the only line in its own
+        // frame and matched itself at 1.00, so nothing downstream could tell.
+        #expect(!ScanCoordinator.frameSupports(guess: "Bombay Sapphire", ocr: focal))
+        #expect(!ScanCoordinator.frameSupports(guess: "Sierra Nevada Pale Ale", ocr: focal))
+    }
+
+    @Test func anInventedAnswerIsRejected() {
+        #expect(!ScanCoordinator.frameSupports(guess: "Heineken", ocr: focal))
+        #expect(!ScanCoordinator.frameSupports(guess: "Matcha Omoi", ocr: heady))
+    }
+
+    @Test func theRightAnswerOffAGarbledCanSurvives() {
+        // The whole point: the model is here to read what OCR cannot, so a guess whose words
+        // the camera never spelled correctly must still pass. "FADY TOPPE" is Heady Topper.
+        #expect(ScanCoordinator.frameSupports(guess: "Heady Topper", ocr: heady))
+        #expect(ScanCoordinator.frameSupports(guess: "The Alchemist Heady Topper", ocr: heady))
+        #expect(ScanCoordinator.frameSupports(guess: "Focal Banger", ocr: focal))
+    }
+
+    @Test func theOtherBeerFromTheSameBreweryIsRejected() {
+        // The failure that started this: pointed at Focal Banger, the model answered Heady
+        // Topper. Both cans print ALCHEMIST, so agreeing on that one word is not evidence --
+        // which is why two of the name's own words have to be in the frame, not just any one.
+        #expect(!ScanCoordinator.frameSupports(guess: "The Alchemist Heady Topper", ocr: focal))
     }
 }
