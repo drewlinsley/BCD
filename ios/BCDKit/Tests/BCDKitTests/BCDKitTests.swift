@@ -742,3 +742,51 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         #expect(coord.isInterpreting == false)         // flag comes back down on the dropped path
     }
 }
+
+@Suite struct CorroboratedOverlayHoldsTheScreen {
+    @MainActor
+    @Test func anUncorroboratedTickDoesNotEvictACorroboratedOne() async throws {
+        // Reported from the camera: "the right answer popped up for a second but was behind a
+        // bunch of other incorrect things". At a 350ms tick a garbled frame lands between every
+        // good pair, and every tick with any candidate at all replaced the overlays outright —
+        // so a correct answer held the screen for one tick and was overwritten by the next
+        // fragment's guess. Measured server-side over 78 uncorroborated frames off a real can,
+        // the answer was wrong on 77.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+
+        // the next tick reads a fragment and the catalog offers "Chemist", uncorroborated
+        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper",
+                "the earned answer stays up; the guess does not take the screen from it")
+    }
+
+    @MainActor
+    @Test func anUncorroboratedTickStillShowsWhenNothingBetterIsUp() async throws {
+        // The hold must not become a refusal to ever show a guess: with nothing on screen,
+        // an uncorroborated answer is still the best we have.
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Chemist")
+    }
+}

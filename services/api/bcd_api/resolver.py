@@ -523,6 +523,7 @@ class Resolver:
         # Keeping only the top hit per line is what let chrome crowd out the beer: the real
         # product could be a line's second candidate and never be considered at all.
         hits: list[tuple[int, dict, float]] = []          # (line, record, that line's score)
+        by_upc: set[str] = set()                         # records a barcode identified outright
         resolved_lines: set[int] = set()
         to_match: list[int] = []                          # lines worth a name query
         for i, det in enumerate(req.detections):
@@ -531,6 +532,7 @@ class Resolver:
                 if rec is not None:
                     hits.append((i, rec, 1.0))
                     resolved_lines.add(i)
+                    by_upc.add(rec.get("id") or "")
                 continue
             if not _is_identity_text(det.text) or not _worth_matching(det.text):
                 # A bare number/fragment is label chrome, not a name — and so is a line made
@@ -653,6 +655,29 @@ class Resolver:
             if key not in best or _rank(entry) > _rank(best[key]):
                 best[key] = entry
         ranked = sorted(best.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
+        corroborated = any(
+            # A barcode is an identifier, not a reading of one. Nothing in the frame needs to
+            # agree with it, and a scan that succeeded must not be sent to the model to be
+            # second-guessed -- nor capped below, since two barcodes legitimately name two
+            # products.
+            c.resolved.product.id in by_upc
+            or named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
+            or (identity_lines < _MIN_FRAME_FOR_PENALTY
+                and c.match_score >= _STRONG_MATCH
+                and _accounts_for_the_line(
+                    qualified_by_id.get(c.resolved.product.id, c.resolved.product.name),
+                    req.detections[c.detection_index].text))
+            for _s, c in ranked
+        )
+        # A frame nothing corroborates has no evidence to rank a list with, so offering one
+        # implies a differentiation we cannot make. Measured over 78 such frames from a real
+        # can: the right answer was first once, deeper never, and absent 77 times -- while the
+        # frames carried two, three and five candidates each. They were not competing readings
+        # of the label, they were the same wrong guess spelled five ways ("Chemist", "Chemist
+        # 151", "Chemist Spirits", "Chemist Bierbrand"). One guess is as much as this frame has
+        # earned the right to say, and the client is about to ask the model anyway.
+        if not corroborated:
+            ranked = ranked[:1]
         return ScanResolveResponse(
             candidates=[c for _, c in ranked],
             unresolved_indices=unresolved,
@@ -660,15 +685,7 @@ class Resolver:
             # — a strong read of the only line there was. Mirrors the penalty above: a lone
             # clean "BOMBAY SAPPHIRE LONDON DRY GIN" is not weak evidence, it is the whole
             # label, and asking the model about it would spend a second to confirm a 1.00.
-            corroborated=any(
-                named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
-                or (identity_lines < _MIN_FRAME_FOR_PENALTY
-                    and c.match_score >= _STRONG_MATCH
-                    and _accounts_for_the_line(
-                        qualified_by_id.get(c.resolved.product.id, c.resolved.product.name),
-                        req.detections[c.detection_index].text))
-                for _s, c in ranked
-            ),
+            corroborated=corroborated,
         )
 
 

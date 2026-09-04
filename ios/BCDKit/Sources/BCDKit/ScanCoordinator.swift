@@ -77,6 +77,11 @@ public final class ScanCoordinator: ObservableObject {
     private let overlayHoldMs: Double = 2500
     private var overlaysSetAt: Date?
 
+    /// Whether the result currently on screen was one the frame corroborated. Tracked apart
+    /// from `lastResolveCorroborated`, which is about the last *response*; this is about what
+    /// the user is actually looking at.
+    private var displayedCorroborated = false
+
     /// Whether the overlays on screen are recent enough to keep through an empty resolve.
     private var isHoldingRecentOverlays: Bool {
         guard !overlays.isEmpty, let at = overlaysSetAt else { return false }
@@ -132,6 +137,7 @@ public final class ScanCoordinator: ObservableObject {
         // would otherwise leave it stuck up and block the fallback for the rest of the session.
         isInterpreting = false
         isScanning = false
+        displayedCorroborated = false
     }
 
     /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
@@ -184,6 +190,7 @@ public final class ScanCoordinator: ObservableObject {
             // Nothing in view: clear so a stale result doesn't linger over an empty shelf.
             overlays = []; candidates = []; currentFrame = []
             overlaysSetAt = nil
+            displayedCorroborated = false
             lastResolvedKey = nil; lastInterpretKey = nil
             return
         }
@@ -200,15 +207,26 @@ public final class ScanCoordinator: ObservableObject {
             // Branch on what the *catalog* returned, not on what survives the filter: an
             // active filter legitimately hides everything and must keep doing so, while a
             // tick that resolved nothing at all should not throw away the last good result.
-            if !resp.candidates.isEmpty {
+            // An uncorroborated tick must not evict a corroborated one. At a 350ms tick a
+            // garbled frame lands between every good pair, so a correct answer -- usually the
+            // on-device model's, which is the one that reads a stylized can -- held the screen
+            // for a single tick before the next fragment's guess overwrote it. Reported from
+            // the camera as "the right answer popped up for a second but was behind a bunch of
+            // other incorrect things". Measured server-side over 78 uncorroborated frames off
+            // a real can: the answer was wrong on 77 of them.
+            let evictsBetter = !resp.corroborated && displayedCorroborated
+                && isHoldingRecentOverlays
+            if !resp.candidates.isEmpty && !evictsBetter {
                 candidates = resp.candidates
                 currentFrame = frame
                 overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                        to: frame, cap: maxOverlays, presorted: true)
                 overlaysSetAt = Date()
-            } else if !isHoldingRecentOverlays {
+                displayedCorroborated = resp.corroborated
+            } else if resp.candidates.isEmpty && !isHoldingRecentOverlays {
                 candidates = []; currentFrame = []; overlays = []
                 overlaysSetAt = nil
+                displayedCorroborated = false
             }
             lastResolvedKey = key
             lastResolveCorroborated = resp.corroborated
@@ -282,6 +300,9 @@ public final class ScanCoordinator: ObservableObject {
         overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                to: synthetic, cap: maxOverlays, presorted: true)
         overlaysSetAt = Date()   // starts the hold window, so this one is tappable
+        // The model read the label the catalog could not, so this result gets the same
+        // protection a corroborated one does: the next garbled tick must not evict it.
+        displayedCorroborated = resp.corroborated
         lastLatencyMs = resp.latencyMs
         await telemetry?.log("scan_frame_batch", tier: .personalization, [
             "n_detections": .int(frame.count),
