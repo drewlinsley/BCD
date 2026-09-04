@@ -221,3 +221,29 @@ def test_a_nul_byte_does_not_end_the_run(pg: PostgresStore):
 
     _seed_product(pg, "p-nul", "Nul\x00Beer", {"citrus": 0.4})
     assert pg.get_gold("p-nul")["name"] == "NulBeer", "the text column rejects it too"
+
+
+def test_a_line_naming_only_a_style_reaches_only_styleless_names(pg: PostgresStore):
+    # _token_supported accepts a candidate whose name carries no identity only when the
+    # line carries none either, so for such a line every identifying-named row is scored
+    # and then discarded. On the live catalog "INDIA PALE ALE" gated 21,606 rows to keep
+    # almost none; the partial index answers the same question against 1.8% of the table.
+    _seed_product(pg, "p-generic", "India Pale Ale", {"citrus": 0.4})
+    _seed_product(pg, "p-named", "Sierra Nevada India Pale Ale", {"citrus": 0.5})
+
+    got = {r["name"] for r, _ in pg.match_products("INDIA PALE ALE", limit=10)}
+    assert got == {"India Pale Ale"}, "the identifying-named row is not a candidate at all"
+
+    # A line that does carry identity still reaches it, by the ordinary path.
+    got = {r["name"] for r, _ in pg.match_products("SIERRA NEVADA INDIA PALE ALE", limit=10)}
+    assert "Sierra Nevada India Pale Ale" in got
+
+
+def test_the_generic_flag_is_written_for_products(pg: PostgresStore):
+    _seed_product(pg, "p-a", "India Pale Ale", {"citrus": 0.4})
+    _seed_product(pg, "p-b", "Focal Banger", {"citrus": 0.5})
+    with pg._conn.cursor() as cur:
+        rows = dict(cur.execute(
+            "SELECT id, generic FROM gold WHERE id IN ('p-a','p-b')").fetchall())
+    assert rows["p-a"] is True
+    assert rows["p-b"] is False

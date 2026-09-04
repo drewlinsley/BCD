@@ -68,6 +68,12 @@ _STYLE = {
     "agricole", "canadian", "japanese", "american", "mexican", "caribbean", "highland",
     "speyside", "islay", "anejo", "añejo", "reposado", "blanco", "silver", "ecosse",
     "vsop", "cerveses", "ouzo", "sake", "soju", "london",
+    # "india" belongs with these and was missing. "India Pale Ale" is the same construction
+    # as "London Dry Gin" and "Blended Canadian Whiskey", both already here. Its absence made
+    # INDIA the one identifying token of an otherwise wholly generic line, which put a probe
+    # for it in the gate and let _token_supported admit every name containing the word -- 21,606
+    # candidates for a line that names a style, not a beer.
+    "india",
     # packaging chrome: printed on the label, identifies nothing. A Heady Topper can says
     # "DRINK FROM THE CAN", which trigram-matched a product literally named "Life drink"
     # and outranked the real beer in the HUD.
@@ -235,6 +241,19 @@ def is_generic_token(token: str) -> bool:
     product. Exposed so the resolver can ask the same question of a single OCR token that
     dedup asks of a whole name."""
     return bool(_tokens(token) and _tokens(token) <= _STYLE)
+
+
+def carries_no_identity(name: str) -> bool:
+    """Whether a name has no word that could pick this product off a shelf: nothing four
+    letters or longer that isn't a category word.
+
+    Deliberately the same question `_token_supported` asks of a candidate before it will
+    accept agreement with a label, and the same one the gate asks of an OCR line -- kept
+    here so ingest, resolution and the SQL gate cannot drift apart on what "carries no
+    identity" means. Broader than is_generic_name, which requires *every* token to be a
+    style word: "J&B" and "1664" carry no identity either, having no long word at all.
+    """
+    return not [t for t in _tokens(name) if len(t) >= 4 and not is_generic_token(t)]
 
 
 def is_generic_name(name: str) -> bool:

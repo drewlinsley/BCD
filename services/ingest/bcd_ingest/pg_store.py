@@ -37,7 +37,7 @@ from bcd_schema import SENSORY_AXES
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
-from .dedup import is_generic_token, search_name
+from .dedup import carries_no_identity, is_generic_token, search_name
 from .store import BronzeDoc  # reuse the shared bronze dataclass
 
 
@@ -141,8 +141,13 @@ class PostgresStore:
             # BCD_TRGM_LIMIT exists so this can be measured against the recognition
             # harness rather than argued about: it governs `%`, which is what the per-token
             # probes use, and at a million products those probes are what the gate costs.
+            # 0.45, raised from 0.3 once the category-line gate stopped hiding what this
+            # costs. It governs `%`, the per-token probes: at 0.3 the token FOCAL walked a
+            # posting list worth 1.4s, at 0.45 262ms, and the 12-label recognition harness
+            # answers 12/12 either way. Not pushed to 0.6 (another 80ms) -- twelve labels is
+            # too small a corpus to justify the tighter floor.
             cur.execute("SELECT set_limit(%s::real)",
-                        (float(os.environ.get("BCD_TRGM_LIMIT", "0.3")),))
+                        (float(os.environ.get("BCD_TRGM_LIMIT", "0.45")),))
             # 0.4 rather than the 0.5 default, measured: "Guinness Draught" scores 0.486
             # against a real canned label and would be excluded by a hair. Below 0.35 the
             # gate stops discriminating — "SIERRA NEVADA PALE ALE" goes from 1,204
@@ -194,6 +199,11 @@ class PostgresStore:
                     updated_at  timestamptz NOT NULL
                 );
                 ALTER TABLE gold ADD COLUMN IF NOT EXISTS search_name text;
+                -- Whether the name carries nothing that could pick this product off a
+                -- shelf: no word of four letters or more that isn't a category word.
+                -- Denormalised because the vocabulary lives in Python and the gate has to
+                -- ask the question in SQL.
+                ALTER TABLE gold ADD COLUMN IF NOT EXISTS generic boolean;
                 CREATE INDEX IF NOT EXISTS ix_silver_type ON silver(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_type ON gold(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_name_trgm
@@ -211,6 +221,13 @@ class PostgresStore:
                 CREATE INDEX IF NOT EXISTS ix_gold_qualified_trgm_product
                     ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
                     WHERE entity_type='product';
+                -- A line that names only a style can only legitimately match a product whose
+                -- name is equally styleless -- that is _token_supported's own rule -- and
+                -- those are 0.5% of the catalog. Gating such a line against the whole table
+                -- scored 21,606 candidates to keep almost none of them.
+                CREATE INDEX IF NOT EXISTS ix_gold_generic_trgm_product
+                    ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
+                    WHERE entity_type='product' AND generic;
                 -- Same gate, same reason, for `match_producers`.
                 CREATE INDEX IF NOT EXISTS ix_gold_name_trgm_producer
                     ON gold USING gin (name gin_trgm_ops)
@@ -279,6 +296,7 @@ class PostgresStore:
     def put_gold(self, gid: str, entity_type: str, record: dict[str, Any]) -> None:
         record = _no_nuls(record)
         name = record.get("name")
+        generic = carries_no_identity(name or "") if entity_type == "product" else None
         arr = _sensory_array(record) if entity_type == "product" else None
         sensory = _vec_literal(arr) if arr is not None else None
         lat = record.get("lat")
@@ -286,14 +304,16 @@ class PostgresStore:
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO gold (id, entity_type, record, name, sensory, lat, lon, updated_at)
-                VALUES (%s, %s, %s, %s, %s::vector, %s, %s, now())
+                INSERT INTO gold (id, entity_type, record, name, sensory, lat, lon,
+                                  generic, updated_at)
+                VALUES (%s, %s, %s, %s, %s::vector, %s, %s, %s, now())
                 ON CONFLICT (id) DO UPDATE SET
                     entity_type=EXCLUDED.entity_type, record=EXCLUDED.record,
                     name=EXCLUDED.name, sensory=EXCLUDED.sensory,
-                    lat=EXCLUDED.lat, lon=EXCLUDED.lon, updated_at=now()
+                    lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                    generic=EXCLUDED.generic, updated_at=now()
                 """,
-                (gid, entity_type, Jsonb(record), name, sensory, lat, lon),
+                (gid, entity_type, Jsonb(record), name, sensory, lat, lon, generic),
             )
 
     def get_gold(self, gid: str) -> dict[str, Any] | None:
@@ -421,11 +441,21 @@ class PostgresStore:
             gate += [f"{qualified} %% %s"]
             params += [t]
 
+        # No identifying token in the whole line: it names a style, not a drink. The caller
+        # will only accept such a line against a candidate whose name is equally styleless
+        # (_token_supported returns `not _identifying_tokens(query)` for those), so scoring
+        # the rest is work whose result is discarded. "INDIA PALE ALE" gated 21,606 rows
+        # against the full table and 2,578 against this one -- the same answer, and the
+        # partial index means the narrow case does not even walk the wide posting lists.
+        scope = "entity_type='product'"
+        if not toks:
+            scope += " AND generic"
+
         sql = f"""
             WITH candidate AS (
                 SELECT id, record, name, search_name
                 FROM gold
-                WHERE entity_type='product' AND ({" OR ".join(gate)})
+                WHERE {scope} AND ({" OR ".join(gate)})
             )
             SELECT record,
                    GREATEST(similarity(coalesce(name,''), %s),

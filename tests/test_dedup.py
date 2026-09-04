@@ -286,3 +286,28 @@ def test_fuzzy_suffix_matching_does_not_eat_short_identity_words():
     assert producer_core("Amber Ale") == "amber ale"
     assert producer_core("Ale House Brewing Co") == "ale house"
     assert producer_core("Sierra Nevada Brewing Company") == "sierra nevada"
+
+
+def test_india_is_a_category_word_like_the_regions_beside_it():
+    # "India Pale Ale" is the same construction as "London Dry Gin" and "Blended Canadian
+    # Whiskey", both of whose regional words were already in the vocabulary. Its absence
+    # made INDIA the one identifying token of a wholly generic line.
+    from bcd_ingest.dedup import is_generic_name, is_generic_token
+
+    assert is_generic_token("india")
+    assert is_generic_name("India Pale Ale")
+    assert not is_generic_name("Sierra Nevada India Pale Ale"), "a real brand still identifies"
+
+
+def test_carries_no_identity_is_broader_than_a_wholly_generic_name():
+    from bcd_ingest.dedup import carries_no_identity, is_generic_name
+
+    # every word is a category word
+    assert carries_no_identity("India Pale Ale")
+    # no word long enough to identify anything — is_generic_name says no, this says yes
+    assert carries_no_identity("J&B")
+    assert carries_no_identity("1664")
+    assert not is_generic_name("1664"), "no tokens at all is not the same question"
+    # a real name is neither
+    assert not carries_no_identity("Focal Banger")
+    assert not carries_no_identity("Sierra Nevada Pale Ale")
