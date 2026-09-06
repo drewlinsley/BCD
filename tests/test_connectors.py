@@ -509,3 +509,50 @@ def test_ttb_export_still_repairs_a_comma_in_the_name_when_the_serial_is_clean()
     assert row["fanciful_name"] == "COYOTA CAPON, TOBALA CAPON"
     assert row["completed_date"] == "08/24/2026"
     assert row["brand_name"] == "BRAND X"
+
+
+def test_ttb_producer_is_the_permit_holder_not_the_brand():
+    """Two beers filed on one brewery's permit are one producer.
+
+    TTB's `permittee` field is empty on all but 5 of 1,049,670 rows, so keying the producer on
+    it fell through to `brand_name` and made every beer its own brewery: 219,313 producers for
+    534,145 products, 164,222 of them sharing a name with their own product. Focal Banger and
+    Alena are both The Alchemist's, both on permit BR-VT-21045 — and the catalog had them as
+    two unrelated breweries, which is why a can could not be answered at producer level at all.
+    """
+    import tempfile
+    from bcd_ingest.store import MedallionStore
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    store = MedallionStore(root=tempfile.mkdtemp())
+    for ttb_id, brand in (("16096001000145", "FOCAL BANGER"), ("17313001000416", "ALENA")):
+        store.put_silver(f"cola:{ttb_id}", "ttb-cola-registry", "cola", f"b:{ttb_id}", {
+            "ttb_id": ttb_id, "permit_no": "BR-VT-21045", "brand_name": brand,
+            "fanciful_name": "", "class_type": "ALE", "class_type_code": "902",
+            "origin_desc": "VERMONT", "url": "https://example.invalid",
+        })
+
+    TTBColaConnector(store=store, use_fixture=False).promote()
+
+    producers = {p["producer_id"] for p in store.iter_gold("product")}
+    assert producers == {"prod:ttb-cola-registry:permit:br-vt-21045"}
+
+
+def test_ttb_permit_number_is_normalised_to_one_producer():
+    """The same permit is filed both ways — "BR CO AVE 1" and "BR-CO-AVE-1" are one brewery,
+    and there are 10+ such pairs in the registry. Collapsing them is the point, not a clash."""
+    import tempfile
+    from bcd_ingest.store import MedallionStore
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+
+    store = MedallionStore(root=tempfile.mkdtemp())
+    for ttb_id, permit in (("1", "BR CO AVE 1"), ("2", "BR-CO-AVE-1")):
+        store.put_silver(f"cola:{ttb_id}", "ttb-cola-registry", "cola", f"b:{ttb_id}", {
+            "ttb_id": ttb_id, "permit_no": permit, "brand_name": f"BEER {ttb_id}",
+            "fanciful_name": "", "class_type": "ALE", "class_type_code": "902",
+            "origin_desc": "COLORADO", "url": "https://example.invalid",
+        })
+
+    TTBColaConnector(store=store, use_fixture=False).promote()
+
+    assert len({p["producer_id"] for p in store.iter_gold("product")}) == 1

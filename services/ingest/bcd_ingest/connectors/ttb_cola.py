@@ -608,8 +608,18 @@ class TTBColaConnector(Connector):
                 quote=f"{brand_name} / {rec.get('class_type')}",
             )
 
+            # The producer is the *permit holder*, not the brand on the label. `permittee` is
+            # empty on all but 5 of 1,049,670 rows, so keying on it fell through to brand_name
+            # and made every beer its own brewery: 219,313 producers for 534,145 products, and
+            # 164,222 of them sharing a name with their own product. `permit_no` is on 98.3% of
+            # rows and groups Focal Banger with Alena, Crusher and the rest of The Alchemist's
+            # range instead of scattering them.
             permittee = rec.get("permittee") or brand_name
-            producer_id = f"prod:{self.source_id}:{_slug(permittee)}"
+            permit_no = (rec.get("permit_no") or "").strip()
+            # Normalised, because the same permit is filed both ways -- "BR CO AVE 1" and
+            # "BR-CO-AVE-1" are one brewery.
+            producer_id = (f"prod:{self.source_id}:permit:{_slug(permit_no)}" if permit_no
+                           else f"prod:{self.source_id}:{_slug(permittee)}")
             # TTB origin is a US state (or a country, for imports) in caps. Title-case it
             # so it reads on a label card and joins with the OpenBreweryDB regions already
             # in gold, which are written that way.
@@ -617,8 +627,15 @@ class TTBColaConnector(Connector):
             region = origin.title() if origin else None
             self.store.put_gold(
                 producer_id, "producer",
+                # `ttb_permit` held the per-filing ttb_id, which is not a permit at all.
+                #
+                # A row's brand_name is only worth taking as the producer's name when a
+                # fanciful_name sits beside it -- that is the one place TTB names something
+                # bigger than a single product. Otherwise the name is provisional: this permit's
+                # most-filed product standing in until `permit_producers.sql` settles it across
+                # every row on the permit, which a per-row mapper cannot see.
                 Producer(id=producer_id, name=permittee, kind="permittee",
-                         region=region, ttb_permit=rec.get("ttb_id")).model_dump(mode="json"),
+                         region=region, ttb_permit=permit_no or None).model_dump(mode="json"),
             )
             n_producer += 1
 
