@@ -163,17 +163,24 @@ public final class ScanCoordinator: ObservableObject {
     /// six-line frame ~1.6s against a 700ms tick.
     static let maxTextLines = 3
 
-    /// The lines worth resolving, largest first. Barcodes are never dropped: one is a
-    /// definitive answer and costs a keyed lookup, not a scan.
+    /// The lines worth resolving, largest first — or the barcodes alone when the frame has
+    /// any, since one is a definitive answer and costs a keyed lookup rather than a scan.
     ///
     /// The returned array is what gets sent *and* what overlays anchor to, so it must stay the
     /// single source of truth for a candidate's `detectionIndex`.
     static func prioritised(_ frame: [DetectedText]) -> [DetectedText] {
         let barcodes = frame.filter { $0.kind == "barcode" }
+        // A barcode is an exact identifier, so the text beside it cannot improve the answer and
+        // reliably makes it slower and worse. Measured on the frame the phone actually sent: the
+        // barcode alone resolves in 51ms, and the Surgeon General's warning printed next to it
+        // costs 831ms on its own and matches `Happy Accidents` off the word ACCIDENTS. Together
+        // they took 1032-3078ms on device. That same paragraph is where "...drive A CAR OR..."
+        // once matched Bacardi at 0.625.
+        if !barcodes.isEmpty { return barcodes }
         let text = frame.filter { $0.kind != "barcode" }
             .sorted(by: preferred)
             .prefix(maxTextLines)
-        return barcodes + text
+        return Array(text)
     }
 
     /// A strict total order, so the same frame always sends the same lines: box area, then

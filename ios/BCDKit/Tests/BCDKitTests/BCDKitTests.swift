@@ -609,7 +609,9 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
                                   x: 0.5, y: 0.9, w: 0.01, h: 0.01, confidence: 1.0))
         let sent = ScanCoordinator.prioritised(frame)
         #expect(sent.filter { $0.kind == "barcode" }.count == 1)
-        #expect(sent.filter { $0.kind == "text" }.count == ScanCoordinator.maxTextLines)
+        // ...and once there is one, the text goes: an exact identifier cannot be improved on,
+        // and scanning the label beside it only costs time and offers wrong answers.
+        #expect(sent.filter { $0.kind == "text" }.isEmpty)
     }
 
     @MainActor
@@ -965,5 +967,31 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         try await Task.sleep(nanoseconds: 60_000_000)
         await coord.resolveLatest()
         #expect(coord.overlays.count == 1, "the one exact answer the app can give stays tappable")
+    }
+}
+
+@Suite struct ABarcodeFrameIsResolvedOnTheBarcodeAlone {
+    @MainActor
+    @Test func theFinePrintBesideACodeIsNotSent() {
+        // The real frame from the scan log. The warning paragraph cannot identify a product --
+        // it is the same text that once matched Bacardi off "...drive A CAR OR..." -- and on
+        // device it turned a 51ms answer into 1032-3078ms.
+        let frame = [
+            DetectedText(text: "0793573117267", kind: "barcode", x: 0.3, y: 0.6, w: 0.3, h: 0.08),
+            DetectedText(text: "THIS CAN!\nSTETHE SURGEON\nMA OF THE RISK OF ACCIDENTS",
+                         kind: "text", x: 0.1, y: 0.2, w: 0.8, h: 0.3),
+        ]
+        let sent = ScanCoordinator.prioritised(frame)
+        #expect(sent.count == 1)
+        #expect(sent.first?.kind == "barcode")
+    }
+
+    @MainActor
+    @Test func aFrameWithNoBarcodeStillSendsItsText() {
+        let frame = (1...5).map {
+            DetectedText(text: "LINE \($0)", kind: "text",
+                         x: 0.1, y: 0.1 * Double($0), w: 0.5, h: 0.08)
+        }
+        #expect(ScanCoordinator.prioritised(frame).count == ScanCoordinator.maxTextLines)
     }
 }

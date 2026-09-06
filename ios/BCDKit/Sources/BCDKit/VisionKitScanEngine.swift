@@ -29,7 +29,13 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
     @MainActor public func makeScanner() -> DataScannerViewController {
         let scanner = DataScannerViewController(
             recognizedDataTypes: [.text(), .barcode()],
-            qualityLevel: .fast,
+            // `.balanced`, not `.fast`. Reported from the camera as "the barcode is a bit hard
+            // to read", and the log agreed: one clean decode in roughly two minutes, while
+            // VisionKit repeatedly read the digits *printed under* the code as text -- "11726",
+            // "3573 11726" -- instead of decoding the symbology. `.fast` trades exactly that
+            // accuracy away. The budget is there: a barcode frame now resolves server-side in
+            // ~50ms against a 350ms tick.
+            qualityLevel: .balanced,
             recognizesMultipleItems: true,
             isHighFrameRateTrackingEnabled: true,
             isHighlightingEnabled: false // we draw our own HUD overlays
