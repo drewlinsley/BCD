@@ -55,7 +55,9 @@ struct ScanView: View {
 
     // A one-line status: on-device interpretation, an active filter, or the live scan state.
     @ViewBuilder private var statusPill: some View {
-        if model.isInterpreting {
+        if model.isLookingAtTheLabel {
+            pill("Looking at the label…", system: "camera.viewfinder")
+        } else if model.isInterpreting {
             pill("Reading with Apple Intelligence…", system: "sparkles")
         } else if let f = model.filterText {
             let n = model.overlays.count
@@ -156,6 +158,8 @@ final class ScanViewModel: ObservableObject {
     @Published var lastLatencyMs: Double?
     @Published var isResolving = false
     @Published var isInterpreting = false
+    /// A photo of the label is with the server.
+    @Published var isLookingAtTheLabel = false
     /// The active natural-language filter (nil = none), mirrored for the status pill.
     @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
@@ -171,7 +175,7 @@ final class ScanViewModel: ObservableObject {
         let engine = env.makeScanEngine()
         self.engine = engine
         let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry,
-                                    llm: env.llm)
+                                    llm: env.llm, sendsFrames: env.consent.labelPhotos)
         self.coordinator = coord
         // Mirror the coordinator's box-anchored overlays straight into the view.
         coord.$overlays
@@ -183,12 +187,18 @@ final class ScanViewModel: ObservableObject {
         coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
         coord.$isResolving.assign(to: &$isResolving)
         coord.$isInterpreting.assign(to: &$isInterpreting)
+        coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
         coord.$filterText.assign(to: &$filterText)
     }
 
     /// Fixed-rate live mode: the viewfinder re-resolves the latest frame on a cadence and swaps
     /// overlays in place — no tapping, no accumulation. This is the entire scan interaction.
-    func startLive() { coordinator?.startLive() }
+    func startLive() {
+        // Re-read the consent every time the tab comes back: the switch lives in Settings and
+        // the coordinator is built once.
+        if let env { coordinator?.sendsFrames = env.consent.labelPhotos }
+        coordinator?.startLive()
+    }
     func stop() { coordinator?.stop() }
 
     /// Chat-bar filter: parse the ask once and apply it to every live tick.

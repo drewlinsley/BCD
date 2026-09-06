@@ -23,6 +23,13 @@ struct ProfileView: View {
                     Toggle("Analytics", isOn: $consent.analytics)
                     Toggle("Personalization", isOn: $consent.personalization)
                     Toggle("Data sharing (ads & insights)", isOn: $consent.dataSharing)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("Identify labels from a photo", isOn: $consent.labelPhotos)
+                        Text("Stylized cans defeat text recognition. With this on, a photo of "
+                             + "the label is sent for identification when reading it fails.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Text("Personalization is the tier a reaction needs: with it off, your "
                          + "verdicts stay on this phone and no profile is built.")
                         .font(.caption).foregroundStyle(Brand.textMuted)

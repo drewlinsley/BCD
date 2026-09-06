@@ -995,3 +995,202 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         #expect(ScanCoordinator.prioritised(frame).count == ScanCoordinator.maxTextLines)
     }
 }
+
+// MARK: - naming a label from the picture
+
+/// A camera that can be re-pointed between ticks and can hand over a still.
+private final class PhotoCamera: ScanEngine, @unchecked Sendable {
+    let frames: AsyncStream<[DetectedText]>
+    private let cont: AsyncStream<[DetectedText]>.Continuation
+    private let still: Data?
+    var photosTaken = 0
+
+    init(still: Data? = Data([0xFF, 0xD8, 0xFF, 0xE0])) {
+        var c: AsyncStream<[DetectedText]>.Continuation!
+        frames = AsyncStream { c = $0 }
+        cont = c
+        self.still = still
+    }
+
+    func point(at frame: [DetectedText]) { cont.yield(frame) }
+    func start() async {}
+    func stop() { cont.finish() }
+    func captureFrame() async -> Data? { photosTaken += 1; return still }
+}
+
+/// The garbled-can case end to end: text never resolves to anything the frame agrees on, and
+/// the picture names the beer. Records what the picture path was actually sent.
+private final class VisionAPI: APIClientProtocol, @unchecked Sendable {
+    let sightings: [String]
+    let placeable: Bool
+    var visionCalls = 0
+    var lastVisionRequest: ScanVisionRequest?
+
+    init(sightings: [String] = ["The Alchemist Heady Topper"], placeable: Bool = true) {
+        self.sightings = sightings
+        self.placeable = placeable
+    }
+
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        ScanResolveResponse(candidates: [], unresolvedIndices: [0], latencyMs: 0.5,
+                            corroborated: false)
+    }
+
+    func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
+        visionCalls += 1
+        lastVisionRequest = req
+        let frame = sightings.map {
+            DetectedText(text: $0, kind: "text", x: 0.2, y: 0.3, w: 0.4, h: 0.2)
+        }
+        guard placeable else {
+            // The model read the can; the catalog does not have it. Not the same as reading
+            // nothing, and the two look identical from the candidates alone.
+            return ScanVisionResponse(candidates: [], unresolvedIndices: Array(sightings.indices),
+                                      latencyMs: 900, corroborated: false,
+                                      sightings: sightings, detections: frame,
+                                      provider: "stub")
+        }
+        let cands = sightings.enumerated().map { i, name in
+            makeCandidate(id: name, name: name, abv: 8, personal: 0.8, index: i)
+        }
+        return ScanVisionResponse(candidates: cands, unresolvedIndices: [], latencyMs: 900,
+                                  corroborated: true, sightings: sightings,
+                                  detections: frame, provider: "stub")
+    }
+
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+@MainActor
+private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int) async throws {
+    // A label the camera cannot read never OCRs the same way twice — which is exactly why the
+    // resolve path's held-still shortcut does not fire here, and why the counter can climb.
+    for i in 0..<ticks {
+        camera.point(at: [DetectedText(text: "FADY TOPPE \(i)", kind: "text",
+                                       x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await coord.resolveLatest()
+    }
+    await coord.visionTask?.value
+}
+
+@Suite struct NamingALabelFromThePicture {
+    @MainActor
+    @Test func aLabelNothingCanReadEscalatesToThePicture() async throws {
+        // The failure this path exists for: OCR reads a drawing as "FADY TOPPE", so the
+        // information is gone before any query runs and no threshold recovers it.
+        let camera = PhotoCamera()
+        let api = VisionAPI()
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks)
+        #expect(api.visionCalls == 1)
+        #expect(camera.photosTaken == 1)
+        #expect(coord.overlays.first?.candidate.resolved.product.name
+                == "The Alchemist Heady Topper")
+        // Anchored to the frame the *server* built — the client never had those boxes.
+        #expect(coord.overlays.first?.x == 0.4)
+    }
+
+    @MainActor
+    @Test func onePassingTickIsNotEnoughToSpendAPicture() async throws {
+        // A round-trip with a real cost must not fire while OCR is still settling on a can.
+        let camera = PhotoCamera()
+        let api = VisionAPI()
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks - 1)
+        #expect(api.visionCalls == 0)
+        #expect(camera.photosTaken == 0)
+    }
+
+    @MainActor
+    @Test func withoutConsentThePictureNeverLeavesTheDevice() async throws {
+        // `sendsFrames` is the whole switch. Text still goes to the server; the frame does not.
+        let camera = PhotoCamera()
+        let api = VisionAPI()
+        let coord = ScanCoordinator(engine: camera, api: api)      // default: off
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks + 4)
+        #expect(api.visionCalls == 0)
+        #expect(camera.photosTaken == 0)
+    }
+
+    @MainActor
+    @Test func aCameraThatCannotTakeAPictureSimplyDoesNotEscalate() async throws {
+        let camera = PhotoCamera(still: nil)
+        let api = VisionAPI()
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks)
+        #expect(camera.photosTaken == 1)       // asked
+        #expect(api.visionCalls == 0)          // got nothing, sent nothing
+    }
+
+    @MainActor
+    @Test func theSecondPictureWaitsForTheCooldown() async throws {
+        // At a 350ms tick a shelf would otherwise fire this continuously.
+        let camera = PhotoCamera()
+        let api = VisionAPI(placeable: false)   // never answers, so the counter keeps climbing
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks * 3)
+        #expect(api.visionCalls == 1)
+    }
+
+    @MainActor
+    @Test func aSightingTheCatalogCannotPlaceIsReportedNotDrawn() async throws {
+        // "The model read nothing" and "the catalog has nothing" are different problems.
+        let camera = PhotoCamera()
+        let api = VisionAPI(sightings: ["Pliny The Elder"], placeable: false)
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks)
+        #expect(coord.overlays.isEmpty)
+        #expect(coord.lastSightings == ["Pliny The Elder"])
+    }
+
+    @MainActor
+    @Test func theCamerasOwnReadingRidesAlongToCorroborate() async throws {
+        let camera = PhotoCamera()
+        let api = VisionAPI()
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        try await garble(camera, coord, ticks: ScanCoordinator.visionAfterTicks)
+        let sent = try #require(api.lastVisionRequest)
+        #expect(!sent.imageB64.isEmpty)
+        #expect(sent.detections.contains { $0.text.hasPrefix("FADY TOPPE") })
+        #expect(sent.detections.count <= ScanCoordinator.maxVisionOCRLines)
+    }
+
+    @MainActor
+    @Test func aFrameTheCatalogRecognisesResetsTheCount() async throws {
+        // Only an unread label escalates. One recognised tick means the text path is working
+        // and the picture is not needed.
+        let camera = PhotoCamera()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: camera, api: api, sendsFrames: true)
+        coord.start()
+        for i in 0..<(ScanCoordinator.visionAfterTicks * 2) {
+            let text = i % 3 == 0 ? "Heady Topper" : "FADY TOPPE \(i)"
+            camera.point(at: [DetectedText(text: text, kind: "text",
+                                           x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+            try await Task.sleep(nanoseconds: 20_000_000)
+            await coord.resolveLatest()
+        }
+        await coord.visionTask?.value
+        #expect(camera.photosTaken == 0)
+    }
+
+    @Test func answersWithoutABoxSpreadInsteadOfStacking() {
+        // A vision model volunteers a box or it doesn't. Without a layout every boxless answer
+        // lands on (0,0), stacked in the corner.
+        let alone = ScanCoordinator.fallbackAnchor(index: 0, of: 1)
+        #expect(alone.x == 0.5 && alone.y == 0.5)
+        let ys = (0..<3).map { ScanCoordinator.fallbackAnchor(index: $0, of: 3).y }
+        #expect(ys == ys.sorted())
+        #expect(Set(ys).count == 3)
+        #expect(ys.allSatisfy { $0 > 0 && $0 < 1 })
+    }
+}

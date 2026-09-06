@@ -11,6 +11,16 @@ public protocol ScanEngine: AnyObject, Sendable {
     var frames: AsyncStream<[DetectedText]> { get }
     func start() async
     func stop()
+
+    /// A still of what the camera is seeing right now, JPEG-encoded, or nil when this engine
+    /// cannot produce one. The scan path only asks for it when text alone has failed, so an
+    /// engine that returns nil simply never escalates.
+    func captureFrame() async -> Data?
+}
+
+public extension ScanEngine {
+    // The mock and any future text-only engine inherit this: no picture, no escalation.
+    func captureFrame() async -> Data? { nil }
 }
 
 /// Deterministic engine for tests and previews. Emits a scripted sequence of frames.

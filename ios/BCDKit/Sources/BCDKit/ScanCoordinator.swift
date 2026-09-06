@@ -36,6 +36,13 @@ public final class ScanCoordinator: ObservableObject {
     @Published public private(set) var isResolving = false
     /// The on-device model is naming a stylized label (the automatic fallback).
     @Published public private(set) var isInterpreting = false
+    /// A picture of the label is with the server (the escalation past text).
+    @Published public private(set) var isLookingAtTheLabel = false
+    /// What the vision model last said it could read, whether or not the catalog had it.
+    /// Surfaced so "nothing was readable" and "nothing is in the catalog" stay distinguishable
+    /// on screen — from the outside they look identical, and they are the two halves of every
+    /// failure this scan path has had.
+    @Published public private(set) var lastSightings: [String] = []
     /// Candidates behind the current overlays (pre-filter), so a filter change can re-pin without
     /// another round-trip.
     @Published public private(set) var candidates: [ScoredCandidate] = []
@@ -61,12 +68,44 @@ public final class ScanCoordinator: ObservableObject {
     private var lastInterpretKey: String?
     /// Parsed chat-bar intent, applied to every tick's candidates.
     private var filterIntent: QueryIntent?
+    /// The picture path, if one is in flight. Public for the same reason `interpretation` is:
+    /// a test can await it, the live loop deliberately does not.
+    public private(set) var visionTask: Task<Void, Never>?
+    /// Consecutive ticks the frame has gone unrecognised. Not "unresolved" — a garbled can
+    /// returns a confident wrong row most ticks, so counting empty responses would never fire.
+    private var unreadTicks = 0
+    private var lastVisionAt: Date?
+    /// Whether the camera frame itself may leave the device. Settable, not `let`: the consent
+    /// it mirrors lives in Settings, and this object outlives a trip there and back.
+    public var sendsFrames: Bool
     /// Whether the last resolve found something the frame agreed on. An in-flight model guess
     /// is dropped only if this became true while it was thinking.
     private var lastResolveCorroborated = false
 
     /// Cap overlays so a busy shelf stays legible (the server caps too).
     private let maxOverlays = 8
+
+    /// How long a frame has to go unrecognised before the picture itself is worth sending.
+    ///
+    /// Six ticks is about two seconds of camera held on a label that neither the catalog nor
+    /// the on-device model can read. Below that the text path is still settling — OCR takes a
+    /// second to stabilise on a can — and firing early spends a round-trip on a frame that was
+    /// about to answer anyway.
+    static let visionAfterTicks = 6
+
+    /// Least time between two pictures. This one call costs real money and about a second,
+    /// against a 350ms tick that would otherwise fire it continuously at a shelf.
+    private let visionCooldownMs: Double = 5000
+
+    /// How much of the camera's own reading rides along with the picture. It is not matched
+    /// against anything — it is there so the scan log records what the camera saw at the moment
+    /// the picture was taken, which is how every diagnosis on this path has actually happened.
+    static let maxVisionOCRLines = 6
+
+    private var visionCooldownElapsed: Bool {
+        guard let at = lastVisionAt else { return true }
+        return Date().timeIntervalSince(at) * 1000 >= visionCooldownMs
+    }
 
     /// How long an earned result stays up when later ticks resolve nothing. Live OCR jitters
     /// constantly — glare, a hand shake, a stylized label the catalog can't match — and every
@@ -95,12 +134,16 @@ public final class ScanCoordinator: ObservableObject {
         return Date().timeIntervalSince(at) * 1000 < overlayHoldMs
     }
 
+    /// `sendsFrames` is the one switch in the scan path that decides whether a picture of
+    /// what the camera sees leaves the device. Off unless the app passes the user's consent,
+    /// so the default build sends text and nothing else.
     public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil,
-                llm: LLMProvider? = nil) {
+                llm: LLMProvider? = nil, sendsFrames: Bool = false) {
         self.engine = engine
         self.api = api
         self.telemetry = telemetry
         self.llm = llm
+        self.sendsFrames = sendsFrames
     }
 
     /// Start the live viewfinder buffering frames. Nothing hits the network until a live tick —
@@ -140,6 +183,9 @@ public final class ScanCoordinator: ObservableObject {
         task?.cancel(); task = nil
         liveTask?.cancel(); liveTask = nil
         interpretation?.cancel(); interpretation = nil
+        visionTask?.cancel(); visionTask = nil
+        isLookingAtTheLabel = false
+        unreadTicks = 0
         // The flag is raised before the task starts, so a task cancelled before its body ran
         // would otherwise leave it stuck up and block the fallback for the rest of the session.
         isInterpreting = false
@@ -299,6 +345,7 @@ public final class ScanCoordinator: ObservableObject {
                 displayedCorroborated = false
             }
             lastResolvedKey = nil; lastInterpretKey = nil
+            unreadTicks = 0          // nothing in view is not a label we failed to read
             return
         }
         // Skip the round-trip when the OCR is unchanged since the last resolve (camera held still).
@@ -352,6 +399,7 @@ public final class ScanCoordinator: ObservableObject {
             }
             lastResolvedKey = key
             lastResolveCorroborated = resp.corroborated
+            unreadTicks = resp.corroborated ? 0 : unreadTicks + 1
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
                 "n_detections": .int(frame.count),
                 "n_resolved": .int(resp.candidates.count),
@@ -389,6 +437,22 @@ public final class ScanCoordinator: ObservableObject {
                     // `full`, not `frame`: the model is priced per call, not per line, and
                     // the chrome the catalog cannot use is context that helps it guess.
                     await self?.interpret(frame: full, using: llm, key: key, venueId: venueId)
+                }
+            }
+            // Escalation, after everything free has failed. The on-device model reads the same
+            // garbled fragments the catalog does — text-only is the whole of what Apple's
+            // framework offers — so on a stylized wordmark it is not a second opinion, it is
+            // the same opinion. Six ticks of that is the signal that the information the
+            // camera needs was lost before any of this ran, and only the picture still has it.
+            if sendsFrames, !resp.corroborated, !isLookingAtTheLabel,
+               unreadTicks >= Self.visionAfterTicks, visionCooldownElapsed {
+                unreadTicks = 0
+                lastVisionAt = Date()
+                // Raised here, not in the task body, for the same reason `isInterpreting` is:
+                // the next tick can run before the task starts.
+                isLookingAtTheLabel = true
+                visionTask = Task { [weak self] in
+                    await self?.lookAtTheLabel(ocr: full, venueId: venueId)
                 }
             }
         } catch {
@@ -443,6 +507,50 @@ public final class ScanCoordinator: ObservableObject {
             "llm_guesses": .stringList(guesses),
             "ocr_strings": .stringList(frame.map { $0.text }),
         ])
+    }
+
+    /// Last resort: send the frame itself.
+    ///
+    /// Everything upstream works on what OCR made of the label, and on a craft can that is a
+    /// drawing rather than type — "FADY TOPPE", "ROY TOPP", once Cyrillic. The information is
+    /// gone before the first query runs, so no threshold, prompt or catalog change recovers
+    /// it. The picture still has it.
+    ///
+    /// What comes back is only a *name*. It is resolved against the same catalog by the same
+    /// server, and the server drops any row that does not account for what the model read, so
+    /// a model that invents a beer produces no answer rather than a confident wrong one —
+    /// the failure that put `Vermont`, `Brink` and `Chemist` on screen over a Heady Topper.
+    private func lookAtTheLabel(ocr: [DetectedText], venueId: String?) async {
+        defer { isLookingAtTheLabel = false }
+        guard let jpeg = await engine.captureFrame() else { return }
+        let req = ScanVisionRequest(
+            imageB64: jpeg.base64EncodedString(),
+            detections: Array(Self.prioritised(ocr).prefix(Self.maxVisionOCRLines)),
+            venueId: venueId)
+        guard let resp = try? await api.resolveVision(req) else { return }
+        lastSightings = resp.sightings
+        lastLatencyMs = resp.latencyMs
+        await telemetry?.log("scan_frame_batch", tier: .personalization, [
+            "n_detections": .int(ocr.count),
+            "n_resolved": .int(resp.candidates.count),
+            "server_latency_ms": .double(resp.latencyMs ?? 0),
+            "mode": .string("vision"),
+            "llm_guesses": .stringList(resp.sightings),
+            "ocr_strings": .stringList(ocr.map { $0.text }),
+        ])
+        guard resp.corroborated, !resp.candidates.isEmpty else { return }
+        // The catalog recognised something on its own while the picture was in the air — a
+        // barcode, most likely, which is the strongest evidence this app has. Do not overwrite
+        // it with a reading.
+        guard !lastResolveCorroborated else { return }
+        candidates = resp.candidates
+        // The frame these anchor to is the server's, built from the model's own boxes; the
+        // client never had it.
+        currentFrame = resp.detections
+        overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+                               to: resp.detections, cap: maxOverlays, presorted: true)
+        overlaysSetAt = Date()          // starts the hold window, so this one is tappable
+        displayedCorroborated = true
     }
 
     // MARK: - persistent natural-language filter (the chat bar)
@@ -517,11 +625,13 @@ public final class ScanCoordinator: ObservableObject {
         }
         var out: [ResolvedOverlay] = []
         var seen = Set<String>()
+        var boxless: [Int] = []          // positions in `out` still needing somewhere to go
         for c in ordered {
             let pid = c.resolved.product.id
             guard !seen.contains(pid),
                   c.detectionIndex >= 0, c.detectionIndex < frame.count else { continue }
             let d = frame[c.detectionIndex]
+            if d.x == nil && d.w == nil { boxless.append(out.count) }
             out.append(ResolvedOverlay(
                 id: pid, candidate: c,
                 x: (d.x ?? 0) + (d.w ?? 0) / 2,
@@ -529,6 +639,22 @@ public final class ScanCoordinator: ObservableObject {
             seen.insert(pid)
             if out.count >= cap { break }
         }
+        // Laid out once the count is known, so they spread rather than stack.
+        for (n, i) in boxless.enumerated() {
+            let p = fallbackAnchor(index: n, of: boxless.count)
+            out[i] = ResolvedOverlay(id: out[i].id, candidate: out[i].candidate, x: p.x, y: p.y)
+        }
         return out
+    }
+
+    /// Where to draw an answer whose detection carried no box.
+    ///
+    /// Every text detection has one; a vision sighting only has one if the model volunteered
+    /// it, and a box it guesses badly is worse than none — it pins the name to the wrong can.
+    /// Without this the boxless ones all land on (0,0), stacked on each other in the corner.
+    nonisolated static func fallbackAnchor(index: Int, of count: Int) -> (x: Double, y: Double) {
+        guard count > 1 else { return (0.5, 0.5) }
+        let span = 0.6                                   // the middle 60% of the frame
+        return (0.5, (0.5 - span / 2) + span * Double(index) / Double(count - 1))
     }
 }

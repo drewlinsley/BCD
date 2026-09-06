@@ -57,6 +57,39 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
         Task { @MainActor in self.scanner?.stopScanning() }
     }
 
+    /// The frame itself, for the labels OCR cannot read.
+    ///
+    /// A craft can's wordmark is a drawing, not type, and by the time it reaches this file it
+    /// is already "FADY TOPPE" — the information is gone before any matching starts. Sending
+    /// the picture is the only way to get it back. `capturePhoto()` reuses the scanner's own
+    /// session, so this costs no second camera and no interruption to the live viewfinder.
+    ///
+    /// Downscaled hard on the way out. A 48MP still is nothing but upload latency: a label
+    /// legible at 1024px is legible to the model, and this runs on someone's cellular
+    /// connection in a shop.
+    public func captureFrame() async -> Data? {
+        guard let scanner else { return nil }
+        guard let photo = try? await scanner.capturePhoto() else { return nil }
+        return await MainActor.run { Self.jpeg(photo) }
+    }
+
+    static let maxCaptureEdge: CGFloat = 1024
+    static let captureQuality: CGFloat = 0.6
+
+    @MainActor static func jpeg(_ image: UIImage) -> Data? {
+        let longest = max(image.size.width, image.size.height)
+        guard longest > 0 else { return nil }
+        let scale = min(1, maxCaptureEdge / longest)
+        guard scale < 1 else { return image.jpegData(compressionQuality: captureQuality) }
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1                      // points, not device pixels — this is already 3x
+        let shrunk = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return shrunk.jpegData(compressionQuality: captureQuality)
+    }
+
     private func emit(_ items: [RecognizedItem], in bounds: CGSize) {
         let detections: [DetectedText] = items.compactMap { item in
             switch item {

@@ -2,6 +2,7 @@ import Foundation
 
 public protocol APIClientProtocol: Sendable {
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse
+    func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
     func submitFeedback(_ req: FeedbackRequest, userId: String) async throws -> FeedbackResponse
@@ -13,6 +14,13 @@ extension APIClientProtocol {
     /// pretending a verdict was recorded.
     public func submitFeedback(_ req: FeedbackRequest,
                                userId: String) async throws -> FeedbackResponse {
+        throw APIError.http(501)
+    }
+
+    /// Same reasoning, and one more: the vision path is an addition to the scan, so a stub
+    /// that never exercises it reports the route as unimplemented rather than pretending the
+    /// camera frame went nowhere useful.
+    public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
         throw APIError.http(501)
     }
 }
@@ -49,6 +57,13 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// invisible to the number on screen.
     public func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
         try await post("/v1/scan/resolve", body: req,
+                       query: [URLQueryItem(name: "user_id", value: installId)])
+    }
+
+    /// A camera frame for the labels OCR cannot read. Same `user_id` as the text path:
+    /// what comes back is scored for the same person.
+    public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
+        try await post("/v1/scan/vision", body: req,
                        query: [URLQueryItem(name: "user_id", value: installId)])
     }
 
