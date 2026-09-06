@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from bcd_ingest.dedup import is_generic_token, search_name
+from bcd_ingest.dedup import _PRODUCER_SUFFIX, is_generic_token, search_name
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     SENSORY_AXES,
@@ -127,6 +127,7 @@ def _accounts_for_the_line(name: str, line: str, *, threshold: float | None = No
     say so rather than certify itself.
     """
     return _trigram_sim(_flatten(name), _flatten(line)) >= (threshold or _ACCOUNTS_FOR_LINE)
+
 
 
 # Proving a product off one line alone is a stronger claim than "this row accounts for what
@@ -304,6 +305,59 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
 
 
 # Two lines that read the same printed phrase are one piece of evidence, not two.
+# Words a label prints that identify nothing: what is in the glass, what it is packaged in,
+# and the suffixes companies carry. `_PRODUCER_SUFFIX` comes from dedup rather than a second
+# list here, so "what counts as a company suffix" has one answer across ingest and resolve.
+_SIGHTING_NOISE = (
+    _PACKAGING
+    | {w for words in _CATEGORY_WORDS.values() for w in words}
+    | _PRODUCER_SUFFIX
+    | {"the", "and", "with", "for", "from", "our"}
+    # Strength and process qualifiers. These *can* distinguish two beers -- "Double Trouble"
+    # is not "Trouble" -- so treating them as noise looks unsafe until you see where the veto
+    # sits: the resolver has already picked the best row for this reading, and if the catalog
+    # holds `Double Trouble` that is the row it returns. All this set decides is whether to
+    # throw away `Trouble` when the catalog has nothing more specific, and a near row beats a
+    # blank screen. The camera has spent this whole scan path returning nothing.
+    | {"double", "imperial", "session", "unfiltered", "hazy", "juicy", "hopped",
+       "barrel", "aged", "batch", "craft", "style", "premium", "classic", "natural"}
+)
+# Two letters is "oz", "by", "no" — a unit or a joiner, never the part of a label that
+# distinguishes one beer from another.
+_MIN_SIGHTING_TOKEN = 3
+
+
+def _accounts_for_sighting(product: str, producer: str, sighting: str) -> bool:
+    """Whether a catalog row is what was read off the label, or only part of it.
+
+    `_accounts_for_the_line` cannot answer this, and the numbers say why. It measures the row
+    against the whole reading — right for OCR, where the reading is the garbled thing and the
+    row is the clean one. A model reading the picture inverts that: it returns the label the
+    way the label is printed, maker and drink together, so `Heady Topper` scores 0.43 against
+    "The Alchemist Heady Topper" while the fragment `Banger` scores 0.43 against "Focal
+    Banger". One is the right answer and one is a different beer, and similarity cannot tell
+    them apart at any threshold.
+
+    Once the reading is clean the question is no longer how garbled it is but whether any of
+    it is left unexplained. So: every identifying word read has to be accounted for by the
+    product's name, by its producer's, or by being the sort of word every label prints.
+    Nothing is left over from "The Alchemist Heady Topper". "Focal" is left over from "Focal
+    Banger" against a row named `Banger` — and that leftover is the whole point.
+    """
+    in_name = set(_tokens(product))
+    known = in_name | set(_tokens(producer))
+    read = [t for t in _tokens(sighting) if len(t) >= _MIN_SIGHTING_TOKEN]
+    # A reading made only of what every label prints names nothing, so nothing can account
+    # for it. Without this a sighting of "IPA" was answered by a junk catalog row that is
+    # literally named `Ipa Ipa` -- it shares the word, so every other check passed.
+    if not [t for t in read if t not in _SIGHTING_NOISE]:
+        return False
+    # The row has to answer the drink, not just the brewery: without this a sighting of
+    # "Sierra Nevada" would be accounted for by every beer they make.
+    if not any(t in in_name for t in read):
+        return False
+    return not [t for t in read if t not in known and t not in _SIGHTING_NOISE]
+
 _LINE_REREAD = 0.7
 
 
@@ -558,6 +612,40 @@ class Resolver:
         sim = _cosine(sensory.to_array(), profile.sensory_ideal.to_array())
         score = max(0.0, min(1.0, 0.5 + 0.5 * sim))
         return (round(score, 3), _match_reason(score, sensory, profile.sensory_ideal), cold_start)
+
+    # How many catalog rows one clean reading is allowed to consider. The first is usually
+    # right; the rest matter when a shorter row wins by saying less — `word_similarity` is 1.0
+    # for ANY name wholly inside the query, so a product literally named `Lawson's` scores a
+    # perfect 1.00 against "Lawson's Sip of Sunshine", as `Tree House` does against Julius and
+    # `Green` against Green City. Depth is what separates those: measured against the live
+    # catalog, "Lawson's Sip of Sunshine" puts eleven fragments and near-misses -- `Lawson's`,
+    # `Sunshine`, `Sunshiner`, `Laws`, `Sip Of Sunshine IPA` -- above the row it actually names,
+    # which arrives twelfth. The rows are already fetched by one indexed query, so looking at
+    # twenty-four of them costs a comparison each, not a lookup each.
+    _READING_DEPTH = 24
+
+    def resolve_reading(self, reading: str, *, index: int = 0,
+                        profile: TasteProfile | None = None) -> ScoredCandidate | None:
+        """The catalog row a *clean* reading of a label names, or None.
+
+        Separate from `resolve` because the input is different in kind, not merely cleaner.
+        `resolve` is built for OCR — fragmentary, garbled, several lines of one object — where
+        containment scoring and one winner per line are the right instruments. A name read off
+        the picture is a query, and the question is which row it is a reading *of*: the row has
+        to account for what was read, not merely appear inside it.
+        """
+        for rec, raw in self.store.match_products(reading, limit=self._READING_DEPTH):
+            resolved = self._hydrate(rec)
+            if resolved is None:
+                continue
+            if not _accounts_for_sighting(resolved.product.name,
+                                          resolved.producer.name, reading):
+                continue
+            personal, why, cold = self.score(resolved.product, profile)
+            return ScoredCandidate(detection_index=index, resolved=resolved,
+                                   match_score=round(min(1.0, float(raw)), 3),
+                                   personal_score=personal, reason=why, cold_start=cold)
+        return None
 
     def resolve(self, req: ScanResolveRequest,
                 profile: TasteProfile | None = None) -> ScanResolveResponse:

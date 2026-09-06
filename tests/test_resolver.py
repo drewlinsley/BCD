@@ -5,7 +5,13 @@ from __future__ import annotations
 import tempfile
 
 import pytest
-from bcd_api.resolver import Resolver, _identity_key, _token_supported, _upc_variants
+from bcd_api.resolver import (
+    Resolver,
+    _accounts_for_sighting,
+    _identity_key,
+    _token_supported,
+    _upc_variants,
+)
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
     SKU,
@@ -810,3 +816,51 @@ def test_a_four_pack_does_not_corroborate_itself():
     resp = Resolver(_FrameStore(frame)).resolve(req)
 
     assert not resp.corroborated, "three readings of one slogan are one piece of evidence"
+
+
+# --- naming a label from the picture ------------------------------------------------
+
+def test_a_clean_reading_of_the_whole_label_is_accounted_for():
+    # A model reading the picture returns the label the way the label is printed: maker and
+    # drink together. Similarity reads that as a poor match (0.43) -- which is why this rule
+    # asks a different question.
+    assert _accounts_for_sighting("Heady Topper", "The Alchemist", "The Alchemist Heady Topper")
+    assert _accounts_for_sighting("Heady Topper", "The Alchemist", "Heady Topper")
+    assert _accounts_for_sighting("Pale Ale", "Sierra Nevada", "Sierra Nevada Brewing Co. Pale Ale")
+
+
+def test_a_row_that_is_a_piece_of_the_name_is_a_different_beer():
+    # `Banger` scores the same 0.43 against "Focal Banger" that the *correct* row above scores
+    # against its own label, so no threshold separates them. The leftover word does.
+    assert not _accounts_for_sighting("Banger", "The Alchemist", "Focal Banger")
+    assert not _accounts_for_sighting("Mist", "Whoever", "The Alchemist Vermont Ale")
+    assert not _accounts_for_sighting("Heady Topper", "The Alchemist", "Heady Topper Vermont")
+
+
+def test_what_every_label_prints_is_not_a_leftover():
+    assert _accounts_for_sighting("Heady Topper", "The Alchemist",
+                                  "The Alchemist Heady Topper Double IPA 16 oz can")
+
+
+def test_a_reading_that_names_no_product_is_not_accounted_for_by_any():
+    # Otherwise a sighting of "IPA" would be answered by whichever IPA sorted first.
+    assert not _accounts_for_sighting("Heady Topper", "The Alchemist", "IPA")
+    assert not _accounts_for_sighting("Heady Topper", "The Alchemist", "Focal Banger")
+
+
+def test_a_reading_is_answered_by_the_row_it_names_not_a_piece_of_it(store):
+    # The store seeds `Heady Topper` and a decoy literally named `Banger`. Containment scores
+    # any name wholly inside the reading at 1.00, which is how a row named `Lawson's` came back
+    # for "Lawson's Sip of Sunshine" and `Green` for "Other Half Green City".
+    r = Resolver(store)
+    assert r.resolve_reading("The Alchemist Heady Topper").resolved.product.name == "Heady Topper"
+    assert r.resolve_reading("Focal Banger") is None
+    assert r.resolve_reading("Pliny The Elder") is None
+
+
+def test_a_reading_carries_a_score_and_its_place_in_the_frame(store):
+    r = Resolver(store)
+    cand = r.resolve_reading("Heady Topper", index=2)
+    assert cand.detection_index == 2
+    assert 0 < cand.match_score <= 1.0
+    assert cand.personal_score is not None       # scored for the caller, like every other path

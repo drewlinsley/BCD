@@ -10,6 +10,8 @@ from .api import (
     ProductSearchResponse,
     ScanResolveRequest,
     ScanResolveResponse,
+    ScanVisionRequest,
+    ScanVisionResponse,
     ScoredCandidate,
 )
 from .entities import (
@@ -85,6 +87,8 @@ __all__ = [
     "SKU",
     "ScanResolveRequest",
     "ScanResolveResponse",
+    "ScanVisionRequest",
+    "ScanVisionResponse",
     "ScoredCandidate",
     "Sourced",
     "SensorySource",

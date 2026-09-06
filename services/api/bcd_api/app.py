@@ -6,6 +6,8 @@ MedallionStore so the whole thing boots with `make api` after an ingest, no serv
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import time
@@ -22,25 +24,58 @@ from bcd_schema import (
     ResolvedProduct,
     ScanResolveRequest,
     ScanResolveResponse,
+    ScanVisionRequest,
+    ScanVisionResponse,
     TasteProfile,
 )
+from bcd_schema.api import DetectedText
 from fastapi import FastAPI, Query
 
+import httpx
+
 from .resolver import Resolver
+from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 from .taste import TASTE_EVENTS, load_profile, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
 
 _state: dict = {}
 
 
+# `.env.example` says "Copy to .env and fill in", and until now nothing read it — every key in
+# that file only worked if you also exported it on the command line. The vision provider is the
+# first thing whose absence is silent rather than loud (no key, no answers, no error), so the
+# documented way to configure it has to actually be the way.
+#
+# Real environment always wins, the way every dotenv loader behaves: an inline
+# `BCD_DATABASE_URL=... uvicorn ...` is an override, not a suggestion.
+def _load_dotenv(path: str = ".env") -> None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip("\"'")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_dotenv()
     store = open_store(root="./data")
     _state["store"] = store
     _state["resolver"] = Resolver(store)
     _state["telemetry"] = TelemetryCollector(root="./data")
     # Demo profile so /v1/scan/resolve returns personalized scores out of the box.
     _state["profiles"] = {"demo": _demo_profile()}
+    # None without a key. The scan path predates this and has to keep working without it.
+    _state["vision"] = provider_from_env()
     yield
     store.close()
 
@@ -109,6 +144,122 @@ def _log_scan(req: ScanResolveRequest, resp: ScanResolveResponse) -> None:
             f.write(json.dumps(row, separators=(",", ":")) + "\n")
     except OSError:
         pass          # diagnostics must never take the scan path down with them
+
+
+_VISION_UNCONFIGURED = (
+    "vision is not configured: set ANTHROPIC_API_KEY in .env and restart the API"
+)
+
+
+@app.post("/v1/scan/vision", response_model=ScanVisionResponse)
+async def scan_vision(req: ScanVisionRequest, user_id: str = "demo") -> ScanVisionResponse:
+    """Identify a frame from the picture rather than from what OCR made of it.
+
+    The model only ever supplies *names*. Each one is then resolved by the same `Resolver`
+    against the same catalog, under the same guards, and a name the catalog cannot account
+    for is dropped — so a model that invents a beer produces no answer rather than a
+    confident wrong one. Facts still come from the catalog; the image only improves the query.
+
+    Errors are reported in `detail`, never raised. This runs on the camera's hot path, and a
+    timeout at the vision provider must degrade to "no extra answers", not to a failed scan.
+    """
+    t0 = time.perf_counter()
+    provider: VisionProvider | None = _state.get("vision")
+
+    def done(resp: ScanVisionResponse) -> ScanVisionResponse:
+        resp.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+        _log_vision(req, resp)
+        return resp
+
+    if provider is None:
+        return done(ScanVisionResponse(detail=_VISION_UNCONFIGURED))
+    try:
+        image = base64.b64decode(req.image_b64, validate=True)
+    except (binascii.Error, ValueError):
+        return done(ScanVisionResponse(provider=provider.label,
+                                       detail="image_b64 is not valid base64"))
+    if not image:
+        return done(ScanVisionResponse(provider=provider.label, detail="image is empty"))
+    if len(image) > MAX_IMAGE_BYTES:
+        return done(ScanVisionResponse(
+            provider=provider.label,
+            detail=f"image is {len(image)} bytes, over the {MAX_IMAGE_BYTES} limit"))
+
+    try:
+        sightings = await provider.identify(image, req.media_type)
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        return done(ScanVisionResponse(provider=provider.label,
+                                       detail=f"{type(exc).__name__}: {exc}"))
+    if not sightings:
+        return done(ScanVisionResponse(provider=provider.label,
+                                       detail="the model read no label in this frame"))
+
+    # The frame the overlays anchor to: one entry per sighting, in the model's own order and
+    # carrying whatever box it volunteered. The client never built this, so it comes back with
+    # the answers or `detection_index` addresses nothing.
+    frame = [DetectedText(text=s.name, kind="text",
+                          x=s.box[0] if s.box else None, y=s.box[1] if s.box else None,
+                          w=s.box[2] if s.box else None, h=s.box[3] if s.box else None)
+             for s in sightings]
+
+    # `resolve_reading`, not `resolve`. A clean name is a query, not a frame: `resolve` is built
+    # for OCR — fragmentary, garbled, several lines of one object — and its instruments say the
+    # wrong thing here. Containment scores any name wholly inside the reading at a perfect 1.00,
+    # so its one-winner-per-line rule handed back `Lawson's` for "Lawson's Sip of Sunshine",
+    # `Tree House` for Julius and `Green` for Green City, every one of them a fragment of the
+    # name rather than the row it names.
+    resolver: Resolver = _state["resolver"]
+    profile = _profile_for(user_id)
+    kept: list = []
+    claimed: set[str] = set()
+    for i, sighting in enumerate(sightings):
+        cand = resolver.resolve_reading(sighting.name, index=i, profile=profile)
+        if cand is None:
+            continue          # the catalog has no row that is what the model read
+        if cand.resolved.product.id in claimed:
+            continue          # two sightings of the same beer are one answer
+        claimed.add(cand.resolved.product.id)
+        kept.append(cand)
+
+    named = {c.detection_index for c in kept}
+    return done(ScanVisionResponse(
+        candidates=kept,
+        unresolved_indices=[i for i in range(len(sightings)) if i not in named],
+        # A kept candidate has cleared two independent bars: a model reading the label off the
+        # image, and the catalog holding a row that accounts for that whole reading rather than
+        # appearing inside it. That is the corroboration this endpoint can honestly claim, and
+        # it is not the same evidence as two OCR lines agreeing — hence computed here.
+        corroborated=bool(kept),
+        sightings=[s.name for s in sightings],
+        provider=provider.label,
+        detections=frame,
+        detail=None if kept else "the catalog has none of the labels the model read",
+    ))
+
+
+def _log_vision(req: ScanVisionRequest, resp: ScanVisionResponse) -> None:
+    if not _SCAN_LOG:
+        return
+    row = {
+        "ts": datetime.now(UTC).isoformat(),
+        "path": "vision",
+        "ocr": [d.text for d in req.detections],
+        "bytes": len(req.image_b64) * 3 // 4,
+        "sightings": resp.sightings,
+        "provider": resp.provider,
+        "detail": resp.detail,
+        "latency_ms": resp.latency_ms,
+        "candidates": [
+            {"name": c.resolved.product.name, "producer": c.resolved.producer.name,
+             "score": c.match_score}
+            for c in resp.candidates[:5]
+        ],
+    }
+    try:
+        with open(_SCAN_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 @app.post("/v1/recommend")

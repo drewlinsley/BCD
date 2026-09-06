@@ -75,3 +75,38 @@ class FeedbackRequest(BaseModel):
 class FeedbackResponse(BaseModel):
     accepted: bool
     profile: TasteProfile  # echo the updated profile so the client can show the shift
+
+
+class ScanVisionRequest(BaseModel):
+    """One camera frame, for the labels OCR could not read.
+
+    `detections` is what the on-device scanner *did* read of the same frame. It does not enter
+    the matching — a clean reading needs no corroboration from a garbled one — but it is the
+    only record of what the camera saw at the moment the picture was taken, and every
+    diagnosis on this path so far has come from having exactly that.
+    """
+
+    image_b64: str
+    media_type: str = "image/jpeg"
+    detections: list[DetectedText] = Field(default_factory=list)
+    venue_id: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+
+
+class ScanVisionResponse(ScanResolveResponse):
+    """A resolve response, plus what the model claimed to see.
+
+    `sightings` is the honest middle of the pipeline: a name here with no candidate beside
+    it means the model read the can and the catalog does not have it — a different problem
+    from the model reading nothing, and the two are indistinguishable from candidates alone.
+    """
+
+    sightings: list[str] = Field(default_factory=list)
+    # The frame the server actually resolved, one entry per sighting and in the same
+    # order, so `detection_index` addresses it. The client never built this frame — the
+    # boxes are the model's — so it has to come back with the answers or the overlays
+    # have nothing to anchor to.
+    detections: list[DetectedText] = Field(default_factory=list)
+    provider: str | None = None
+    detail: str | None = None
