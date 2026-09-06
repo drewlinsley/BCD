@@ -276,10 +276,21 @@ public final class ScanCoordinator: ObservableObject {
     private func resolve(frame: [DetectedText], full: [DetectedText],
                          venueId: String?) async {
         guard !frame.isEmpty else {
-            // Nothing in view: clear so a stale result doesn't linger over an empty shelf.
-            overlays = []; candidates = []; currentFrame = []
-            overlaysSetAt = nil
-            displayedCorroborated = false
+            // Nothing in view. A *corroborated* answer still stands for the hold window;
+            // anything less is cleared, so a guess never lingers over a bare shelf.
+            //
+            // This used to clear unconditionally, which quietly made the hold worthless for
+            // the one exact identification the app can make. A barcode is read in a single
+            // frame and is gone the moment the can tilts, so the very next tick had nothing in
+            // view and wiped it: the scan log shows 0793573117267 resolving to The Alchemist
+            // Heady Topper at 1.00 in 22ms, and the user saw nothing at all. Lowering the phone
+            // to tap an overlay empties the frame too -- so clearing on empty is also clearing
+            // exactly when someone is reaching for the result.
+            if !(displayedCorroborated && isHoldingRecentOverlays) {
+                overlays = []; candidates = []; currentFrame = []
+                overlaysSetAt = nil
+                displayedCorroborated = false
+            }
             lastResolvedKey = nil; lastInterpretKey = nil
             return
         }

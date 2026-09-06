@@ -212,9 +212,33 @@ import Foundation
         await coord.resolveLatest()
         #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
 
-        // ...but pointing away from the shelf still clears it at once, so nothing goes stale.
+        // ...and pointing away no longer erases it on the spot. That behaviour was deliberate
+        // once -- nothing should linger over a bare shelf -- but it made the hold worthless for
+        // a result the frame had actually proven. A barcode lives in a single frame and is gone
+        // the moment the can tilts, and lowering the phone to *tap* the answer empties the frame
+        // too, so clearing on empty cleared exactly when someone was reaching for it. A proven
+        // answer keeps its window; an unproven one still goes at once.
         engine.push([])
         try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Heady Topper")
+    }
+
+    @MainActor
+    @Test func anUnprovenOverlayStillGoesTheMomentTheViewEmpties() async throws {
+        // The other half of the rule: only a corroborated answer earns the grace.
+        let engine = ManualScanEngine()
+        let coord = ScanCoordinator(engine: engine, api: UncorroboratedAPI(known: ["Heady Topper"]))
+        coord.start()
+
+        engine.push([DetectedText(text: "CHEMIST-VER", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.candidate.resolved.product.name == "Chemist")
+
+        engine.push([])
+        try await Task.sleep(nanoseconds: 60_000_000)
         await coord.resolveLatest()
         #expect(coord.overlays.isEmpty)
     }
@@ -917,5 +941,29 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         #expect(ScanCoordinator.looksLikeAName("Heady Topper"))
         #expect(ScanCoordinator.looksLikeAName("The Alchemist Heady Topper"))
         #expect(ScanCoordinator.looksLikeAName("Bombay Sapphire London Dry Gin"))
+    }
+}
+
+@Suite struct BarcodeAnswerSurvivesLongEnoughToTap {
+    /// The exact frame from the scan log: one barcode, resolved at 1.00 in 22ms, corroborated
+    /// -- and invisible on the phone, because the next tick had nothing in view.
+    @MainActor
+    @Test func aBarcodeReadInOneFrameIsStillOnScreenAfterItLeavesView() async throws {
+        let engine = ManualScanEngine()
+        let api = UncorroboratedAPI(known: ["0793573117267"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "0793573117267", kind: "barcode",
+                                  x: 0.3, y: 0.6, w: 0.3, h: 0.08)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1)
+
+        // the can tilts and the code is gone -- which is every frame after the one that read it
+        engine.push([])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1, "the one exact answer the app can give stays tappable")
     }
 }
