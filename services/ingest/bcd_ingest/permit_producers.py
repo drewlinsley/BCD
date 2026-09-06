@@ -25,6 +25,14 @@ from __future__ import annotations
 import psycopg
 
 from .connectors.ttb_cola import _titlecase
+from .dedup import _PRODUCER_SUFFIX
+
+# A brand that is nothing but an incorporation word cannot name anything. Filers do enter them:
+# one Alabama permit carries a brand literally recorded as "LLC", and because those three
+# filings happened to have fanciful names they outranked every real beer on the permit and
+# 2,891 products ended up under a producer called "LLC". The vocabulary is dedup's, so the two
+# passes agree on what a company suffix is.
+_DEGENERATE = "', '".join(sorted(_PRODUCER_SUFFIX))
 
 # The same permit is filed both ways -- "BR CO AVE 1" and "BR-CO-AVE-1" are one brewery, and
 # there are a dozen such pairs. Normalising is the point, not a collision to be avoided.
@@ -39,20 +47,32 @@ WITH rows AS (
   SELECT {_PRODUCER_ID.format(col="payload->>'permit_no'")} AS producer_id,
          payload->>'brand_name'  AS brand,
          payload->>'origin_desc' AS region,
+         coalesce(payload->>'fanciful_name','') AS fanciful,
          (coalesce(payload->>'fanciful_name','') <> '') AS brand_acts_as_brand
   FROM bronze
   WHERE source_id = 'ttb-cola-registry'
     AND coalesce(payload->>'permit_no','') <> ''
     AND coalesce(payload->>'brand_name','') <> ''
+    -- ...and is not purely an incorporation word, nor too short to identify anyone ("4b").
+    AND lower(regexp_replace(payload->>'brand_name', '[^A-Za-z0-9]', '', 'g'))
+          NOT IN ('{_DEGENERATE}')
+    AND length(regexp_replace(payload->>'brand_name', '[^A-Za-z0-9]', '', 'g')) >= 3
 ),
 tally AS (
-  SELECT producer_id, brand, bool_or(brand_acts_as_brand) AS branded, count(*) AS n
+  SELECT producer_id, brand,
+         bool_or(brand_acts_as_brand) AS branded,
+         -- How many *distinct* products file under this brand. This is what separates a brand
+         -- from a product, and filing count is not: on Coors's permit BR-CO-CBC-1, COORS LIGHT
+         -- has 567 filings and 2 distinct fanciful names -- it is a beer -- while BLUE MOON has
+         -- 287 filings and 112, which is a range. Ranking on volume picked the beer.
+         count(DISTINCT fanciful) FILTER (WHERE fanciful <> '') AS products,
+         count(*) AS n
   FROM rows GROUP BY producer_id, brand
 ),
 ranked AS (
   SELECT producer_id, brand, branded,
          row_number() OVER (PARTITION BY producer_id
-                            ORDER BY branded DESC, n DESC, brand) AS rn
+                            ORDER BY branded DESC, products DESC, n DESC, brand) AS rn
   FROM tally
 ),
 regions AS (
