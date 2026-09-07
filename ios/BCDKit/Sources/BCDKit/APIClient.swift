@@ -4,6 +4,13 @@ public protocol APIClientProtocol: Sendable {
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
+    /// Catalog vocabulary for the on-device recognizer's custom words. Optional for
+    /// test doubles: the default returns nothing, which is safe (no hints).
+    func fetchLexicon() async throws -> [String]
+}
+
+public extension APIClientProtocol {
+    func fetchLexicon() async throws -> [String] { [] }
 }
 
 public enum APIError: Error, Sendable {
@@ -50,6 +57,17 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
 
     public func sendTelemetry(_ batch: TelemetryBatch) async throws {
         let _: EmptyAck = try await post("/v1/telemetry", body: batch)
+    }
+
+    public func fetchLexicon() async throws -> [String] {
+        let url = baseURL.appendingPathComponent("/v1/lexicon")
+        let (data, resp) = try await session.data(from: url)
+        try Self.check(resp)
+        do {
+            return try decoder.decode(LexiconResponse.self, from: data).words
+        } catch {
+            throw APIError.decoding("\(error)")
+        }
     }
 
     // MARK: - plumbing

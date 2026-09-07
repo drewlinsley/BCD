@@ -12,7 +12,9 @@ final class BCDAppTests: XCTestCase {
             api: PreviewAPI(), llm: MockLLMProvider(),
             telemetry: TelemetryQueue(consent: ConsentState(analytics: true)),
             makeScanEngine: {
-                MockScanEngine(scripted: [[DetectedText(text: "Heady Topper", kind: "text")]])
+                // Two frames of agreement before the coordinator asks the server.
+                MockScanEngine(scripted: [[DetectedText(text: "Heady Topper", kind: "text")],
+                                          [DetectedText(text: "Heady Topper", kind: "text")]])
             })
         let model = ScanViewModel()
         model.configure(env: env)
@@ -36,10 +38,16 @@ private final class PreviewAPI: APIClientProtocol, @unchecked Sendable {
             producer: Producer(id: "pr", name: "Alchemist", kind: nil, country: nil,
                                region: nil, lat: nil, lon: nil, website: nil),
             brand: Brand(id: "b", producerId: "pr", name: "Heady"))
+        // Answer per object, the way the real server does on the coarse-to-fine path.
+        let objects = req.objects.map { obj in
+            ObjectResolution(objectId: obj.id, status: .resolved, query: "heady topper", candidates: [
+                ScoredCandidate(objectId: obj.id, resolved: resolved, matchScore: 1,
+                                personalScore: 0.8, reason: "tropical", coldStart: true),
+            ])
+        }
         return ScanResolveResponse(
-            candidates: [ScoredCandidate(detectionIndex: 0, resolved: resolved, matchScore: 1,
-                                         personalScore: 0.8, reason: "tropical", coldStart: true)],
-            unresolvedIndices: [], latencyMs: 1)
+            candidates: objects.flatMap(\.candidates), unresolvedIndices: [],
+            objects: objects, latencyMs: 1)
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}

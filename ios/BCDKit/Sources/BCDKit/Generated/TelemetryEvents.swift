@@ -25,6 +25,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
     case paywallShown = "paywall_shown"
     case paywallConverted = "paywall_converted"
     case weeklyProfileDeltaShown = "weekly_profile_delta_shown"
+    case scanObjectResolution = "scan_object_resolution"
 
     public var tier: ConsentTier {
         switch self {
@@ -49,6 +50,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
         case .paywallShown: return .analytics
         case .paywallConverted: return .analytics
         case .weeklyProfileDeltaShown: return .personalization
+        case .scanObjectResolution: return .analytics
         }
     }
 }

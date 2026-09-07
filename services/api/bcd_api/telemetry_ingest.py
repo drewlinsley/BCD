@@ -22,6 +22,7 @@ _FALLBACK_EVENTS = {
     "rating_submitted", "list_add", "alert_fired", "alert_converted",
     "agent_task_created", "agent_task_completed", "purchase_intent",
     "paywall_shown", "paywall_converted", "weekly_profile_delta_shown",
+    "scan_object_resolution",
 }
 
 

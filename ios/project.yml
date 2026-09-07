@@ -54,6 +54,9 @@ targets:
         # separate there because "//" starts a comment in an xcconfig). A device build points
         # at your Mac, not localhost. Read in BCDApp.swift.
         BCDAPIBase: "$(BCD_API_SCHEME)://$(BCD_API_HOSTPORT)"
+        # Which on-device scan pipeline the HUD uses: visionkit (default) or vision.
+        # See Local.xcconfig and BCDApp.swift.
+        BCDScanEngine: "$(BCD_SCAN_ENGINE)"
     settings:
       base:
         # Bundle ID comes from Local.xcconfig (BCD_BUNDLE_ID) — a free Apple ID can't register

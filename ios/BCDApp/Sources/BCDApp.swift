@@ -69,15 +69,38 @@ final class AppEnvironment: ObservableObject {
         return MockLLMProvider()
     }
 
+    /// Which on-device pipeline drives the HUD. `BCD_SCAN_ENGINE` (env var, then the
+    /// `BCDScanEngine` Info.plist key from Local.xcconfig):
+    ///   - `visionkit` (default) — `DataScannerViewController`: text + barcode, known-good.
+    ///   - `vision`               — `VisionFrameScanEngine`: AVCapture + Vision with
+    ///                              instance segmentation and raw (uncorrected) OCR.
+    private static func scanEngineChoice() -> String {
+        if let env = ProcessInfo.processInfo.environment["BCD_SCAN_ENGINE"], !env.isEmpty {
+            return env.lowercased()
+        }
+        if let s = Bundle.main.object(forInfoDictionaryKey: "BCDScanEngine") as? String,
+           !s.isEmpty, !s.hasPrefix("$(") {
+            return s.lowercased()
+        }
+        return "visionkit"
+    }
+
     private static func makeScanEngine() -> ScanEngine {
         #if canImport(VisionKit) && os(iOS)
-        if #available(iOS 18.0, *) { return VisionKitScanEngine() }
+        if #available(iOS 18.0, *) {
+            switch scanEngineChoice() {
+            case "vision": return VisionFrameScanEngine()
+            default: return VisionKitScanEngine()
+            }
+        }
         #endif
-        // Host/preview fallback so the app is runnable in the Simulator on Intel too.
-        return MockScanEngine(scripted: [
-            [DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.08)],
-            [DetectedText(text: "Pliny the Elder", kind: "text", x: 0.15, y: 0.5, w: 0.6, h: 0.08)],
+        // Host/preview fallback so the app is runnable in the Simulator on Intel too. Frames
+        // repeat because the tracker wants two frames of agreement before it asks.
+        let frame = ScanFrame(texts: [
+            DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.08),
+            DetectedText(text: "Pliny the Elder", kind: "text", x: 0.15, y: 0.55, w: 0.6, h: 0.08),
         ])
+        return MockScanEngine(frames: Array(repeating: frame, count: 3))
     }
 
     private static func telemetryStoreURL() -> URL {
