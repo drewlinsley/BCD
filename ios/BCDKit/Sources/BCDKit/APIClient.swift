@@ -60,11 +60,19 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
                        query: [URLQueryItem(name: "user_id", value: installId)])
     }
 
+    /// How long to wait for a picture to be read. `URLSession`'s 60s default is sized for a
+    /// request, not for inference: a model running on the developer's own machine has no GPU
+    /// acceleration on an Intel Mac and takes as long as it takes. Sixty seconds would fail the
+    /// call just before the answer arrived, and the failure would look like the model finding
+    /// nothing — the one confusion this whole path was built to remove.
+    static let visionTimeout: TimeInterval = 180
+
     /// A camera frame for the labels OCR cannot read. Same `user_id` as the text path:
     /// what comes back is scored for the same person.
     public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
         try await post("/v1/scan/vision", body: req,
-                       query: [URLQueryItem(name: "user_id", value: installId)])
+                       query: [URLQueryItem(name: "user_id", value: installId)],
+                       timeout: Self.visionTimeout)
     }
 
     public func searchProducts(_ query: String) async throws -> [ResolvedProduct] {
@@ -99,7 +107,7 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     // MARK: - plumbing
 
     private func post<B: Encodable, R: Decodable>(
-        _ path: String, body: B, query: [URLQueryItem] = []
+        _ path: String, body: B, query: [URLQueryItem] = [], timeout: TimeInterval? = nil
     ) async throws -> R {
         var url = baseURL.appendingPathComponent(path)
         if !query.isEmpty {
@@ -112,6 +120,7 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        if let timeout { request.timeoutInterval = timeout }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)
         let (data, resp) = try await session.data(for: request)
