@@ -31,7 +31,12 @@ import httpx
 # uploading it would burn the latency budget before the model is even called.
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
-_DEFAULT_MODEL = "claude-sonnet-5"
+# Opus by default. Sonnet is a third of the price and would be the obvious pick for a
+# per-frame path, but which model reads a stylized wordmark well enough is the whole question
+# this endpoint exists to answer, and picking the cheaper one before anybody has measured that
+# is choosing the answer. `BCD_VISION_MODEL=claude-sonnet-5` is one line when the measurement
+# says it holds.
+_DEFAULT_MODEL = "claude-opus-5"
 _ENDPOINT = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 # One camera frame, a handful of names. The cap is a cost ceiling, not a limit on the answer.
