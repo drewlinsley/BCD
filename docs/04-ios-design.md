@@ -52,7 +52,7 @@ The first HUD queried every OCR line and showed the first hit. Stylized label ty
 | **fine 2** | `LLMProvider.pickProduct` | Still ambiguous? The on-device model is shown the OCR fragments and the shortlist and must answer with a number or NONE. It cannot invent a beer. Once per object. |
 | **user** | `ScanCoordinator.confirm` | Still ambiguous? The chip says so; the user's pick trains the resolver. |
 
-`ScanCoordinator` ([BCDKit](../ios/BCDKit/Sources/BCDKit/ScanCoordinator.swift)) drives it and publishes one `SceneObject` per track with its status and box. Every stage is host-testable: the tracker, clusterer and coordinator run under `swift test` with `MockScanEngine` (which also scripts fine reads) and a scripted server.
+Build and verification steps for all of this: [08-build-and-verify.md](08-build-and-verify.md). `ScanCoordinator` ([BCDKit](../ios/BCDKit/Sources/BCDKit/ScanCoordinator.swift)) drives it and publishes one `SceneObject` per track with its status and box. Every stage is host-testable: the tracker, clusterer and coordinator run under `swift test` with `MockScanEngine` (which also scripts fine reads) and a scripted server.
 
 Two engines implement the coarse stage; `BCD_SCAN_ENGINE` in `Local.xcconfig` picks:
 
