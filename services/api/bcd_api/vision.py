@@ -44,6 +44,45 @@ _MAX_TOKENS = 512
 # Long enough for a shelf, short enough that the HUD is not waiting on a stall.
 _TIMEOUT_S = 12.0
 
+# --- local models ---------------------------------------------------------------------
+_OLLAMA_URL = "http://localhost:11434/api/chat"
+# 3B, and picked for reading text in pictures rather than for describing scenes — which is the
+# whole job here. Overridable with BCD_VISION_MODEL like the hosted one.
+_DEFAULT_LOCAL_MODEL = "qwen2.5vl:3b"
+# Two minutes, not twelve seconds. Ollama has no Metal backend on an Intel Mac, so this runs on
+# the CPU, and a vision model's image encoder plus a thousand-token prefill is not a thing that
+# finishes inside a HUD tick there. The timeout is sized to let a slow machine *answer* rather
+# than to keep the scan responsive; whether the answer arrives soon enough to be useful is a
+# measurement, and this is what makes the measurement possible.
+_LOCAL_TIMEOUT_S = 120.0
+
+# No boxes, and no negative instructions. A 3B model given the hosted model's prompt spends its
+# output on coordinates it cannot estimate and rules it cannot follow; asked for a list of names
+# it has a chance. The client already lays out answers that arrive without a box.
+_LOCAL_PROMPT = """\
+List every alcoholic drink label you can read in this photo.
+
+For each one give the brand and product name exactly as printed, e.g. "Sierra Nevada Pale Ale".
+Only list labels whose text you can actually read. If you cannot read any, return an empty list.
+"""
+
+# Ollama constrains generation to a schema when given one, which is what keeps a small model
+# from narrating its way around the answer.
+_LOCAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "labels": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        }
+    },
+    "required": ["labels"],
+}
+
 _PROMPT = """\
 This is a photo of alcoholic drinks — bottles, cans, or a shelf of them.
 
@@ -120,6 +159,46 @@ class AnthropicVision:
         text = "".join(part.get("text", "") for part in payload.get("content", [])
                        if part.get("type") == "text")
         return parse_sightings(text)
+
+
+class OllamaVision:
+    """A vision model running on this machine. No account, no key, no per-call cost.
+
+    Same contract as the hosted provider — bytes in, names out — so everything downstream is
+    unchanged: the names still go through `resolve_reading`, and a name the catalog cannot
+    account for still draws nothing.
+    """
+
+    def __init__(self, model: str | None = None, url: str | None = None,
+                 client: httpx.AsyncClient | None = None) -> None:
+        self.model = model or os.environ.get("BCD_VISION_MODEL") or _DEFAULT_LOCAL_MODEL
+        self.url = url or os.environ.get("BCD_OLLAMA_URL") or _OLLAMA_URL
+        self._client = client
+
+    @property
+    def label(self) -> str:
+        return f"ollama:{self.model}"
+
+    async def identify(self, image: bytes, media_type: str = "image/jpeg") -> list[Sighting]:
+        body = {
+            "model": self.model,
+            "messages": [{
+                "role": "user",
+                "content": _LOCAL_PROMPT,
+                "images": [base64.b64encode(image).decode("ascii")],
+            }],
+            "stream": False,
+            "format": _LOCAL_SCHEMA,
+            # Reading a label is not a creative task, and a small model wanders without this.
+            "options": {"temperature": 0},
+        }
+        if self._client is not None:
+            resp = await self._client.post(self.url, json=body, timeout=_LOCAL_TIMEOUT_S)
+        else:
+            async with httpx.AsyncClient(timeout=_LOCAL_TIMEOUT_S) as client:
+                resp = await client.post(self.url, json=body)
+        resp.raise_for_status()
+        return parse_sightings(resp.json().get("message", {}).get("content", "") or "")
 
 
 class StubVision:
@@ -202,9 +281,19 @@ def _box(raw: object) -> tuple[float, float, float, float] | None:
 
 
 def provider_from_env() -> VisionProvider | None:
-    """The configured provider, or None. Absent a key this returns None rather than raising:
-    the vision path is an addition to the scan, and the scan has to keep working without it."""
+    """The configured provider, or None.
+
+    Unconfigured returns None rather than raising: the vision path is an addition to the scan,
+    and the scan has to keep working without it. `BCD_VISION_PROVIDER` chooses explicitly;
+    absent that, a key selects the hosted model, because a key is only ever set on purpose.
+    Nothing probes for a local server — a wrong guess here fails as silence, and the endpoint's
+    `detail` saying "connection refused to localhost:11434" is worth more than a provider that
+    quietly elected itself.
+    """
+    choice = (os.environ.get("BCD_VISION_PROVIDER") or "").strip().lower()
     key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if not key:
-        return None
-    return AnthropicVision(key)
+    if choice == "ollama":
+        return OllamaVision()
+    if choice == "anthropic":
+        return AnthropicVision(key) if key else None
+    return AnthropicVision(key) if key else None

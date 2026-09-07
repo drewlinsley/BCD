@@ -19,6 +19,7 @@ from bcd_api.resolver import Resolver
 from bcd_api.vision import (
     MAX_IMAGE_BYTES,
     AnthropicVision,
+    OllamaVision,
     Sighting,
     StubVision,
     parse_sightings,
@@ -132,6 +133,32 @@ def test_the_image_is_sent_and_the_names_come_back():
     block = body["messages"][0]["content"][0]
     assert block["type"] == "image"
     assert base64.b64decode(block["source"]["data"]) == b"\xff\xd8jpegbytes"
+
+
+@respx.mock
+def test_a_local_model_answers_the_same_contract():
+    # Same seam, no key and no per-call cost. Ollama wraps the reply in {"message": {...}} and
+    # is asked for {"labels": [...]} — a schema keeps a small model from narrating around it.
+    route = respx.post("http://localhost:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {
+            "content": '{"labels": [{"name": "The Alchemist Heady Topper"}]}'}}))
+    got = asyncio.run(OllamaVision(model="m").identify(b"\xff\xd8jpegbytes"))
+    assert [s.name for s in got] == ["The Alchemist Heady Topper"]
+    sent = httpx.Response(200, content=route.calls.last.request.content).json()
+    assert base64.b64decode(sent["messages"][0]["images"][0]) == b"\xff\xd8jpegbytes"
+    assert sent["stream"] is False and sent["options"]["temperature"] == 0
+
+
+def test_the_provider_is_chosen_explicitly_not_guessed(monkeypatch):
+    # Nothing probes localhost: a wrong guess fails as silence, and "connection refused" in
+    # `detail` is worth more than a provider that quietly elected itself.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("BCD_VISION_PROVIDER", "ollama")
+    assert provider_from_env().label.startswith("ollama:")
+    monkeypatch.setenv("BCD_VISION_PROVIDER", "anthropic")
+    assert provider_from_env() is None          # named, but no key to name it with
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert provider_from_env().label.startswith("anthropic:")
 
 
 # --- the endpoint --------------------------------------------------------------------
