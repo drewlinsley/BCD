@@ -262,6 +262,40 @@ class PostgresStore:
             ).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """Trigram similarity on producer/brand name, best-first — the `name` column is
+        denormalized for every entity type, so the same GIN index serves this."""
+        text = (text or "").strip()
+        if not text:
+            return []
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT record, similarity(coalesce(name,''), %s) AS sim
+                FROM gold
+                WHERE entity_type IN ('producer', 'brand') AND coalesce(name,'') %% %s
+                ORDER BY sim DESC
+                LIMIT %s
+                """,
+                (text, text, limit),
+            ).fetchall()
+        return [(r[0], round(float(r[1]), 3)) for r in rows]
+
+    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Every product owned by a producer or brand id (jsonb field lookup)."""
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT record
+                FROM gold
+                WHERE entity_type='product'
+                  AND (record->>'producer_id' = %s OR record->>'brand_id' = %s)
+                LIMIT %s
+                """,
+                (producer_id, producer_id, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine ANN over the sensory column — the pgvector core of recommendation."""
         with self._lock, self._conn.cursor() as cur:

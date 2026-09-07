@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 
 from bcd_ingest.store import Store, open_store
 from bcd_schema import (
+    LexiconResponse,
     Product,
     ProductSearchResponse,
     ResolvedProduct,
@@ -71,6 +72,18 @@ def scan_resolve(req: ScanResolveRequest, user_id: str = "demo") -> ScanResolveR
     resp = resolver.resolve(req, profile=profile)
     resp.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
     return resp
+
+
+@app.get("/v1/lexicon", response_model=LexiconResponse)
+def lexicon(limit: int = Query(5000, ge=1, le=20000)) -> LexiconResponse:
+    """Custom-words hint for the on-device text recognizer: catalog names it should
+    prefer over dictionary words. Computed once per process (it's a full catalog walk)
+    and cached; a venue-scoped variant is the obvious next step once menus are live."""
+    cache: dict = _state.setdefault("lexicon", {})
+    if limit not in cache:
+        resolver: Resolver = _state["resolver"]
+        cache[limit] = resolver.lexicon(limit=limit)
+    return LexiconResponse(words=cache[limit])
 
 
 @app.post("/v1/recommend")

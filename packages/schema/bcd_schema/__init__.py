@@ -4,7 +4,10 @@ Import from here; submodule layout may change but this surface is stable.
 """
 
 from .api import (
+    DetectedObject,
     DetectedText,
+    LexiconResponse,
+    ObjectResolution,
     ProductSearchResponse,
     ScanResolveRequest,
     ScanResolveResponse,
@@ -57,6 +60,7 @@ __all__ = [
     "Brand",
     "Category",
     "ContainerType",
+    "DetectedObject",
     "DetectedText",
     "ExtractionMethod",
     "GenericIngredient",
@@ -64,10 +68,12 @@ __all__ = [
     "HopOilFractions",
     "IngredientKind",
     "IngredientRole",
+    "LexiconResponse",
     "Malt",
     "MatchEvidence",
     "Menu",
     "MenuItem",
+    "ObjectResolution",
     "ProcessStep",
     "Producer",
     "Product",

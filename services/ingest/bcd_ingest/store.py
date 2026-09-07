@@ -17,6 +17,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from typing import Any, Protocol, runtime_checkable
 
 from bcd_schema import SENSORY_AXES
@@ -28,6 +29,16 @@ def _now() -> str:
 
 def _tokenize(s: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if len(t) > 2}
+
+
+def _fuzzy_eq(a: str, b: str, min_ratio: float = 0.8, min_len: int = 4) -> bool:
+    """Exact, or close enough to be an OCR misread of the same word. Short tokens must
+    match exactly — there's no room in 'ipa' for a typo that isn't a different word."""
+    if a == b:
+        return True
+    if len(a) < min_len or len(b) < min_len:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= min_ratio
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -195,7 +206,10 @@ class MedallionStore:
 
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Token-overlap name match, best-first — the laptop stand-in for pg_trgm. The
+        """Fuzzy token-overlap name match, best-first — the laptop stand-in for pg_trgm.
+        Tokens match exactly or, for 4+ letter words, within an OCR-typo distance
+        ('toppfr' ~ 'topper'), so a mangled label read still *retrieves* the right
+        product; the resolver's identity scorer decides whether it's confident. The
         Postgres store swaps in real trigram similarity behind this same signature."""
         want = _tokenize(text)
         if not want:
@@ -205,14 +219,48 @@ class MedallionStore:
             name_tokens = _tokenize(p.get("name", ""))
             if not name_tokens:
                 continue
-            overlap = want & name_tokens
-            if not overlap:
+            hits = sum(1 for t in name_tokens if any(_fuzzy_eq(q, t) for q in want))
+            if not hits:
                 continue
-            # Jaccard-ish, biased toward covering the product name.
-            score = len(overlap) / max(len(name_tokens), 1)
+            # Coverage of the product name — extra words in the query cost nothing.
+            score = hits / max(len(name_tokens), 1)
             scored.append((p, round(score, 3)))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]
+
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """Fuzzy name match over producers (and brands), best-first. Lets 'THE ALCHEMIST'
+        on a can retrieve that brewery's products even when the beer's own name was
+        unreadable — the resolver then ranks the siblings, or reports them ambiguous."""
+        want = _tokenize(text)
+        if not want:
+            return []
+        scored: list[tuple[dict, float]] = []
+        for kind in ("producer", "brand"):
+            for rec in self.iter_gold(kind):
+                names = [rec.get("name", "")] + list(rec.get("aliases") or [])
+                best = 0.0
+                for n in names:
+                    toks = _tokenize(n)
+                    if not toks:
+                        continue
+                    hits = sum(1 for t in toks if any(_fuzzy_eq(q, t) for q in want))
+                    best = max(best, hits / len(toks))
+                if best > 0:
+                    scored.append((rec, round(best, 3)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
+
+    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Every product a producer (or brand) owns. Python scan on the dev store; an
+        indexed jsonb lookup on Postgres."""
+        out: list[dict[str, Any]] = []
+        for p in self.iter_gold("product"):
+            if p.get("producer_id") == producer_id or p.get("brand_id") == producer_id:
+                out.append(p)
+                if len(out) >= limit:
+                    break
+        return out
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine nearest-neighbor over products that carry a sensory vector, computed in
@@ -249,6 +297,8 @@ class Store(Protocol):
     def counts(self) -> dict[str, int]: ...
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 
