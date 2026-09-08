@@ -177,3 +177,16 @@ events:
       - {name: from_version, type: int}
       - {name: to_version, type: int}
       - {name: n_predictions, type: int}
+
+  # ---- coarse-to-fine scan pipeline ----
+  - name: scan_object_resolution
+    tier: analytics
+    pii: none
+    desc: one tracked object's outcome and which stage produced it. Measures where the pipeline earns its keep (and where it stalls).
+    properties:
+      - {name: status, type: enum, values: [resolved, ambiguous, unresolved]}
+      - {name: stage, type: enum, values: [barcode, coarse, fine_ocr, llm_pick, user]}
+      - {name: match_score, type: float, optional: true}
+      - {name: n_candidates, type: int}
+      - {name: frames_seen, type: int}
+      - {name: n_texts, type: int}

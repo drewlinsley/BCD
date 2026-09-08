@@ -10,7 +10,7 @@ ios/BCDApp/   SwiftUI app — generated into an .xcodeproj by XcodeGen
 ios/project.yml
 ```
 
-`BCDKit` is deliberately host-buildable so `swift build && swift test` verifies real code on any machine — **8 tests pass on the Intel reference laptop with only Command Line Tools** (Swift Testing, not XCTest, which needs full Xcode). The app target's own tests run under Xcode.
+`BCDKit` is deliberately host-buildable so `swift build && swift test` verifies real code on any machine with only Command Line Tools (Swift Testing, not XCTest, which needs full Xcode) — the model contract, geometry, text clustering, object tracking, the coarse-to-fine coordinator and the rule-based adjudicator all run there. The app target's own tests run under Xcode.
 
 ## Screens
 
@@ -24,22 +24,52 @@ ios/project.yml
 
 ## The HUD
 
-- Live detections from `DataScannerViewController` (`recognizesMultipleItems: true`, `qualityLevel: .fast`) become **overlays anchored to their bounding boxes**, color-coded by predicted enjoyment (green > 0.75 > yellow > 0.5 > orange).
-- A **flask icon** marks cold-start scores (from chemistry, no reviews) — a visible signal of the moat.
+- Tracked **objects** (cans, bottles) become overlays anchored to their boxes, color-coded by predicted enjoyment (green > 0.75 > yellow > 0.5 > orange). Only a *resolved* object gets a name.
+- An **ambiguous** object shows a "N possible · tap" chip; tapping opens the server's shortlist and the user's pick is logged as `scan_corrected_by_user` — the highest-value label we collect.
+- Anything else that has proven it's really there is a faint dashed outline, never a name.
+- A **flask icon** marks cold-start scores (from chemistry, no reviews) — a visible signal of the moat. A **sparkles** icon marks a name the on-device model adjudicated; a **person** icon, one the user chose.
 - Tap an overlay → the receipt. Pinch to zoom.
-- A **persistent chat bar** takes natural-language asks ("cheapest hazy here", "nothing over 6%") and routes them, via `LLMProvider.rerank`, against **the items currently in frame** — not a global search.
+- A **persistent chat bar** takes natural-language asks ("cheapest hazy here", "nothing over 6%") and routes them, via `LLMProvider.rerank`, against **the items currently in frame** — non-matching overlays dim.
 
-`ScanCoordinator` ([BCDKit](../ios/BCDKit/Sources/BCDKit/ScanCoordinator.swift)) is the client half of the latency path: it dedupes stable text so we don't re-query it, batches fresh detections to `/v1/scan/resolve`, and publishes ranked candidates the HUD renders. That dedupe is what keeps us inside the <400ms budget.
+## Coarse-to-fine scan pipeline
+
+The first HUD queried every OCR line and showed the first hit. Stylized label type (Heady Topper, hazy-IPA cans, Dogfish Head) OCRs into fragments — "Chemist", "hop chemist", "Mist" — and every fragment found *some* product to match, so wrong names fired constantly. The pipeline now reasons about **objects**, escalates only when it has to, and never shows a name nothing cleared.
+
+```
+ frame ──► coarse ─────────────► server ─────────► fine 1 ────────► fine 2 ────────► HUD
+ OCR +     TextClusterer /       /v1/scan/resolve   careful OCR on    on-device model
+ barcode   segmenter regions     per *object*:      the object crop   picks among the
+ (+regions)  → ObjectTracker     resolved /         (accurate, no     server's shortlist
+             2 frames of         ambiguous /        lang. correction, — or says none
+             agreement           unresolved         catalog lexicon)
+```
+
+| Stage | Where | What |
+|---|---|---|
+| **coarse** | [SceneObjects.swift](../ios/BCDKit/Sources/BCDKit/SceneObjects.swift), [ObjectStage.swift](../ios/BCDKit/Sources/BCDKit/ObjectStage.swift) | `TextClusterer` groups lines on one label; with `VisionFrameScanEngine`, Vision's foreground-instance masks give real can/bottle boxes (`RegionProvider`) and lines are assigned to the region they fall in. `ObjectTracker` matches across frames (IoU / center distance) and counts how many frames each line was seen on each object. An object is queried only after **two frames of agreement**, once per change in evidence, with a cooldown. `ObjectStage` owns the tracker and the verdicts; the ready objects ride along on the live tick's `/v1/scan/resolve` call as `objects`. |
+| **server** | [resolver.py](../services/api/bcd_api/resolver.py) `resolve_object`, [index.py](../services/api/bcd_api/index.py) | One `DetectedObject` (all its lines + barcode + box) per object. Its lines go through the same frame corroboration the per-line path uses, and the outcome becomes a verdict: `resolved` when the frame proves a row (barcode, two independent lines, or one line that *is* the label) or a row **accounts for the whole reading** — every identifying word read is the product's, its maker's, or label chrome, so a row cannot win by saying less (`Banger` leaves "focal" and "alchemist" unexplained); `ambiguous` with a shortlist when a row explains more than half of what was read and one of its own substantial name words was read; else `unresolved`. Retrieval is the in-memory label index (~1 ms a line against 534k products); see [01-architecture.md](01-architecture.md#data-flow-a-scan). |
+| **fine 1** | [VisionTextReader.swift](../ios/BCDKit/Sources/BCDKit/VisionTextReader.swift) | Not resolved? Read that object's crop again at `.accurate`, both with language correction **off** (raw glyphs; correction is what turns ALCHEMIST into "Chemist") and with it on plus the catalog **lexicon** (`/v1/lexicon`) as `customWords`. New text re-queries. Once per object. |
+| **fine 2** | `LLMProvider.pickProduct` | Still ambiguous? The on-device model is shown the OCR fragments and the shortlist and must answer with a number or NONE. It cannot invent a beer. Once per object. |
+| **user** | `ScanCoordinator.confirm` | The user's pick (from the detail sheet) is the highest-value label there is; it is recorded as `scan_corrected_by_user`. An ambiguous object draws **nothing** on the HUD — a "N possible" chip for a garbled read is the wrong-overlay problem in a new hat. |
+
+Build and verification steps for all of this: [08-build-and-verify.md](08-build-and-verify.md). `ScanCoordinator` ([BCDKit](../ios/BCDKit/Sources/BCDKit/ScanCoordinator.swift)) is the live-tick coordinator from the image-capture branch, unchanged in how it treats lines; the object stage is layered on: every frame feeds the tracker, the tick's request carries the ready objects, verdicts are applied off the tick (a fine read captures a still), and `overlays` is the tick's per-line overlays plus one per **resolved object, pinned to the object's box** and moving with it for as long as the tracker sees the object. A resolved object also counts as corroboration, so the on-device-model and picture fallbacks stand down. Every stage is host-testable: the tracker, clusterer, object stage and coordinator run under `swift test` with `MockScanEngine` (which also scripts fine reads and regions) and a scripted server — on macOS or on Linux.
+
+Two engines implement the coarse stage; `BCD_SCAN_ENGINE` in `Local.xcconfig` picks:
+
+- **`visionkit`** (default) — [VisionKitScanEngine](../ios/BCDKit/Sources/BCDKit/VisionKitScanEngine.swift): `DataScannerViewController`, text + barcode, view-space boxes. Can't segment or disable language correction; the fine pass captures a still (`capturePhoto`) and reads the object crop.
+- **`vision`** — [VisionFrameScanEngine](../ios/BCDKit/Sources/BCDKit/VisionFrameScanEngine.swift): our own `AVCaptureSession` into Vision. Raw OCR every 2nd frame; `GenerateForegroundInstanceMaskRequest` + `ClassifyImageRequest` every 12th frame to lift cans/bottles and drop hands, faces and menus; fine reads crop the last frame directly. Buffer-space boxes, mapped onto the aspect-fill preview by `AspectFillMapper`. **Not yet exercised on a device** — try it once `visionkit` is confirmed working.
 
 ## LLM routing
 
 `LLMProvider` protocol, three implementations:
 
-- **`FoundationModelsProvider`** (iOS 26+, on-device) — free, private, fast. Used for **intent parsing and reranking, never facts** — the 3B model hallucinates world knowledge confidently, so product facts always come from the backend. Guarded by `#if canImport(FoundationModels)`; inert on the Intel Simulator.
+- **`FoundationModelsProvider`** (iOS 26+, on-device) — free, private, fast. Used for **intent parsing, reranking and constrained label adjudication, never facts** — the 3B model hallucinates world knowledge confidently, so product facts always come from the backend, and in the scan path it may only choose among catalog candidates. Guarded by `#if canImport(FoundationModels)`; inert on the Intel Simulator.
 - **`CloudLLMProvider`** — Claude / Gemini Flash, server-side, for the cold path.
-- **`MockLLMProvider`** — deterministic rule-based parser for tests, previews, and offline fallback.
+- **`MockLLMProvider`** — deterministic rule-based parser and adjudicator for tests, previews, and offline fallback.
 
-The composition root ([AppEnvironment](../ios/BCDApp/Sources/BCDApp.swift)) picks the best available at launch. iOS 27's `LanguageModelExecutor` would unify these behind one `LanguageModelSession` — adopt when the floor rises (out of reach on this machine; post-v1).
+The composition root ([AppEnvironment](../ios/BCDApp/Sources/BCDApp.swift)) picks the best available at launch.
+
+**On image input.** The iOS 26 SDK's on-device model is text-only. WWDC26's multimodal prompts (an image alongside text), the point-prompted segmentation API and Core AI need the iOS 27 SDK / Xcode 27 — out of reach on the reference machine, which caps at Xcode 26.0. So the design keeps *understanding* on text the on-device model can handle (OCR fragments → constrained choice) and does *seeing* with the iOS 18 Vision APIs that are in the iOS 26 SDK today (instance masks, classification, accurate OCR with custom words). When the floor rises, an image-prompted reader slots in behind the same `FineTextReader` / `pickProduct` seams — it becomes fine stage 1½, not a rewrite. iOS 27's `LanguageModelExecutor` would likewise unify the providers behind one `LanguageModelSession`.
 
 ## System integration
 

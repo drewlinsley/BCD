@@ -32,14 +32,17 @@ make codegen                    # regenerate Swift+Python telemetry from one spe
 make ios-gen                    # generate BCDApp.xcodeproj (build needs Xcode 26)
 ```
 
-A real scan resolution, against live-ingested data:
+A real scan resolution, against live-ingested data — one *object* (everything read off one can) in, a verdict out:
 
 ```bash
 curl -s -X POST localhost:8000/v1/scan/resolve -H 'content-type: application/json' \
-  -d '{"detections":[{"text":"080244009397","kind":"barcode"},
-                     {"text":"Heady Topper Double IPA","kind":"text"}]}'
-# → Buffalo Trace (by UPC) + Heady Topper (by OCR), each with a personal score, in ~1ms
+  -d '{"objects":[{"id":"can-1","texts":["THE ALCHEMIST","HEADY","TOPPER","16 FL OZ"],"frames_seen":4},
+                  {"id":"can-2","texts":["Chemist","hop chemist","Mist"],"frames_seen":4},
+                  {"id":"bottle-1","barcode":"080244009397"}]}'
+# → can-1 resolved: Heady Topper · can-2 unresolved (nothing shown) · bottle-1 resolved by UPC
 ```
+
+The old per-line shape (`"detections":[{"text":...,"kind":"text"}]`) still works, through the same confidence floor.
 
 ---
 
@@ -59,7 +62,7 @@ services/sentinel/    Parallel Monitor + FindAll orchestration
 services/telemetry/   own-collector event ingest
 telemetry/events.yaml single source of truth → codegen’d Swift enum + Python allowlist
 sentinels/            Parallel job definitions (releases, discovery)
-ios/BCDKit/           SwiftPM core — models, APIClient, ScanEngine, LLMProvider, Telemetry (builds+tests on host)
+ios/BCDKit/           SwiftPM core — models, APIClient, ScanEngine + ObjectTracker + ScanCoordinator (coarse-to-fine), LLMProvider, Telemetry (builds+tests on host)
 ios/BCDApp/           SwiftUI app — camera HUD, provenance "receipt", weekly evolution
 ios/project.yml       XcodeGen manifest (iOS 18 min, iOS 26 SDK features gated)
 ```

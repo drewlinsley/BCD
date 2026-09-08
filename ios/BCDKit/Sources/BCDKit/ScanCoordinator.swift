@@ -28,8 +28,20 @@ public struct ResolvedOverlay: Identifiable, Sendable {
 /// and applied synchronously to every tick, so it keeps filtering as the frame refreshes.
 @MainActor
 public final class ScanCoordinator: ObservableObject {
-    /// Overlays from the most recent resolve, display-ordered, anchored to their boxes.
+    /// Overlays from the most recent resolve, display-ordered, anchored to their boxes:
+    /// the per-line answers this tick, plus one per resolved *object*, pinned to the
+    /// object's box for as long as the tracker can see it.
     @Published public private(set) var overlays: [ResolvedOverlay] = []
+    /// The per-line half of `overlays`. Every write recomposes the published set.
+    private var lineOverlays: [ResolvedOverlay] = [] {
+        didSet { publishOverlays() }
+    }
+    /// The coarse-to-fine object path: tracks what the camera sees into objects, sends
+    /// the ready ones along with each tick, and turns the server's verdicts into overlays.
+    public let objectStage: ObjectStage
+    /// Verdicts are applied off the tick (a fine read captures a still and runs careful
+    /// OCR), one batch after another so two responses never interleave their fine stages.
+    private var objectTask: Task<Void, Never>?
     @Published public private(set) var lastLatencyMs: Double?
     @Published public private(set) var isScanning = false
     /// A resolve is in flight (a live tick).
@@ -130,7 +142,7 @@ public final class ScanCoordinator: ObservableObject {
 
     /// Whether the overlays on screen are recent enough to keep through an empty resolve.
     private var isHoldingRecentOverlays: Bool {
-        guard !overlays.isEmpty, let at = overlaysSetAt else { return false }
+        guard !lineOverlays.isEmpty, let at = overlaysSetAt else { return false }
         return Date().timeIntervalSince(at) * 1000 < overlayHoldMs
     }
 
@@ -138,12 +150,14 @@ public final class ScanCoordinator: ObservableObject {
     /// what the camera sees leaves the device. Off unless the app passes the user's consent,
     /// so the default build sends text and nothing else.
     public init(engine: ScanEngine, api: APIClientProtocol, telemetry: TelemetryQueue? = nil,
-                llm: LLMProvider? = nil, sendsFrames: Bool = false) {
+                llm: LLMProvider? = nil, sendsFrames: Bool = false,
+                objectPolicy: ObjectStage.Policy = ObjectStage.Policy()) {
         self.engine = engine
         self.api = api
         self.telemetry = telemetry
         self.llm = llm
         self.sendsFrames = sendsFrames
+        self.objectStage = ObjectStage(policy: objectPolicy)
     }
 
     /// Start the live viewfinder buffering frames. Nothing hits the network until a live tick —
@@ -156,6 +170,10 @@ public final class ScanCoordinator: ObservableObject {
             await self.engine.start()
             for await frame in self.engine.frames {
                 self.latestFrame = frame
+                // Every frame feeds the tracker, not just the ones a tick resolves: two
+                // frames of agreement is what earns an object a query.
+                self.objectStage.ingest(frame, regions: (self.engine as? RegionProvider)?.latestRegions)
+                self.publishOverlays()
             }
         }
     }
@@ -184,6 +202,9 @@ public final class ScanCoordinator: ObservableObject {
         liveTask?.cancel(); liveTask = nil
         interpretation?.cancel(); interpretation = nil
         visionTask?.cancel(); visionTask = nil
+        objectTask?.cancel(); objectTask = nil
+        objectStage.reset()
+        publishOverlays()
         isLookingAtTheLabel = false
         unreadTicks = 0
         // The flag is raised before the task starts, so a task cancelled before its body ran
@@ -328,7 +349,10 @@ public final class ScanCoordinator: ObservableObject {
     /// on-device model. Always *assigns* overlays, so nothing accumulates.
     private func resolve(frame: [DetectedText], full: [DetectedText],
                          venueId: String?) async {
-        guard !frame.isEmpty else {
+        // Objects with enough evidence to ask about. Marked in flight here, before any
+        // early return, so an object never sits "ready" across a tick that skipped it.
+        let objects = objectStage.pending()
+        guard !frame.isEmpty || !objects.isEmpty else {
             // Nothing in view. A *corroborated* answer still stands for the hold window;
             // anything less is cleared, so a guess never lingers over a bare shelf.
             //
@@ -340,7 +364,7 @@ public final class ScanCoordinator: ObservableObject {
             // to tap an overlay empties the frame too -- so clearing on empty is also clearing
             // exactly when someone is reaching for the result.
             if !(displayedCorroborated && isHoldingRecentOverlays) {
-                overlays = []; candidates = []; currentFrame = []
+                lineOverlays = []; candidates = []; currentFrame = []
                 overlaysSetAt = nil
                 displayedCorroborated = false
             }
@@ -348,16 +372,21 @@ public final class ScanCoordinator: ObservableObject {
             unreadTicks = 0          // nothing in view is not a label we failed to read
             return
         }
-        // Skip the round-trip when the OCR is unchanged since the last resolve (camera held still).
+        // Skip the round-trip when the OCR is unchanged since the last resolve (camera held
+        // still) — unless an object has just earned its query, which is new evidence even
+        // when the lines are the same.
         let key = Self.signature(frame)
-        if key == lastResolvedKey { return }
+        if key == lastResolvedKey && objects.isEmpty { return }
 
         isResolving = true
         defer { isResolving = false }
-        let req = ScanResolveRequest(detections: frame, venueId: venueId, includeScore: true)
+        let req = ScanResolveRequest(detections: frame, objects: objects, venueId: venueId,
+                                     includeScore: true,
+                                     minMatchScore: objectStage.policy.minMatchScore)
         do {
             let resp = try await api.resolveScan(req)
             lastLatencyMs = resp.latencyMs
+            if !objects.isEmpty { applyObjectVerdicts(resp.objects, sent: objects) }
             // Branch on what the *catalog* returned, not on what survives the filter: an
             // active filter legitimately hides everything and must keep doing so, while a
             // tick that resolved nothing at all should not throw away the last good result.
@@ -388,12 +417,12 @@ public final class ScanCoordinator: ObservableObject {
             if !resp.candidates.isEmpty && showable && !evictsBetter {
                 candidates = resp.candidates
                 currentFrame = frame
-                overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+                lineOverlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                        to: frame, cap: maxOverlays, presorted: true)
                 overlaysSetAt = Date()
                 displayedCorroborated = resp.corroborated
             } else if (resp.candidates.isEmpty || !showable) && !isHoldingRecentOverlays {
-                candidates = []; currentFrame = []; overlays = []
+                candidates = []; currentFrame = []; lineOverlays = []
                 overlaysSetAt = nil
                 displayedCorroborated = false
             }
@@ -457,7 +486,37 @@ public final class ScanCoordinator: ObservableObject {
             }
         } catch {
             // Keep the last good overlays and try again next tick.
+            objectStage.retry(objects)
         }
+    }
+
+    /// Hand the server's verdicts to the object stage off the tick. Chained, so a batch's
+    /// fine stage finishes before the next batch's starts; the tick keeps ticking.
+    private func applyObjectVerdicts(_ verdicts: [ObjectResolution], sent: [DetectedObject]) {
+        let previous = objectTask
+        let reader = engine as? FineTextReader
+        objectTask = Task { [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
+            await self.objectStage.apply(verdicts, sent: sent, fineReader: reader,
+                                         llm: self.llm, telemetry: self.telemetry)
+            self.publishOverlays()
+        }
+    }
+
+    /// The user picked (or corrected) what an object is.
+    public func confirm(objectId: String, candidate: ScoredCandidate) async {
+        await objectStage.confirm(objectId: objectId, candidate: candidate, telemetry: telemetry)
+        publishOverlays()
+    }
+
+    /// `overlays` = the tick's line overlays + one per resolved object. An object's answer
+    /// wins over a line's answer for the same product, because it is pinned to the can
+    /// rather than to whichever line matched this tick.
+    private func publishOverlays() {
+        let fromObjects = objectStage.overlays
+        let taken = Set(fromObjects.map(\.id))
+        overlays = fromObjects + lineOverlays.filter { !taken.contains($0.id) }
     }
 
     /// Stuck-frame fallback: hand the raw (garbled) OCR to the on-device model, resolve the product
@@ -493,7 +552,7 @@ public final class ScanCoordinator: ObservableObject {
         guard resp.corroborated else { return }
         candidates = resp.candidates
         currentFrame = synthetic
-        overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+        lineOverlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                to: synthetic, cap: maxOverlays, presorted: true)
         overlaysSetAt = Date()   // starts the hold window, so this one is tappable
         // The model read the label the catalog could not, and the catalog agreed with the
@@ -547,7 +606,7 @@ public final class ScanCoordinator: ObservableObject {
         // The frame these anchor to is the server's, built from the model's own boxes; the
         // client never had it.
         currentFrame = resp.detections
-        overlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
+        lineOverlays = Self.anchor(Self.orderedForDisplay(resp.candidates, filterIntent),
                                to: resp.detections, cap: maxOverlays, presorted: true)
         overlaysSetAt = Date()          // starts the hold window, so this one is tappable
         displayedCorroborated = true
@@ -574,7 +633,7 @@ public final class ScanCoordinator: ObservableObject {
 
     /// Re-pin the current candidates under the current filter without a new network round-trip.
     private func reanchor() {
-        overlays = Self.anchor(Self.orderedForDisplay(candidates, filterIntent),
+        lineOverlays = Self.anchor(Self.orderedForDisplay(candidates, filterIntent),
                                to: currentFrame, cap: maxOverlays, presorted: true)
     }
 

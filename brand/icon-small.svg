@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="inkBg" cx="50%" cy="33%" r="82%">
+      <stop offset="0" stop-color="#24222F"/><stop offset="1" stop-color="#100F16"/>
+    </radialGradient>
+    <clipPath id="clipBottle"><path d="M490 336 L490 432 C490 476 410 486 410 548 L410 724 Q410 758 444 758 L580 758 Q614 758 614 724 L614 548 C614 486 534 476 534 432 L534 336 Z"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#inkBg)"/>
+  <rect x="150" y="505" width="724" height="6" rx="3" fill="#E9A23A" opacity=".16"/>
+  <g fill="none" stroke="#E9A23A" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="160,300 160,160 300,160"/><polyline points="724,160 864,160 864,300"/>
+    <polyline points="160,724 160,864 300,864"/><polyline points="724,864 864,864 864,724"/>
+  </g>
+  <g transform="translate(512,532) scale(1.1) translate(-512,-532)">
+    <rect x="486" y="306" width="52" height="34" rx="10" fill="#F3EADB"/>
+    <path d="M490 336 L490 432 C490 476 410 486 410 548 L410 724 Q410 758 444 758 L580 758 Q614 758 614 724 L614 548 C614 486 534 476 534 432 L534 336 Z" fill="#F3EADB"/>
+    <g clip-path="url(#clipBottle)"><rect x="406" y="576" width="212" height="196" fill="#E9A23A"/><rect x="406" y="576" width="212" height="9" fill="#F6C979"/></g>
+  </g>
+</svg>

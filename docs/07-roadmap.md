@@ -32,7 +32,9 @@
 
 ## Phase 2 — the loop (weeks)
 
-- Wire **VisionKit** live scanning + Visual Intelligence provider on device.
+- **Exercise the coarse-to-fine scan pipeline on a device**: confirm `visionkit` (default), then flip `BCD_SCAN_ENGINE = vision` and tune `VisionFrameScanEngine` (segmentation cadence, container classes, crop mapping) against real fridges. Watch `scan_object_resolution` to see which stage resolves what.
+- Venue-scoped `/v1/lexicon` once menus are live, so the recognizer knows tonight's tap list.
+- Wire the Visual Intelligence provider on device.
 - Cloud LLM cold path with venue-menu context.
 - Weekly evolution job: taste memo + 3 falsifiable predictions → the You card.
 - Tier-1 agent: sentinel → push → deep-link checkout.

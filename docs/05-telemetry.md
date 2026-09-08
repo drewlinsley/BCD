@@ -6,7 +6,7 @@
 
 `scan_frame_batch` (derived OCR strings + latency + resolution outcome) plus `scan_corrected_by_user` (the user overrode our resolution) is a **self-labeling training set** for the resolver. Every correction improves the model that made the mistake. Instrument this before anything else.
 
-## Event taxonomy (21 events)
+## Event taxonomy (22 events)
 
 | Group | Events |
 |---|---|
@@ -17,6 +17,7 @@
 | alerts / agents | `alert_fired`, `alert_converted`, `agent_task_created`, `agent_task_completed` |
 | commerce | `purchase_intent`, `paywall_shown`, `paywall_converted` |
 | weekly evolution | `weekly_profile_delta_shown` |
+| scan pipeline | `scan_object_resolution` — one tracked object's outcome and which stage produced it (barcode / coarse / fine_ocr / llm_pick / user) |
 
 `provenance_expanded` is worth calling out — it measures whether verifiability actually matters to users (do they tap the chips?), which validates the entire data thesis.
 

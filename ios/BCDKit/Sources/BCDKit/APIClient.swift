@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public protocol APIClientProtocol: Sendable {
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse
@@ -6,6 +9,8 @@ public protocol APIClientProtocol: Sendable {
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
     func submitFeedback(_ req: FeedbackRequest, userId: String) async throws -> FeedbackResponse
+    /// Catalog vocabulary for the on-device recognizer's custom-words hint.
+    func fetchLexicon() async throws -> [String]
 }
 
 extension APIClientProtocol {
@@ -23,6 +28,9 @@ extension APIClientProtocol {
     public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
         throw APIError.http(501)
     }
+
+    /// No vocabulary is a fine answer: the recognizer falls back to its own dictionary.
+    public func fetchLexicon() async throws -> [String] { [] }
 }
 
 public enum APIError: Error, Sendable {
@@ -73,6 +81,18 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         try await post("/v1/scan/vision", body: req,
                        query: [URLQueryItem(name: "user_id", value: installId)],
                        timeout: Self.visionTimeout)
+    }
+
+    public func fetchLexicon() async throws -> [String] {
+        var comps = URLComponents(url: baseURL.appendingPathComponent("/v1/lexicon"),
+                                  resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "limit", value: "5000")]
+        guard let url = comps?.url else { throw APIError.badURL }
+        let (data, resp) = try await session.data(from: url)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.http((resp as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        return try decoder.decode(LexiconResponse.self, from: data).words
     }
 
     public func searchProducts(_ query: String) async throws -> [ResolvedProduct] {

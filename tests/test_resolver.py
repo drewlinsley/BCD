@@ -17,6 +17,7 @@ from bcd_schema import (
     SKU,
     Brand,
     Category,
+    DetectedObject,
     DetectedText,
     ExtractionMethod,
     Producer,
@@ -864,3 +865,122 @@ def test_a_reading_carries_a_score_and_its_place_in_the_frame(store):
     assert cand.detection_index == 2
     assert 0 < cand.match_score <= 1.0
     assert cand.personal_score is not None       # scored for the caller, like every other path
+
+
+# --- objects: one can, one verdict ------------------------------------------------------
+#
+# The rows below are the ones measured against real iPhone frames in review of the first
+# object resolver: junk catalog rows (`Top's`, `Ache`, `Theo P.`, `Banger`) that a
+# coverage-of-the-target score let win by saying less. Each row here is a device reading
+# from that table, and the verdict is what the HUD is allowed to do with it.
+
+
+@pytest.fixture()
+def shelf(store):
+    def producer(pid, name):
+        store.put_gold(pid, "producer", Producer(id=pid, name=name).model_dump(mode="json"))
+
+    def product(pid, name, producer_id, brand=None):
+        bid = f"brand:{pid}"
+        store.put_gold(bid, "brand", Brand(id=bid, producer_id=producer_id,
+                                           name=brand or name).model_dump(mode="json"))
+        store.put_gold(pid, "product", Product(id=pid, name=name, producer_id=producer_id,
+                                               brand_id=bid, category=Category.BEER
+                                               ).model_dump(mode="json"))
+
+    producer("prod:x2", "The Alchemist LLC")
+    product("ttb:focal", "Focal Banger", "prod:x2")
+    producer("prod:tops", "Top's Brewing")
+    product("ttb:tops", "Top's", "prod:tops")
+    producer("prod:ache", "Ache Brewing")
+    product("ttb:ache", "Ache", "prod:ache")
+    producer("prod:theo", "Theo P. Brewing")
+    product("ttb:theo", "Theo P.", "prod:theo")
+    producer("prod:banger", "Banger")
+    product("ttb:banger", "Banger", "prod:banger")
+    producer("prod:chem", "Chemist Spirits")
+    product("ttb:chem", "Chemist", "prod:chem")
+    return store
+
+
+def _verdict(store, texts, barcode=None, **kw):
+    r = Resolver(store)
+    obj = DetectedObject(id="o1", texts=texts, barcode=barcode)
+    resp = r.resolve(ScanResolveRequest(objects=[obj], **kw))
+    assert len(resp.objects) == 1
+    return resp, resp.objects[0]
+
+
+def _names(res):
+    return [c.resolved.product.name for c in res.candidates]
+
+
+@pytest.mark.parametrize("reading, junk", [
+    ("FADY TOP", "Top's"),
+    ("ACHE MIST-VERM", "Ache"),
+    ("NK FROM THEO BANGE", "Theo P."),
+])
+def test_a_garbled_fragment_never_fires_a_short_junk_row(shelf, reading, junk):
+    resp, res = _verdict(shelf, [reading])
+    assert res.status == "unresolved", (reading, _names(res))
+    assert junk not in _names(res)
+    assert resp.candidates == [] and not resp.corroborated
+
+
+def test_a_clean_full_label_read_resolves_to_the_row_that_accounts_for_it(shelf):
+    # `Banger` matches the one word it has at 1.0; `Focal Banger` matches at 1.0 too. The
+    # leftover-word rule decides: "focal" and "alchemist" are unexplained by `Banger`.
+    resp, res = _verdict(shelf, ["FOCAL BANGER THE ALCHEMIST INDIA PALE ALE"])
+    assert res.status == "resolved"
+    assert _names(res) == ["Focal Banger"]
+    assert res.candidates[0].object_id == "o1"
+    assert res.candidates[0].detection_index == -1
+    assert resp.corroborated and [c.resolved.product.name for c in resp.candidates] == ["Focal Banger"]
+
+
+def test_two_lines_naming_one_beer_resolve_it(shelf):
+    _, res = _verdict(shelf, ["HEADY TOPPER", "THE ALCHEMIST", "STOWE VERMONT",
+                              "DRINK FROM THE CAN"])
+    assert res.status == "resolved" and _names(res) == ["Heady Topper"]
+
+
+def test_a_barcode_on_the_object_resolves_it_outright(shelf):
+    _, res = _verdict(shelf, ["ANYTHING AT ALL"], barcode="854416001019")
+    assert res.status == "resolved" and _names(res) == ["Heady Topper"]
+    assert res.candidates[0].match_score == 1.0
+
+
+def test_a_partial_read_is_ambiguous_not_wrong(shelf):
+    # The brewery read cleanly, the beer's name half-read: the frame proves nothing, but
+    # `Focal Banger` explains "focal" and "alchemist" — worth the fine stage, not an overlay.
+    _, res = _verdict(shelf, ["FOCAL BAN", "THE ALCHEMIST", "INDIA PALE ALE"])
+    assert res.status in ("ambiguous", "resolved")
+    assert "Focal Banger" in _names(res)
+    assert "Banger" not in _names(res) and "Chemist" not in _names(res)
+
+
+def test_label_chrome_alone_resolves_nothing(shelf):
+    _, res = _verdict(shelf, ["DRINK FROM THE CAN", "16 FL OZ", "INDIA PALE ALE"])
+    assert res.status == "unresolved" and res.candidates == []
+
+
+def test_the_client_can_raise_the_floor(shelf):
+    _, res = _verdict(shelf, ["FOCAL BANGER THE ALCHEMIST INDIA PALE ALE"], min_match_score=1.01)
+    assert res.status != "resolved"
+
+
+def test_objects_and_lines_share_one_response(shelf):
+    r = Resolver(shelf)
+    resp = r.resolve(ScanResolveRequest(
+        detections=[DetectedText(text="HEADY TOPPER"), DetectedText(text="THE ALCHEMIST")],
+        objects=[DetectedObject(id="o2", texts=["FOCAL BANGER THE ALCHEMIST INDIA PALE ALE"])]))
+    by_kind = {(c.detection_index, c.object_id): c.resolved.product.name for c in resp.candidates}
+    assert by_kind[(0, None)] == "Heady Topper" or by_kind.get((1, None)) == "Heady Topper"
+    assert by_kind[(-1, "o2")] == "Focal Banger"
+    assert resp.objects[0].status == "resolved"
+
+
+def test_lexicon_carries_names_not_generic_words(shelf):
+    words = Resolver(shelf).lexicon(limit=100)
+    assert "alchemist" in words and "topper" in words and "focal" in words
+    assert "ipa" not in words and "brewing" not in words

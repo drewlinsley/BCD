@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass, field
 
 from bcd_ingest.dedup import _PRODUCER_SUFFIX, is_generic_token, search_name
 from bcd_ingest.store import Store, _cosine
 from bcd_schema import (
     SENSORY_AXES,
     Brand,
+    DetectedObject,
+    DetectedText,
+    ObjectResolution,
     Producer,
     Product,
     ResolvedProduct,
@@ -493,6 +497,81 @@ def _identity_key(name: str, brand: str, pid: str) -> str:
     return f"{b}\x1f{n}"
 
 
+@dataclass
+class _Frame:
+    """What `_resolve_lines` found: every supported candidate best-first, the ones the
+    frame proves outright, and the lines nothing matched."""
+
+    ranked: list[ScoredCandidate] = field(default_factory=list)
+    proven: list[ScoredCandidate] = field(default_factory=list)
+    unresolved: list[int] = field(default_factory=list)
+
+
+#: How many rows an `ambiguous` verdict hands the client's fine stage.
+_OBJECT_SHORTLIST = 5
+#: Share of the reading's identifying words a row must explain to be worth a second look.
+#: Strictly more than half: "NK FROM THEO BANGE" explains exactly half of `Theo P.` and
+#: that row is a coincidence, not a shortlist.
+_OBJECT_EXPLAINED = 0.5
+
+
+def _object_vocabulary(c: ScoredCandidate) -> tuple[str, str]:
+    """(brand-qualified product name, producer name) — the words that would be printed on
+    this product's label, the way `_accounts_for_sighting` wants them."""
+    r = c.resolved
+    return search_name(r.product.name, r.brand.name), r.producer.name
+
+
+def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
+    """`_accounts_for_sighting`, for a reading that is the camera's rather than a model's.
+
+    A sighting is a name the model wrote down; an object reading is everything OCR saw on
+    the can, fine print included — "INDIA PALE ALE", "AMERICAN DOUBLE IPA", "STOWE". The
+    style vocabulary dedup shares with the store is therefore noise here too: a leftover
+    "india" says nothing about which beer this is. The two checks that matter are kept
+    exactly: a row must answer the drink, not just the brewery, and every identifying word
+    read has to be the row's own or its maker's.
+    """
+    product, producer = _object_vocabulary(c)
+    in_name = set(_tokens(product))
+    known = in_name | set(_tokens(producer))
+    read = [t for t in _tokens(reading)
+            if len(t) >= _MIN_SIGHTING_TOKEN and t not in _SIGHTING_NOISE
+            and not is_generic_token(t)]
+    if not read or not any(t in in_name for t in read):
+        return False
+    return not [t for t in read if t not in known]
+
+
+def _explains_enough(c: ScoredCandidate, reading: str) -> bool:
+    """Whether a row explains enough of an object's reading to be shortlisted.
+
+    Looser than `_accounts_for_sighting` — OCR leaves words over ("STOWE VERMONT" on a can
+    whose maker is `The Alchemist`) — but not so loose that a one-word row can ride in on a
+    single shared word: more than half of what was read has to be this label's, and one of
+    the row's own name words of substance has to be among the words actually read.
+    """
+    product, producer = _object_vocabulary(c)
+    read = [t for t in _tokens(reading)
+            if len(t) >= _MIN_SIGHTING_TOKEN and t not in _SIGHTING_NOISE]
+    if not read:
+        return False
+    name_words = _tokens(product)
+    known = name_words + _tokens(producer)
+
+    def seen(t: str, among: list[str]) -> bool:
+        return t in among or any(_trigram_sim(t, k) >= _TOKEN_SUPPORT_MIN for k in among)
+
+    read = [t for t in read if not is_generic_token(t)]
+    if not read:
+        return False
+    explained = [t for t in read if seen(t, known)]
+    if len(explained) / len(read) <= _OBJECT_EXPLAINED:
+        return False
+    substantial = [t for t in _identifying_tokens(product)]
+    return any(seen(t, substantial) for t in explained if len(t) >= _MIN_NAME_TOKEN_LEN)
+
+
 class Resolver:
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -649,7 +728,52 @@ class Resolver:
 
     def resolve(self, req: ScanResolveRequest,
                 profile: TasteProfile | None = None) -> ScanResolveResponse:
-        """Resolve a whole frame, not a list of independent lines.
+        """Resolve a whole frame — its lines, and its tracked objects.
+
+        Lines go through `_resolve_lines`, the frame-level corroboration that decides what a
+        set of OCR lines photographed together actually names. Objects go through
+        `resolve_object`, which runs the same judgement over one can's worth of lines and
+        turns it into a verdict the HUD can act on without reading the candidates.
+        """
+        frame = self._resolve_lines(req.detections, req.include_score, profile)
+        corroborated = bool(frame.proven)
+        # A frame nothing corroborates has no evidence to rank a list with, so offering one
+        # implies a differentiation we cannot make. Measured over 78 such frames from a real
+        # can: the right answer was first once, deeper never, and absent 77 times -- while the
+        # frames carried two, three and five candidates each. They were not competing readings
+        # of the label, they were the same wrong guess spelled five ways ("Chemist", "Chemist
+        # 151", "Chemist Spirits", "Chemist Bierbrand"). One guess is as much as this frame has
+        # earned the right to say, and the client is about to ask the model anyway.
+        #
+        # Corroboration is a property of a candidate, but it was only ever applied to the
+        # frame -- so the unproven candidates rode in on the proven one's coat-tails. Three
+        # four-packs in view is a frame that legitimately corroborates *something*, and that
+        # opened the gate for every junk match beside it: reported from the camera as "a
+        # number of answers stacked on top of each other", with the right answer behind
+        # them. A shelf of real products still returns all of them -- each proves itself.
+        candidates = list(frame.proven) if corroborated else frame.ranked[:1]
+
+        objects = [self.resolve_object(o, profile, req.include_score, req.min_match_score)
+                   for o in req.objects]
+        for res in objects:
+            if res.status == "resolved":
+                candidates.append(res.candidates[0])
+                corroborated = True
+        return ScanResolveResponse(
+            candidates=candidates,
+            unresolved_indices=frame.unresolved,
+            objects=objects,
+            # Agreement across the frame, or — where there was no second line to agree with
+            # — a strong read of the only line there was. Mirrors the penalty above: a lone
+            # clean "BOMBAY SAPPHIRE LONDON DRY GIN" is not weak evidence, it is the whole
+            # label, and asking the model about it would spend a second to confirm a 1.00.
+            corroborated=corroborated,
+        )
+
+    def _resolve_lines(self, detections: list[DetectedText], include_score: bool,
+                       profile: TasteProfile | None) -> _Frame:
+        """What a set of lines photographed together names — every candidate the frame
+        supports, best-first, and which of them the frame *proves*.
 
         A label is one object photographed once, so its lines are evidence about the *same*
         product and are strongest read together. Two passes: per line, every candidate that
@@ -657,11 +781,11 @@ class Resolver:
         it. The guards are unchanged — they decide what may be evidence at all — and the frame
         decides which evidence wins.
         """
-        line_tokens = [_tokens(d.text) for d in req.detections]
+        line_tokens = [_tokens(d.text) for d in detections]
         # What corroboration is allowed to count: the frame's distinct readings, not its echoes.
         independent = _independent_lines(line_tokens)
-        identity_lines = sum(1 for d in req.detections if _is_identity_text(d.text))
-        hint = _category_hint(req.detections)
+        identity_lines = sum(1 for d in detections if _is_identity_text(d.text))
+        hint = _category_hint(detections)
 
         # ---- pass 1: every candidate any line supports, not just that line's best ----
         # Keeping only the top hit per line is what let chrome crowd out the beer: the real
@@ -670,7 +794,7 @@ class Resolver:
         by_upc: set[str] = set()                         # records a barcode identified outright
         resolved_lines: set[int] = set()
         to_match: list[int] = []                          # lines worth a name query
-        for i, det in enumerate(req.detections):
+        for i, det in enumerate(detections):
             if det.kind == "barcode":
                 rec = self._resolve_by_upc(det.text)
                 if rec is not None:
@@ -689,8 +813,8 @@ class Resolver:
         # the Postgres store runs them concurrently and the frame costs about its slowest
         # line instead of their sum.
         for i, found in zip(to_match, self._match_lines(
-                [req.detections[i].text for i in to_match]), strict=True):
-            det = req.detections[i]
+                [detections[i].text for i in to_match]), strict=True):
+            det = detections[i]
             for rec, sc in found:
                 # Judge the evidence on the brand-qualified name, because that is what the
                 # label actually says. A row named "Irish Whiskey" is anonymous on its own;
@@ -717,10 +841,10 @@ class Resolver:
         if not any(len(v) >= _MIN_FRAME_FOR_PENALTY for v in backing.values()):
             # Nothing the frame corroborates: the label has not named a product to us. Ask who
             # made it before giving up — on a stylized can the maker is the readable half.
-            hits += self._by_producer([(i, req.detections[i].text) for i in to_match], hint)
+            hits += self._by_producer([(i, detections[i].text) for i in to_match], hint)
             resolved_lines.update(i for i, _, _ in hits)
 
-        unresolved = [i for i in range(len(req.detections)) if i not in resolved_lines]
+        unresolved = [i for i in range(len(detections)) if i not in resolved_lines]
 
         # ---- pass 2: ask the whole frame about each distinct candidate ----
         best_hit: dict[str, tuple[int, float, dict]] = {}   # record id -> best (line, score)
@@ -744,7 +868,7 @@ class Resolver:
             if sum(len(t) for t in _identifying_tokens(qualified)) < _MIN_SELF_PROOF_CHARS:
                 return False
             return raw_score >= _STRONG_MATCH and _accounts_for_the_line(
-                qualified, req.detections[line_i].text, threshold=_SELF_PROOF_SIM)
+                qualified, detections[line_i].text, threshold=_SELF_PROOF_SIM)
 
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
@@ -786,7 +910,7 @@ class Resolver:
                 score *= _UNCORROBORATED
             score = round(score, 3)
             personal, reason, cold = (
-                (*self.score(resolved.product, profile),) if req.include_score
+                (*self.score(resolved.product, profile),) if include_score
                 else (None, None, False)
             )
             scored.append((
@@ -851,35 +975,95 @@ class Resolver:
                 or whole_label.get(c.resolved.product.id, False)
             )
 
-        proven = [e for e in ranked if _is_proven(e[1])]
-        corroborated = bool(proven)
-        # A frame nothing corroborates has no evidence to rank a list with, so offering one
-        # implies a differentiation we cannot make. Measured over 78 such frames from a real
-        # can: the right answer was first once, deeper never, and absent 77 times -- while the
-        # frames carried two, three and five candidates each. They were not competing readings
-        # of the label, they were the same wrong guess spelled five ways ("Chemist", "Chemist
-        # 151", "Chemist Spirits", "Chemist Bierbrand"). One guess is as much as this frame has
-        # earned the right to say, and the client is about to ask the model anyway.
-        if corroborated:
-            # Corroboration is a property of a candidate, but it was only ever applied to the
-            # frame -- so the unproven candidates rode in on the proven one's coat-tails. Three
-            # four-packs in view is a frame that legitimately corroborates *something*, and that
-            # opened the gate for every junk match beside it: reported from the camera as "a
-            # number of answers stacked on top of each other", with the right answer behind
-            # them. A shelf of real products still returns all of them -- each proves itself.
-            ranked = proven
-        else:
-            ranked = ranked[:1]
-        return ScanResolveResponse(
-            candidates=[c for _, c in ranked],
-            unresolved_indices=unresolved,
-            # Agreement across the frame, or — where there was no second line to agree with
-            # — a strong read of the only line there was. Mirrors the penalty above: a lone
-            # clean "BOMBAY SAPPHIRE LONDON DRY GIN" is not weak evidence, it is the whole
-            # label, and asking the model about it would spend a second to confirm a 1.00.
-            corroborated=corroborated,
-        )
+        proven = [c for _, c in ranked if _is_proven(c)]
+        return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved)
 
+    # ---- objects: one can, one verdict ----
+
+    def resolve_object(self, obj: DetectedObject, profile: TasteProfile | None = None,
+                       include_score: bool = True,
+                       min_score: float | None = None) -> ObjectResolution:
+        """One tracked object's verdict.
+
+        The object's lines are judged exactly as a frame is — same guards, same corroboration
+        — and the outcome is folded into three states the client can act on:
+
+          * `resolved`   the frame *proves* a row (a barcode, two independent lines naming
+                         it, or one line that is wholly its label), or a row accounts for the
+                         whole reading under the leftover-word rule: every identifying word
+                         the camera read is explained by the product's name, its maker, or
+                         label chrome. That rule is what stops a row from winning by saying
+                         less: `Banger` leaves "focal" and "alchemist" unexplained on a
+                         Focal Banger can and cannot resolve, however perfectly it matches
+                         the one word it has.
+          * `ambiguous`  rows the reading leans toward without any of them accounting for it
+                         — the shortlist the client's fine stage (accurate OCR on the crop,
+                         then the on-device model) chooses among. A row is on it only if it
+                         explains more than half of what was read *and* one of its own name
+                         words of substance was actually read: "FADY TOP" does not put
+                         `Top's` here, "ACHE MIST-VERM" does not put `Ache` here.
+          * `unresolved` nothing the reading supports. Show nothing; keep reading.
+        """
+        texts = [t for t in obj.texts if t and t.strip()]
+        query = " | ".join(texts + ([obj.barcode] if obj.barcode else []))
+
+        def tagged(c: ScoredCandidate) -> ScoredCandidate:
+            return c.model_copy(update={"object_id": obj.id, "detection_index": -1})
+
+        # A barcode is an identifier, not a reading of one. It answers the object by itself
+        # and nothing the text says can weaken it — the text beside a code is fine print
+        # that reliably matches the wrong thing.
+        if obj.barcode:
+            rec = self._resolve_by_upc(obj.barcode)
+            resolved = self._hydrate(rec) if rec is not None else None
+            if resolved is not None:
+                personal, why, cold = (
+                    (*self.score(resolved.product, profile),) if include_score
+                    else (None, None, False)
+                )
+                cand = ScoredCandidate(resolved=resolved, match_score=1.0,
+                                       personal_score=personal, reason=why, cold_start=cold)
+                return ObjectResolution(object_id=obj.id, status="resolved", query=query,
+                                        candidates=[tagged(cand)])
+
+        detections = [DetectedText(text=t) for t in texts]
+        if not detections:
+            return ObjectResolution(object_id=obj.id, status="unresolved", query=query)
+
+        frame = self._resolve_lines(detections, include_score, profile)
+        floor = 0.0 if min_score is None else min_score
+
+        if frame.proven and frame.proven[0].match_score >= floor:
+            return ObjectResolution(object_id=obj.id, status="resolved", query=query,
+                                    candidates=[tagged(frame.proven[0])])
+        reading = " ".join(texts)
+        accounted = [c for c in frame.ranked if _accounts_for_object(c, reading)]
+        if accounted and accounted[0].match_score >= floor:
+            return ObjectResolution(object_id=obj.id, status="resolved", query=query,
+                                    candidates=[tagged(accounted[0])])
+        shortlist = [tagged(c) for c in frame.ranked
+                     if _explains_enough(c, reading)][:_OBJECT_SHORTLIST]
+        if shortlist:
+            return ObjectResolution(object_id=obj.id, status="ambiguous", query=query,
+                                    candidates=shortlist)
+        return ObjectResolution(object_id=obj.id, status="unresolved", query=query)
+
+    # ---- lexicon ----
+
+    def lexicon(self, limit: int = 5000) -> list[str]:
+        """The catalog's identifying vocabulary for the on-device recognizer's custom-words
+        hint, commonest first. Served from the label index when the store carries one;
+        otherwise a catalog walk, which is why the API caches it per process."""
+        index = getattr(self.store, "index", None)
+        if index is not None:
+            return index.lexicon(limit)
+        df: dict[str, int] = {}
+        for kind in ("product", "brand", "producer"):
+            for rec in self.store.iter_gold(kind):
+                for tok in _identifying_tokens(rec.get("name") or ""):
+                    if tok not in _PRODUCER_SUFFIX:
+                        df[tok] = df.get(tok, 0) + 1
+        return sorted(df, key=lambda t: (-df[t], t))[:limit]
 
 
 def _top_axis(sv: SensoryVector) -> str | None:

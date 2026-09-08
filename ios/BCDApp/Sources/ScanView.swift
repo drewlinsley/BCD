@@ -24,11 +24,12 @@ struct ScanView: View {
 
             GeometryReader { geo in
                 ForEach(Array(model.overlays.enumerated()), id: \.element.id) { idx, overlay in
+                    let anchor = model.viewPoint(overlay.anchor, in: geo.size)
                     OverlayChip(candidate: overlay.candidate,
                                 reaction: env.reactions
                                     .reaction(for: overlay.candidate.resolved.product.id))
-                        .position(x: overlay.anchor.x * geo.size.width,
-                                  y: overlay.anchor.y * geo.size.height)
+                        .position(x: anchor.x * geo.size.width,
+                                  y: anchor.y * geo.size.height)
                         // Overlays arrive best-first and SwiftUI draws later views on top, so
                         // the best match was landing *underneath* every weaker one anchored
                         // near it. Reported from the camera as a green box briefly visible but
@@ -189,6 +190,28 @@ final class ScanViewModel: ObservableObject {
         coord.$isInterpreting.assign(to: &$isInterpreting)
         coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
         coord.$filterText.assign(to: &$filterText)
+        // The catalog's vocabulary, for an engine whose recognizer takes custom words: told
+        // about "Alchemist" it stops correcting it into "Chemist". Best effort; no words is
+        // the recognizer's own dictionary, which is where it started.
+        if let consumer = engine as? LexiconConsumer {
+            let api = env.api
+            Task { @MainActor in
+                if let words = try? await api.fetchLexicon(), !words.isEmpty {
+                    consumer.lexicon = words
+                }
+            }
+        }
+    }
+
+    /// Where an overlay anchor lands on screen. VisionKit reports boxes in view space; the
+    /// AVCapture engine reports them in its (aspect-filled) buffer's space and says so via
+    /// `contentAspect`, in which case the point is mapped through the crop.
+    func viewPoint(_ p: CGPoint, in size: CGSize) -> CGPoint {
+        guard let aspect = engine?.contentAspect, size.width > 0, size.height > 0 else { return p }
+        let mapper = AspectFillMapper(contentAspect: aspect)
+        let box = mapper.toView(BoundingBox(x: p.x, y: p.y, w: 0, h: 0),
+                                viewAspect: Double(size.width / size.height))
+        return CGPoint(x: box.x, y: box.y)
     }
 
     /// Fixed-rate live mode: the viewfinder re-resolves the latest frame on a cadence and swaps
@@ -217,6 +240,8 @@ struct CameraLayer: View {
         if #available(iOS 18.0, *), DataScannerViewController.isSupported,
            let vk = engine as? VisionKitScanEngine {
             DataScannerView(engine: vk)
+        } else if #available(iOS 18.0, *), let vf = engine as? VisionFrameScanEngine {
+            CapturePreviewView(engine: vf)
         } else {
             placeholder
         }
@@ -255,5 +280,44 @@ struct DataScannerView: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator { var started = false }
+}
+
+/// Presents the AVCapture engine's preview layer and starts the session once the camera is
+/// authorised. The layer is aspect-fill, which is what `contentAspect` tells the HUD.
+@available(iOS 18.0, *)
+struct CapturePreviewView: UIViewRepresentable {
+    let engine: VisionFrameScanEngine
+
+    func makeUIView(context: Context) -> PreviewHostView {
+        let view = PreviewHostView()
+        view.attach(engine.makePreviewLayer())
+        return view
+    }
+
+    func updateUIView(_ view: PreviewHostView, context: Context) {
+        guard !context.coordinator.started else { return }
+        context.coordinator.started = true
+        let engine = self.engine
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            guard granted else { return }
+            Task { await engine.start() }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var started = false }
+}
+
+final class PreviewHostView: UIView {
+    private var previewLayer: CALayer?
+    func attach(_ layer: CALayer) {
+        previewLayer = layer
+        self.layer.addSublayer(layer)
+        layer.frame = bounds
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer?.frame = bounds
+    }
 }
 #endif

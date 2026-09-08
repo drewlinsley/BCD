@@ -15,10 +15,12 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
+import httpx
 from bcd_ingest.store import Store, open_store
 from bcd_schema import (
     FeedbackRequest,
     FeedbackResponse,
+    LexiconResponse,
     Product,
     ProductSearchResponse,
     ResolvedProduct,
@@ -31,12 +33,11 @@ from bcd_schema import (
 from bcd_schema.api import DetectedText
 from fastapi import FastAPI, Query
 
-import httpx
-
+from .index import IndexedStore, LabelIndex
 from .resolver import Resolver
-from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 from .taste import TASTE_EVENTS, load_profile, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
+from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 
 _state: dict = {}
 
@@ -70,7 +71,17 @@ async def lifespan(app: FastAPI):
     _load_dotenv()
     store = open_store(root="./data")
     _state["store"] = store
-    _state["resolver"] = Resolver(store)
+    # The label index is what makes a scan sub-second: retrieval from memory instead of a
+    # trigram scan per line. Built from the store once (cached beside the data and reused
+    # while the catalog's row counts are unchanged), then wrapped around the store so the
+    # resolver's matching calls answer from it. BCD_LABEL_INDEX=0 keeps the store's own
+    # matching, for comparing the two on the same catalog.
+    matching: Store = store
+    if os.environ.get("BCD_LABEL_INDEX", "1") != "0":
+        index = LabelIndex.for_store(store, os.path.join("./data", "label_index.pkl"))
+        _state["index"] = index
+        matching = IndexedStore(store, index)
+    _state["resolver"] = Resolver(matching)
     _state["telemetry"] = TelemetryCollector(root="./data")
     # Demo profile so /v1/scan/resolve returns personalized scores out of the box.
     _state["profiles"] = {"demo": _demo_profile()}
@@ -86,7 +97,11 @@ app = FastAPI(title="BCD API", version="0.1.0", lifespan=lifespan)
 @app.get("/healthz")
 def healthz() -> dict:
     store: Store = _state["store"]
-    return {"ok": True, "counts": store.counts()}
+    out = {"ok": True, "counts": store.counts()}
+    index: LabelIndex | None = _state.get("index")
+    if index is not None:
+        out["index"] = index.stats()
+    return out
 
 
 @app.get("/v1/product/search", response_model=ProductSearchResponse)
@@ -131,8 +146,15 @@ def _log_scan(req: ScanResolveRequest, resp: ScanResolveResponse) -> None:
     row = {
         "ts": datetime.now(UTC).isoformat(),
         "ocr": [d.text for d in req.detections],
+        "objects": [{"id": o.id, "texts": o.texts, "barcode": o.barcode} for o in req.objects],
         "corroborated": resp.corroborated,
         "latency_ms": resp.latency_ms,
+        "verdicts": [
+            {"id": o.object_id, "status": o.status,
+             "candidates": [{"name": c.resolved.product.name, "score": c.match_score}
+                            for c in o.candidates]}
+            for o in resp.objects
+        ],
         "candidates": [
             {"name": c.resolved.product.name, "producer": c.resolved.producer.name,
              "score": c.match_score}
@@ -144,6 +166,19 @@ def _log_scan(req: ScanResolveRequest, resp: ScanResolveResponse) -> None:
             f.write(json.dumps(row, separators=(",", ":")) + "\n")
     except OSError:
         pass          # diagnostics must never take the scan path down with them
+
+
+@app.get("/v1/lexicon", response_model=LexiconResponse)
+def lexicon(limit: int = Query(5000, ge=1, le=20000)) -> LexiconResponse:
+    """Custom-words hint for the on-device text recognizer: the catalog's identifying
+    vocabulary, commonest first. The recognizer already knows "ale"; what it does not
+    know is "alchemist", and told about it it stops correcting HEADY into Ready. Cached
+    per process; a venue-scoped variant is the obvious next step once menus are live."""
+    cache: dict = _state.setdefault("lexicon", {})
+    if limit not in cache:
+        resolver: Resolver = _state["resolver"]
+        cache[limit] = resolver.lexicon(limit=limit)
+    return LexiconResponse(words=cache[limit])
 
 
 _VISION_UNCONFIGURED = (

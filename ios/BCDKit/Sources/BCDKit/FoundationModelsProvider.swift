@@ -95,6 +95,42 @@ public struct FoundationModelsProvider: LLMProvider {
         return [guess]
     }
 
+    public func pickProduct(ocr texts: [String], candidates: [ScoredCandidate]) async throws -> ProductPick? {
+        guard isAvailable else {
+            return try await MockLLMProvider().pickProduct(ocr: texts, candidates: candidates)
+        }
+        guard !candidates.isEmpty, !texts.isEmpty else { return nil }
+        // A numbered menu and an instruction to answer with a number. The model never gets
+        // to name a product, so the parroted-example failure `interpretLabels` had to be
+        // defended against cannot happen here: an answer is a row the server already
+        // surfaced, or nothing.
+        let menu = candidates.enumerated().map { i, c in
+            let p = c.resolved.product
+            let style = p.style.map { " (\($0.value))" } ?? ""
+            return "\(i + 1). \(p.name) — \(c.resolved.producer.name)\(style)"
+        }.joined(separator: "\n")
+        let fragments = texts.map { "\"\($0)\"" }.joined(separator: ", ")
+        let session = LanguageModelSession(instructions: """
+            You match text that OCR read off a beer, cider or spirits label to a short list of
+            catalog entries. Label typefaces are stylized, so letters may be missing, split or
+            substituted (for example "Chemist" for "Alchemist", "Ready" for "Heady"). Consider
+            producer names and beer names. Answer with only the number of the matching entry,
+            or NONE if no entry is clearly the label. Never answer with a name.
+            """)
+        let prompt = """
+        OCR fragments: \(fragments)
+        Entries:
+        \(menu)
+        """
+        let response = try await session.respond(to: prompt)
+        let answer = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let m = answer.firstMatch(of: #/(\d+)/#), let n = Int(m.1),
+              (1...candidates.count).contains(n) else { return nil }
+        // The model gives no calibrated confidence; a constrained pick is moderately
+        // confident and the HUD marks it as model-adjudicated.
+        return ProductPick(productId: candidates[n - 1].resolved.product.id, confidence: 0.7)
+    }
+
     private static func parseLoose(_ content: String, original: String) -> QueryIntent {
         var intent = QueryIntent(freeText: original)
         let lower = content.lowercased()

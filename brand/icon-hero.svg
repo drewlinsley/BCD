@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="inkBg" cx="50%" cy="33%" r="82%">
+      <stop offset="0" stop-color="#24222F"/><stop offset="1" stop-color="#100F16"/>
+    </radialGradient>
+    <clipPath id="cBottle"><path d="M384 396 L384 458 C384 486 362 492 362 522 L362 632 Q362 664 388 664 L408 664 Q434 664 434 632 L434 522 C434 492 412 486 412 458 L412 396 Z"/></clipPath>
+    <clipPath id="cCan"><rect x="470" y="430" width="84" height="234" rx="22"/></clipPath>
+    <clipPath id="cGlass"><path d="M580 430 L672 430 L662 648 Q661 664 646 664 L606 664 Q591 664 590 648 Z"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#inkBg)"/>
+  <rect x="150" y="505" width="724" height="6" rx="3" fill="#E9A23A" opacity=".14"/>
+  <g fill="none" stroke="#E9A23A" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="160,300 160,160 300,160"/><polyline points="724,160 864,160 864,300"/>
+    <polyline points="160,724 160,864 300,864"/><polyline points="724,864 864,864 864,724"/>
+  </g>
+  <g transform="translate(512,518) scale(1.1) translate(-512,-518)">
+    <g fill="#F3EADB">
+      <rect x="386" y="372" width="24" height="26" rx="6"/>
+      <path d="M384 396 L384 458 C384 486 362 492 362 522 L362 632 Q362 664 388 664 L408 664 Q434 664 434 632 L434 522 C434 492 412 486 412 458 L412 396 Z"/>
+      <rect x="470" y="430" width="84" height="234" rx="22"/>
+      <path d="M580 430 L672 430 L662 648 Q661 664 646 664 L606 664 Q591 664 590 648 Z"/>
+      <rect x="580" y="416" width="92" height="16" rx="8"/>
+      <circle cx="596" cy="412" r="14"/><circle cx="620" cy="405" r="17"/>
+      <circle cx="644" cy="409" r="15"/><circle cx="666" cy="414" r="13"/>
+    </g>
+    <g clip-path="url(#cBottle)"><rect x="358" y="548" width="82" height="120" fill="#E9A23A"/><rect x="358" y="548" width="82" height="8" fill="#F6C979"/></g>
+    <g clip-path="url(#cCan)"><rect x="468" y="516" width="90" height="150" fill="#E9A23A"/><rect x="468" y="516" width="90" height="8" fill="#F6C979"/></g>
+    <g clip-path="url(#cGlass)"><rect x="578" y="500" width="98" height="168" fill="#E9A23A"/><rect x="578" y="500" width="98" height="8" fill="#F6C979"/></g>
+    <ellipse cx="512" cy="430" rx="42" ry="11" fill="#D9CBB0"/>
+  </g>
+</svg>
