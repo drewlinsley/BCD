@@ -84,7 +84,7 @@ struct ScanView: View {
     private var chatBar: some View {
         HStack {
             Image(systemName: "sparkles")
-            TextField("cheapest hazy here · nothing over 6%", text: $ask)
+            TextField("Narrow what's in view", text: $ask)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
                 .onSubmit { Task { await model.applyFilter(ask) } }

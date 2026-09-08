@@ -172,8 +172,7 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         let request = GenerateForegroundInstanceMaskRequest()
         let maybe: InstanceMaskObservation? = try await request.perform(on: buffer)
         guard let observation = maybe else { return [] }
-        let boxes = Self.instanceBoxes(mask: observation.instanceMask,
-                                       instances: observation.allInstances)
+        let boxes = Self.instanceBoxes(of: observation)
         let handler = ImageRequestHandler(buffer)
         var regions: [ObjectRegion] = []
         let ordered = boxes.sorted { $0.value.area > $1.value.area }
@@ -200,31 +199,51 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         return regions
     }
 
-    /// Bounding box per instance index from Vision's 8-bit instance mask (0 = background).
-    static func instanceBoxes(mask: CVPixelBuffer, instances: IndexSet) -> [Int: BoundingBox] {
-        CVPixelBufferLockBaseAddress(mask, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(mask) else { return [:] }
-        let w = CVPixelBufferGetWidth(mask), h = CVPixelBufferGetHeight(mask)
-        let stride = CVPixelBufferGetBytesPerRow(mask)
-        let bytes = base.assumingMemoryBound(to: UInt8.self)
-        var minX = [Int: Int](), minY = [Int: Int](), maxX = [Int: Int](), maxY = [Int: Int]()
-        for y in 0..<h {
-            let row = bytes + y * stride
-            for x in 0..<w {
-                let v = Int(row[x])
-                guard v != 0, instances.contains(v) else { continue }
-                minX[v] = min(minX[v] ?? x, x); maxX[v] = max(maxX[v] ?? x, x)
-                minY[v] = min(minY[v] ?? y, y); maxY[v] = max(maxY[v] ?? y, y)
-            }
-        }
+    /// Bounding box per instance.
+    ///
+    /// Vision hands back one mask at a time (`generateMask(for:)`) rather than a single
+    /// index-coded buffer, so each instance is lifted on its own and reduced to the extent of
+    /// its non-zero pixels. `allInstancesMask` is the union of every instance and cannot tell
+    /// them apart, which is why it is not what this uses.
+    static func instanceBoxes(of observation: InstanceMaskObservation) -> [Int: BoundingBox] {
         var out: [Int: BoundingBox] = [:]
-        for (v, x0) in minX {
-            guard let y0 = minY[v], let x1 = maxX[v], let y1 = maxY[v], w > 0, h > 0 else { continue }
-            out[v] = BoundingBox(x: Double(x0) / Double(w), y: Double(y0) / Double(h),
-                                 w: Double(x1 - x0 + 1) / Double(w), h: Double(y1 - y0 + 1) / Double(h))
+        for index in observation.allInstances {
+            guard let mask = try? observation.generateMask(for: IndexSet(integer: index)),
+                  let box = boundingBox(ofNonZeroIn: mask) else { continue }
+            out[index] = box
         }
         return out
+    }
+
+    /// Extent of a mask's non-zero pixels, normalized 0-1. Vision returns a one-component
+    /// mask; whether that component is 8-bit or float depends on the request, so both are
+    /// read rather than assuming the byte layout and silently boxing noise.
+    static func boundingBox(ofNonZeroIn mask: CVPixelBuffer) -> BoundingBox? {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(mask) else { return nil }
+        let w = CVPixelBufferGetWidth(mask), h = CVPixelBufferGetHeight(mask)
+        guard w > 0, h > 0 else { return nil }
+        let stride = CVPixelBufferGetBytesPerRow(mask)
+        let isFloat = CVPixelBufferGetPixelFormatType(mask) == kCVPixelFormatType_OneComponent32Float
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in 0..<h {
+            let row = base + y * stride
+            for x in 0..<w {
+                let on: Bool = isFloat
+                    ? row.assumingMemoryBound(to: Float.self)[x] > 0.5
+                    : row.assumingMemoryBound(to: UInt8.self)[x] != 0
+                guard on else { continue }
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return BoundingBox(x: Double(minX) / Double(w), y: Double(minY) / Double(h),
+                           w: Double(maxX - minX + 1) / Double(w),
+                           h: Double(maxY - minY + 1) / Double(h))
     }
 
     static let containerWords: Set<String> = [
