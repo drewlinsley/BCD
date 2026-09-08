@@ -14,15 +14,21 @@ Every gold row still carries the full canonical `record` as jsonb; `name`, `sens
 search operators have something to bite on. The invariant is unchanged: never lose raw
 bytes, every gold field traces back to a bronze document id.
 
-Concurrency: one connection in autocommit, serialized by a lock — same pragmatic choice
-as the SQLite store, since FastAPI runs sync endpoints in a threadpool. Production swaps
-this for a psycopg_pool ConnectionPool; the method surface stays identical.
+Concurrency: one connection in autocommit, serialized by a lock — same pragmatic choice as
+the SQLite store, since FastAPI runs sync endpoints in a threadpool. The one exception is
+`match_products_many`, which fans a scan frame's lines out over a few read-only connections
+of its own, because those queries are the latency-critical path and are pure reads. A
+psycopg_pool ConnectionPool would subsume both; the method surface stays identical either
+way.
 """
 
 from __future__ import annotations
 
+import os
+import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +37,7 @@ from bcd_schema import SENSORY_AXES
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.types.json import Jsonb
 
+from .dedup import carries_no_identity, is_generic_token, search_name
 from .store import BronzeDoc  # reuse the shared bronze dataclass
 
 
@@ -71,6 +78,27 @@ def _sensory_array(record: dict[str, Any]) -> list[float] | None:
     return arr if any(arr) else None
 
 
+def _no_nuls(value: Any) -> Any:
+    """Strip U+0000 from anything on its way into Postgres.
+
+    jsonb and text both refuse it outright -- "unsupported Unicode escape sequence: \\u0000
+    cannot be converted to text" -- and one 2008 label whose fanciful name carried a NUL ended
+    a twenty-minute TTB backfill 194,101 rows in. The byte is padding in a fixed-width export,
+    never content, so dropping it loses nothing.
+
+    This sits at the store boundary rather than in the connector that happened to trip it: the
+    constraint is Postgres's, it applies to every source, and a run should not be able to die
+    on one bad byte from a source that has not been taught about it yet.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_no_nuls(k): _no_nuls(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_no_nuls(v) for v in value]
+    return value
+
+
 class PostgresStore:
     def __init__(self, url: str = "postgresql://localhost:5432/bcd", *,
                  search_path: str | None = None) -> None:
@@ -83,12 +111,57 @@ class PostgresStore:
         if search_path:
             # applied at connect, before _init(), so DDL lands in the leading schema
             kwargs["options"] = f"-c search_path={search_path}"
+        self._connect_kwargs = kwargs
         self._conn = psycopg.connect(self.dsn, **kwargs)
         self._lock = threading.Lock()
+        # Idle readers for concurrent frame matching, opened on demand (see `_reader`).
+        self._readers: list[psycopg.Connection] = []
+        self._readers_lock = threading.Lock()
         if search_path:
             with self._conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {search_path.split(',')[0].strip()}")
         self._init()
+        self._set_trgm_thresholds()
+
+    def _set_trgm_thresholds(self) -> None:
+        """Thresholds for the GIN gate in `match_products`.
+
+        Deliberately below the resolver's own 0.5 floor: the gate only decides what gets
+        scored, so anything it lets through that scores badly is rejected downstream, while
+        anything it wrongly excludes is invisible. Erring low costs a few hundred rows of
+        scoring; erring high silently loses matches.
+        """
+        with self._lock:
+            self._apply_trgm(self._conn)
+
+    @staticmethod
+    def _apply_trgm(conn: psycopg.Connection) -> None:
+        """Every connection that runs the gate needs these, because they are per-session."""
+        with conn.cursor() as cur:
+            # BCD_TRGM_LIMIT exists so this can be measured against the recognition
+            # harness rather than argued about: it governs `%`, which is what the per-token
+            # probes use, and at a million products those probes are what the gate costs.
+            # 0.45, raised from 0.3 once the category-line gate stopped hiding what this
+            # costs. It governs `%`, the per-token probes: at 0.3 the token FOCAL walked a
+            # posting list worth 1.4s, at 0.45 262ms, and the 12-label recognition harness
+            # answers 12/12 either way. Not pushed to 0.6 (another 80ms) -- twelve labels is
+            # too small a corpus to justify the tighter floor.
+            cur.execute("SELECT set_limit(%s::real)",
+                        (float(os.environ.get("BCD_TRGM_LIMIT", "0.45")),))
+            # 0.4 rather than the 0.5 default, measured: "Guinness Draught" scores 0.486
+            # against a real canned label and would be excluded by a hair. Below 0.35 the
+            # gate stops discriminating — "SIERRA NEVADA PALE ALE" goes from 1,204
+            # candidate rows to 17,336 and the scan costs half a second.
+            cur.execute("SET pg_trgm.word_similarity_threshold = 0.4")
+            # The gate ORs one bitmap per probe, and past roughly a million products their
+            # union stops fitting the 4MB default. A bitmap that overflows work_mem does not
+            # degrade gently: it drops from exact tuple pointers to whole-page bitmaps, and
+            # every row on a flagged page is then rechecked with a fresh trigram comparison.
+            # Measured on a 1.05M-row catalog, one line went lossy at 66,903 pages, rechecked
+            # 342,249 rows to return 320, and cost 6.4s -- against 2.5s for the identical plan
+            # with an exact bitmap. It is a cliff, not a slope, which is why the regression
+            # appeared all at once rather than growing with the catalog.
+            cur.execute("SET work_mem = '128MB'")
 
     def _init(self) -> None:
         with self._lock, self._conn.cursor() as cur:
@@ -125,10 +198,43 @@ class PostgresStore:
                     lon         double precision,
                     updated_at  timestamptz NOT NULL
                 );
+                ALTER TABLE gold ADD COLUMN IF NOT EXISTS search_name text;
+                -- Whether the name carries nothing that could pick this product off a
+                -- shelf: no word of four letters or more that isn't a category word.
+                -- Denormalised because the vocabulary lives in Python and the gate has to
+                -- ask the question in SQL.
+                ALTER TABLE gold ADD COLUMN IF NOT EXISTS generic boolean;
                 CREATE INDEX IF NOT EXISTS ix_silver_type ON silver(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_type ON gold(entity_type);
                 CREATE INDEX IF NOT EXISTS ix_gold_name_trgm
                     ON gold USING gin (name gin_trgm_ops);
+                CREATE INDEX IF NOT EXISTS ix_gold_search_name_trgm
+                    ON gold USING gin (search_name gin_trgm_ops);
+                -- The gate `match_products` runs, and the only index it can use. Partial
+                -- because scan resolution only ever asks about products: indexed over every
+                -- entity type the planner BitmapANDs the trigram hit against ix_gold_type and
+                -- walks all 457k entries, which is most of the 7.4s a resolve used to cost.
+                -- Over the *coalesced* expression because `search_name` is filled by a batch
+                -- refresh, so a freshly promoted row has none and must still be reachable by
+                -- its plain name -- and because one probe of this costs half what separate
+                -- `name` and `search_name` probes do, for provably identical rows.
+                CREATE INDEX IF NOT EXISTS ix_gold_qualified_trgm_product
+                    ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
+                    WHERE entity_type='product';
+                -- A line that names only a style can only legitimately match a product whose
+                -- name is equally styleless -- that is _token_supported's own rule -- and
+                -- those are 0.5% of the catalog. Gating such a line against the whole table
+                -- scored 21,606 candidates to keep almost none of them.
+                CREATE INDEX IF NOT EXISTS ix_gold_generic_trgm_product
+                    ON gold USING gin ((coalesce(search_name, name, '')) gin_trgm_ops)
+                    WHERE entity_type='product' AND generic;
+                -- Same gate, same reason, for `match_producers`.
+                CREATE INDEX IF NOT EXISTS ix_gold_name_trgm_producer
+                    ON gold USING gin (name gin_trgm_ops)
+                    WHERE entity_type='producer';
+                CREATE INDEX IF NOT EXISTS ix_gold_producer_of_product
+                    ON gold ((record->>'producer_id'))
+                    WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
                 """
@@ -148,7 +254,8 @@ class PostgresStore:
                     source_id=EXCLUDED.source_id, natural_key=EXCLUDED.natural_key,
                     fetched_at=EXCLUDED.fetched_at, url=EXCLUDED.url, payload=EXCLUDED.payload
                 """,
-                (doc.id, doc.source_id, doc.natural_key, fetched, doc.url, Jsonb(doc.payload)),
+                (doc.id, doc.source_id, doc.natural_key, fetched, doc.url,
+                 Jsonb(_no_nuls(doc.payload))),
             )
 
     def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]:
@@ -174,7 +281,7 @@ class PostgresStore:
                     source_id=EXCLUDED.source_id, entity_type=EXCLUDED.entity_type,
                     bronze_id=EXCLUDED.bronze_id, record=EXCLUDED.record
                 """,
-                (sid, source_id, entity_type, bronze_id, Jsonb(record)),
+                (sid, source_id, entity_type, bronze_id, Jsonb(_no_nuls(record))),
             )
 
     def iter_silver(self, entity_type: str) -> Iterator[dict[str, Any]]:
@@ -187,7 +294,9 @@ class PostgresStore:
 
     # ---- gold ----
     def put_gold(self, gid: str, entity_type: str, record: dict[str, Any]) -> None:
+        record = _no_nuls(record)
         name = record.get("name")
+        generic = carries_no_identity(name or "") if entity_type == "product" else None
         arr = _sensory_array(record) if entity_type == "product" else None
         sensory = _vec_literal(arr) if arr is not None else None
         lat = record.get("lat")
@@ -195,20 +304,28 @@ class PostgresStore:
         with self._lock, self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO gold (id, entity_type, record, name, sensory, lat, lon, updated_at)
-                VALUES (%s, %s, %s, %s, %s::vector, %s, %s, now())
+                INSERT INTO gold (id, entity_type, record, name, sensory, lat, lon,
+                                  generic, updated_at)
+                VALUES (%s, %s, %s, %s, %s::vector, %s, %s, %s, now())
                 ON CONFLICT (id) DO UPDATE SET
                     entity_type=EXCLUDED.entity_type, record=EXCLUDED.record,
                     name=EXCLUDED.name, sensory=EXCLUDED.sensory,
-                    lat=EXCLUDED.lat, lon=EXCLUDED.lon, updated_at=now()
+                    lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                    generic=EXCLUDED.generic, updated_at=now()
                 """,
-                (gid, entity_type, Jsonb(record), name, sensory, lat, lon),
+                (gid, entity_type, Jsonb(record), name, sensory, lat, lon, generic),
             )
 
     def get_gold(self, gid: str) -> dict[str, Any] | None:
         with self._lock, self._conn.cursor() as cur:
             row = cur.execute("SELECT record FROM gold WHERE id=%s", (gid,)).fetchone()
         return row[0] if row else None
+
+    def delete_gold(self, gid: str) -> None:
+        """Remove a gold row outright. Used where a merge leaves nothing to redirect to —
+        a producer is only ever reached through the rows that name it."""
+        with self._lock, self._conn.cursor() as cur:
+            cur.execute("DELETE FROM gold WHERE id=%s", (gid,))
 
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]:
         with self._lock, self._conn.cursor() as cur:
@@ -242,59 +359,246 @@ class PostgresStore:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def refresh_search_names(self) -> int:
+        """Denormalise the brand-qualified name onto every product, for matching only.
+
+        The rule lives in `dedup.search_name` so this store and the dev store agree; see
+        it for why a brand is sometimes withheld. Idempotent — run after any promote.
+        """
+        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")}
+        rows = [
+            (search_name(p.get("name") or "", brands.get(p.get("brand_id") or "")), p["id"])
+            for p in self.iter_gold("product")
+        ]
+        with self._lock, self._conn.cursor() as cur:
+            cur.executemany("UPDATE gold SET search_name=%s WHERE id=%s", rows)
+        return len(rows)
+
     # ---- search (used by the resolver / recommend) ----
-    def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Trigram similarity on product name, best-first. Index-accelerated via the GIN
-        `%` operator; similarity() gives the ranking score (0-1)."""
+    def match_products(self, text: str, limit: int = 3, *,
+                       conn: psycopg.Connection | None = None) -> list[tuple[dict, float]]:
+        """Best-first name match for an OCR line, scored 0-1.
+
+        `word_similarity` is directional — it finds its first argument inside a continuous
+        extent of its second — and a label can be noisy in either direction, so both are
+        taken:
+
+          * `word_similarity(name, line)` finds a short catalog name inside a noisy OCR
+            line: "GUINNESS DRAUGHT 440ML EXTRA STOUT" -> Guinness.
+          * `word_similarity(line, name)` finds a short OCR line inside a longer catalog
+            name: "BOMBAY SAPPHIRE" -> "Bombay Sapphire London Dry Gin".
+
+        Only the first was measured for a long time, which quietly biased matching toward
+        stubby catalog entries: every extra word in the *right* answer diluted its score
+        while a short wrong one kept a high one. "BOMBAY SAPPHIRE" returned "Gin Bombay"
+        (0.636) over "Bombay Sapphire London Dry Gin" (0.516), and "HEADY TOPPER" scored
+        the product actually called that only 0.500. Both are 1.000 with the second
+        direction included.
+
+        Plain `similarity` stays for the case where the OCR simply *is* the name
+        ("HEINEKEN"). The caller applies a confidence floor and token-support checks, so
+        this returns the top few regardless and lets the resolver reject weak ones.
+
+        Scoring every row was fine at a few thousand products and is not at 363k: the
+        planner parallel-seq-scans the table and one resolve took 7.4 seconds, against a
+        HUD that ticks every 700ms. So a GIN gate runs first and the six similarity terms
+        are computed only on what survives it — 966 rows rather than 363,014, for the same
+        answer.
+
+        The gate cannot simply mirror the scoring. `gin_trgm_ops` indexes `%` and `%>` but
+        NOT `<%`, so `word_similarity(name, line)` — the Guinness direction — has no
+        index-usable operator at all. Gating on the whole line would therefore drop
+        exactly the case that direction exists to catch. The line's own words are added to
+        the gate to cover it: a catalog row named "Guinness" is reached from the token
+        GUINNESS even though the full noisy line never comes close.
+        """
         text = (text or "").strip()
         if not text:
             return []
-        with self._lock, self._conn.cursor() as cur:
-            rows = cur.execute(
-                """
-                SELECT record, similarity(coalesce(name,''), %s) AS sim
+
+        # Which words are worth an index probe of their own. Style and category words are
+        # not: "PALE" matches 19,203 products and costs 300ms to find them, because
+        # word-similarity is 1.0 against every name containing the word. Dropping them
+        # takes the gate from 20,343 candidate rows to 803. `is_generic_token` is the same
+        # vocabulary dedup and the resolver already judge identity with.
+        toks = [t for t in re.findall(r"[^\W\d_]{4,}", text, re.UNICODE)
+                if not is_generic_token(t)][:6]
+
+        # The whole line, then its identifying words. The line alone is not enough: a
+        # catalog row named just "Guinness" scores word_similarity(line, name) = 0.257
+        # against "GUINNESS DRAUGHT 440ML EXTRA STOUT" and no workable threshold reaches
+        # it, while the token GUINNESS finds it outright.
+        # One probe per term, against the brand-qualified name the index is built on. Probing
+        # `name` separately is redundant: search_name is "<brand> <name>", so every row the
+        # name probe finds the qualified probe finds too — measured across the live catalog,
+        # eight probes, zero rows lost — and each probe costs 100-600ms, because a GIN
+        # trigram scan walks a posting list sized by how common the *trigrams* are, not by how
+        # many rows come back ("stowe" costs 534ms to return 20 rows).
+        qualified = "coalesce(search_name, name, '')"
+        gate = [f"{qualified} %%> %s"]
+        params: list[Any] = [text]
+        for t in toks:
+            gate += [f"{qualified} %% %s"]
+            params += [t]
+
+        # No identifying token in the whole line: it names a style, not a drink. The caller
+        # will only accept such a line against a candidate whose name is equally styleless
+        # (_token_supported returns `not _identifying_tokens(query)` for those), so scoring
+        # the rest is work whose result is discarded. "INDIA PALE ALE" gated 21,606 rows
+        # against the full table and 2,578 against this one -- the same answer, and the
+        # partial index means the narrow case does not even walk the wide posting lists.
+        scope = "entity_type='product'"
+        if not toks:
+            scope += " AND generic"
+
+        sql = f"""
+            WITH candidate AS (
+                SELECT id, record, name, search_name
                 FROM gold
-                WHERE entity_type='product' AND coalesce(name,'') %% %s
-                ORDER BY sim DESC
-                LIMIT %s
-                """,
-                (text, text, limit),
-            ).fetchall()
+                WHERE {scope} AND ({" OR ".join(gate)})
+            )
+            SELECT record,
+                   GREATEST(similarity(coalesce(name,''), %s),
+                            word_similarity(coalesce(name,''), %s),
+                            word_similarity(%s, coalesce(name,'')),
+                            similarity(coalesce(search_name, name, ''), %s),
+                            word_similarity(coalesce(search_name, name, ''), %s),
+                            word_similarity(%s, coalesce(search_name, name, ''))) AS sim
+            FROM candidate
+            -- Ties at the top are the norm, not the exception: `word_similarity` scores
+            -- 1.0 for ANY name wholly contained in the label, so "Handmade Vodka" and
+            -- "Tito's Handmade Vodka" both max out on "TITOS HANDMADE VODKA". Plain
+            -- `similarity` is the tiebreak because it is the only one of the three that
+            -- penalises what the candidate *leaves out* — it drops for the row missing
+            -- "Titos", and rises for the one that accounts for the whole label.
+            ORDER BY sim DESC,
+                     similarity(coalesce(search_name, name, ''), %s) DESC,
+                     id
+            LIMIT %s
+        """
+        params += [text] * 7 + [limit]
+        if conn is not None:
+            # A reader from the frame pool: already private to this thread, so no lock.
+            with conn.cursor() as cur:
+                rows = cur.execute(sql, params).fetchall()
+        else:
+            with self._lock, self._conn.cursor() as cur:
+                rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Trigram similarity on producer/brand name, best-first — the `name` column is
-        denormalized for every entity type, so the same GIN index serves this."""
+        """Name match against producers — the path for a label whose *product* name the camera
+        cannot read.
+
+        A stylized wordmark can be unreadable while the small rim print survives. On a real
+        Heady Topper can the beer's own name OCR'd as Cyrillic ("АДУ ТОРИ") and appeared in 3
+        of 100 lines, while "ALCHEMIST-VER…" — the brewery and state around the rim — appeared
+        in 23. The brewery is the readable half of that label, and a brewery with a handful of
+        products is a far narrower answer than a 363k-row product search.
+
+        Producers have no brand to qualify with, so this gates on `name` alone.
+        """
         text = (text or "").strip()
         if not text:
             return []
+        toks = [t for t in re.findall(r"[^\W\d_]{4,}", text, re.UNICODE)
+                if not is_generic_token(t)][:6]
+        gate = ["name %%> %s"]
+        params: list[Any] = [text]
+        for t in toks:
+            gate += ["name %% %s"]
+            params += [t]
+        sql = f"""
+            WITH candidate AS (
+                SELECT id, record, name FROM gold
+                WHERE entity_type='producer' AND ({" OR ".join(gate)})
+            )
+            SELECT record, GREATEST(similarity(coalesce(name,''), %s),
+                                    word_similarity(coalesce(name,''), %s),
+                                    word_similarity(%s, coalesce(name,''))) AS sim
+            FROM candidate
+            ORDER BY sim DESC, similarity(coalesce(name,''), %s) DESC, id
+            LIMIT %s
+        """
+        params += [text] * 4 + [limit]
         with self._lock, self._conn.cursor() as cur:
-            rows = cur.execute(
-                """
-                SELECT record, similarity(coalesce(name,''), %s) AS sim
-                FROM gold
-                WHERE entity_type IN ('producer', 'brand') AND coalesce(name,'') %% %s
-                ORDER BY sim DESC
-                LIMIT %s
-                """,
-                (text, text, limit),
-            ).fetchall()
+            rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
-    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]:
-        """Every product owned by a producer or brand id (jsonb field lookup)."""
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
+        """A producer's catalog, best-known first — what the producer path offers once it has
+        identified the maker. Rows carrying real data (an ABV, a sensory vector) sort first, so
+        a thin duplicate does not represent the brewery."""
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
                 """
-                SELECT record
-                FROM gold
-                WHERE entity_type='product'
-                  AND (record->>'producer_id' = %s OR record->>'brand_id' = %s)
+                SELECT record FROM gold
+                WHERE entity_type='product' AND record->>'producer_id' = %s
+                ORDER BY (sensory IS NOT NULL) DESC,
+                         (record->'spec'->'abv_pct' IS NOT NULL) DESC,
+                         name
                 LIMIT %s
                 """,
-                (producer_id, producer_id, limit),
+                (producer_id, limit),
             ).fetchall()
         return [r[0] for r in rows]
+
+    # ---- frame matching ----
+    # A label is several lines and each one costs a GIN scan sized by how common its
+    # trigrams are, not by how many rows come back — "stowe" costs 534ms to return 20 rows.
+    # Run in series a six-line can takes ~2s against a HUD that ticks every 700ms; run
+    # concurrently it takes about as long as its slowest line. Batching them into a single
+    # query was tried first and measured three times *worse* (13.6s vs 4.8s): one OR'd gate
+    # across every line makes the planner give up on per-term index scans.
+    _MATCH_POOL_SIZE = 4
+
+    def _reader(self) -> psycopg.Connection:
+        """A connection for frame matching, one per worker thread, opened on first use.
+
+        Opened here rather than borrowed from anywhere because the trigram thresholds are
+        *per-session* GUCs: a connection that skipped them would gate differently and
+        silently return different matches for the same label.
+        """
+        with self._readers_lock:
+            if self._readers:
+                return self._readers.pop()
+            conn = psycopg.connect(self.dsn, **self._connect_kwargs)
+        self._apply_trgm(conn)
+        return conn
+
+    def _release(self, conn: psycopg.Connection) -> None:
+        with self._readers_lock:
+            if len(self._readers) < self._MATCH_POOL_SIZE:
+                self._readers.append(conn)
+                return
+        conn.close()
+
+    def match_products_many(
+        self, texts: Sequence[str], limit: int = 3
+    ) -> list[list[tuple[dict, float]]]:
+        """`match_products` for a whole frame at once — same answers, run concurrently.
+
+        Results stay positionally aligned with `texts`, so a caller can keep attributing a
+        match to the line it came from."""
+        texts = list(texts)
+        if len(texts) <= 1:
+            return [self.match_products(t, limit) for t in texts]
+        workers = min(len(texts), self._MATCH_POOL_SIZE)
+        results: list[list[tuple[dict, float]]] = [[] for _ in texts]
+
+        def run(slot: int) -> None:
+            conn = self._reader()
+            try:
+                # Strided rather than chunked so one slow line does not strand a worker
+                # with the rest of its block still to do.
+                for i in range(slot, len(texts), workers):
+                    results[i] = self.match_products(texts[i], limit, conn=conn)
+            finally:
+                self._release(conn)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(run, range(workers)))    # list() so a worker's error propagates
+        return results
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine ANN over the sensory column — the pgvector core of recommendation."""
@@ -312,6 +616,10 @@ class PostgresStore:
         return [r[0] for r in rows]
 
     def close(self) -> None:
+        with self._readers_lock:
+            readers, self._readers = self._readers, []
+        for r in readers:
+            r.close()
         self._conn.close()
 
 

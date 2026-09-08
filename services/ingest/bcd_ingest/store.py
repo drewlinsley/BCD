@@ -14,13 +14,14 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from typing import Any, Protocol, runtime_checkable
 
 from bcd_schema import SENSORY_AXES
+
+from .dedup import is_generic_token, search_name
 
 
 def _now() -> str:
@@ -29,16 +30,6 @@ def _now() -> str:
 
 def _tokenize(s: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if len(t) > 2}
-
-
-def _fuzzy_eq(a: str, b: str, min_ratio: float = 0.8, min_len: int = 4) -> bool:
-    """Exact, or close enough to be an OCR misread of the same word. Short tokens must
-    match exactly — there's no room in 'ipa' for a typo that isn't a different word."""
-    if a == b:
-        return True
-    if len(a) < min_len or len(b) < min_len:
-        return False
-    return SequenceMatcher(None, a, b).ratio() >= min_ratio
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -178,6 +169,13 @@ class MedallionStore:
             ).fetchone()
         return json.loads(row["record"]) if row else None
 
+    def delete_gold(self, gid: str) -> None:
+        """Remove a gold row outright. Used where a merge leaves nothing to redirect to —
+        a producer is only ever reached through the rows that name it."""
+        with self._lock:
+            self._db.execute("DELETE FROM gold WHERE id=?", (gid,))
+            self._db.commit()
+
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
@@ -206,61 +204,83 @@ class MedallionStore:
 
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Fuzzy token-overlap name match, best-first — the laptop stand-in for pg_trgm.
-        Tokens match exactly or, for 4+ letter words, within an OCR-typo distance
-        ('toppfr' ~ 'topper'), so a mangled label read still *retrieves* the right
-        product; the resolver's identity scorer decides whether it's confident. The
+        """Token-overlap name match, best-first — the laptop stand-in for pg_trgm. The
         Postgres store swaps in real trigram similarity behind this same signature."""
         want = _tokenize(text)
         if not want:
             return []
+        # A product is scored against its own name *and* its brand-qualified name, because
+        # the catalog splits a label across two rows — brand "Tito's" + name "Handmade
+        # Vodka" for what a bottle simply calls Tito's Handmade Vodka.
+        ident = {t for t in want if not is_generic_token(t)}
+        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")}
         scored: list[tuple[dict, float]] = []
         for p in self.iter_gold("product"):
-            name_tokens = _tokenize(p.get("name", ""))
+            raw = p.get("name", "")
+            qualified = search_name(raw, brands.get(p.get("brand_id") or ""))
+            name_tokens = _tokenize(raw) | _tokenize(qualified)
             if not name_tokens:
                 continue
-            hits = sum(1 for t in name_tokens if any(_fuzzy_eq(q, t) for q in want))
-            if not hits:
+            overlap = want & name_tokens
+            if not overlap:
                 continue
-            # Coverage of the product name — extra words in the query cost nothing.
-            score = hits / max(len(name_tokens), 1)
-            scored.append((p, round(score, 3)))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
+            # Best of both coverages, mirroring the two directions of pg_trgm's
+            # `word_similarity` in the Postgres store. Dividing only by the name length
+            # rewards stubby catalog entries: for "BOMBAY SAPPHIRE", "Gin Bombay" covers
+            # half its own two tokens (0.5) while "Bombay Sapphire London Dry Gin" covers
+            # only two of its five (0.4) — and the wrong one wins. Covering the *query*
+            # instead gives the right answer 1.0.
+            score = max(len(overlap) / max(len(name_tokens), 1),
+                        len(overlap) / max(len(want), 1))
+            # How much of the *label* this row accounts for. Ties at the top are the norm
+            # — every name wholly inside the label scores 1.0 — so the row explaining more
+            # of what was read wins, mirroring the plain-similarity tiebreak the Postgres
+            # store uses. Only identifying tokens count: crediting category words would let
+            # a row matching "extra stout" beat one matching the brand.
+            covered = len(ident & _tokenize(qualified)) / max(len(ident), 1) if ident else 0.0
+            scored.append((p, round(score, 3), covered))
+        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        return [(p, sim) for p, sim, _ in scored[:limit]]
 
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
-        """Fuzzy name match over producers (and brands), best-first. Lets 'THE ALCHEMIST'
-        on a can retrieve that brewery's products even when the beer's own name was
-        unreadable — the resolver then ranks the siblings, or reports them ambiguous."""
+        """Token-overlap producer match — the dev-store stand-in for pg_trgm, mirroring
+        `match_products` so the resolver's producer path behaves the same on both."""
         want = _tokenize(text)
         if not want:
             return []
         scored: list[tuple[dict, float]] = []
-        for kind in ("producer", "brand"):
-            for rec in self.iter_gold(kind):
-                names = [rec.get("name", "")] + list(rec.get("aliases") or [])
-                best = 0.0
-                for n in names:
-                    toks = _tokenize(n)
-                    if not toks:
-                        continue
-                    hits = sum(1 for t in toks if any(_fuzzy_eq(q, t) for q in want))
-                    best = max(best, hits / len(toks))
-                if best > 0:
-                    scored.append((rec, round(best, 3)))
-        scored.sort(key=lambda x: x[1], reverse=True)
+        for rec in self.iter_gold("producer"):
+            have = _tokenize(rec.get("name") or "")
+            if not have:
+                continue
+            overlap = len(want & have) / len(want | have)
+            if overlap > 0:
+                scored.append((rec, round(overlap, 3)))
+        scored.sort(key=lambda r: (-r[1], r[0].get("id") or ""))
         return scored[:limit]
 
-    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]:
-        """Every product a producer (or brand) owns. Python scan on the dev store; an
-        indexed jsonb lookup on Postgres."""
-        out: list[dict[str, Any]] = []
-        for p in self.iter_gold("product"):
-            if p.get("producer_id") == producer_id or p.get("brand_id") == producer_id:
-                out.append(p)
-                if len(out) >= limit:
-                    break
-        return out
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
+        """A producer's catalog, for the producer path."""
+        out = [r for r in self.iter_gold("product")
+               if r.get("producer_id") == producer_id]
+        out.sort(key=lambda r: (r.get("sensory") is None,
+                                (r.get("spec") or {}).get("abv_pct") is None,
+                                r.get("name") or ""))
+        return out[:limit]
+
+    def match_products_many(
+        self, texts: Sequence[str], limit: int = 3
+    ) -> list[list[tuple[dict, float]]]:
+        """Frame matching for the dev store: the same answers, in series. Only the Postgres
+        store has anything to gain from running a frame's lines concurrently — this one is a
+        local file."""
+        return [self.match_products(t, limit) for t in texts]
+
+    def refresh_search_names(self) -> int:
+        """No-op: this store builds the brand-qualified name per query rather than storing
+        it, so there is nothing to backfill. Present so callers need not know which store
+        they hold."""
+        return 0
 
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine nearest-neighbor over products that carry a sensory vector, computed in
@@ -293,12 +313,16 @@ class Store(Protocol):
     def iter_silver(self, entity_type: str) -> Iterator[dict[str, Any]]: ...
     def put_gold(self, gid: str, entity_type: str, record: dict[str, Any]) -> None: ...
     def get_gold(self, gid: str) -> dict[str, Any] | None: ...
+    def delete_gold(self, gid: str) -> None: ...
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]: ...
     def counts(self) -> dict[str, int]: ...
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
+    def match_products_many(self, texts: Sequence[str],
+                            limit: int = 3) -> list[list[tuple[dict, float]]]: ...
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
-    def products_by_producer(self, producer_id: str, limit: int = 25) -> list[dict[str, Any]]: ...
+    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]: ...
+    def refresh_search_names(self) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 

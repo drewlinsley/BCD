@@ -52,7 +52,8 @@ public struct Producer: Codable, Sendable, Identifiable {
     public let name: String
     public let kind: String?
     public let country: String?
-    public let region: String?
+    public let region: String?       // state / province
+    public let city: String?
     public let lat: Double?
     public let lon: Double?
     public let website: String?
@@ -122,11 +123,29 @@ public struct Product: Codable, Sendable, Identifiable {
     public let style: Sourced<String>?
     public let spec: ProductSpec
     public let recipe: RecipeGraph
+    public let sensory: SensoryVector?
 
     enum CodingKeys: String, CodingKey {
-        case id, category, name, style, spec, recipe
+        case id, category, name, style, spec, recipe, sensory
         case brandId = "brand_id"
         case producerId = "producer_id"
+    }
+
+    // Spelled out rather than left to the memberwise initializer so `sensory` can default:
+    // the field arrived long after the call sites did, and none of them should have to
+    // name it to keep building.
+    public init(id: String, brandId: String, producerId: String, category: Category,
+                name: String, style: Sourced<String>?, spec: ProductSpec,
+                recipe: RecipeGraph, sensory: SensoryVector? = nil) {
+        self.id = id
+        self.brandId = brandId
+        self.producerId = producerId
+        self.category = category
+        self.name = name
+        self.style = style
+        self.spec = spec
+        self.recipe = recipe
+        self.sensory = sensory
     }
 }
 
