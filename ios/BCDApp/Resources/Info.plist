@@ -4,6 +4,8 @@
 <dict>
 	<key>BCDAPIBase</key>
 	<string>$(BCD_API_SCHEME)://$(BCD_API_HOSTPORT)</string>
+	<key>BCDScanEngine</key>
+	<string>$(BCD_SCAN_ENGINE)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
