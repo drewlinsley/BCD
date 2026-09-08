@@ -55,3 +55,5 @@ ios/Local.xcconfig
 
 # Claude Code personal settings
 .claude/settings.local.json
+# the label index cache the API builds beside the data (rebuilt when the catalog changes)
+data/label_index.pkl

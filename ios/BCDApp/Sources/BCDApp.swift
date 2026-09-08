@@ -11,7 +11,9 @@ struct BCDApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView().environmentObject(env)
+            RootView()
+                .environmentObject(env)
+                .environmentObject(env.consent)
         }
     }
 }
@@ -22,26 +24,45 @@ final class AppEnvironment: ObservableObject {
     let llm: LLMProvider
     let telemetry: TelemetryQueue
     let makeScanEngine: () -> ScanEngine
+    /// Consent tiers, shared and persisted — the picker has to read a real answer before
+    /// it turns a tap into a personalization-tier event.
+    let consent: ConsentStore
+    /// What this install has already rated, so a product can show its own verdict on
+    /// recall without a round trip.
+    let reactions: ReactionLog
+    /// Drinks the user has opened — the queue the Rate tab works through.
+    let seen: SeenLog
+    /// Pseudonymous per-install id. The only identity the server keys a profile on.
+    let installId: String
 
     init(api: APIClientProtocol, llm: LLMProvider, telemetry: TelemetryQueue,
-         makeScanEngine: @escaping () -> ScanEngine) {
+         makeScanEngine: @escaping () -> ScanEngine,
+         consent: ConsentStore = ConsentStore(),
+         reactions: ReactionLog = ReactionLog(),
+         seen: SeenLog = SeenLog(),
+         installId: String = InstallIdentity.current) {
         self.api = api
         self.llm = llm
         self.telemetry = telemetry
         self.makeScanEngine = makeScanEngine
+        self.consent = consent
+        self.reactions = reactions
+        self.seen = seen
+        self.installId = installId
     }
 
     static func live() -> AppEnvironment {
-        let api = APIClient(baseURL: Self.apiBaseURL())
-        // Consent starts empty; the onboarding sheet flips tiers on explicit opt-in.
-        let telemetry = TelemetryQueue(consent: ConsentState(analytics: true), sink: api,
+        let api = APIClient(baseURL: Self.apiBaseURL(), installId: InstallIdentity.current)
+        // Consent is read from what the user actually chose last run, not assumed.
+        let consent = ConsentStore()
+        let telemetry = TelemetryQueue(consent: consent.state, sink: api,
                                        storeURL: Self.telemetryStoreURL())
         // Pick the LLM provider available on this device. Foundation Models is used only
         // where it exists AND is ready; otherwise the mock (or a cloud provider) stands in.
         let llm = Self.bestLLMProvider()
         return AppEnvironment(
             api: api, llm: llm, telemetry: telemetry,
-            makeScanEngine: { Self.makeScanEngine() }
+            makeScanEngine: { Self.makeScanEngine() }, consent: consent
         )
     }
 
@@ -69,15 +90,38 @@ final class AppEnvironment: ObservableObject {
         return MockLLMProvider()
     }
 
+    /// Which on-device pipeline drives the HUD. `BCD_SCAN_ENGINE` (env var, then the
+    /// `BCDScanEngine` Info.plist key from Local.xcconfig):
+    ///   - `visionkit` (default) — `DataScannerViewController`: text + barcode, known-good.
+    ///   - `vision`               — `VisionFrameScanEngine`: AVCapture + Vision with
+    ///                              instance segmentation and raw (uncorrected) OCR.
+    private static func scanEngineChoice() -> String {
+        if let env = ProcessInfo.processInfo.environment["BCD_SCAN_ENGINE"], !env.isEmpty {
+            return env.lowercased()
+        }
+        if let s = Bundle.main.object(forInfoDictionaryKey: "BCDScanEngine") as? String,
+           !s.isEmpty, !s.hasPrefix("$(") {
+            return s.lowercased()
+        }
+        return "visionkit"
+    }
+
     private static func makeScanEngine() -> ScanEngine {
         #if canImport(VisionKit) && os(iOS)
-        if #available(iOS 18.0, *) { return VisionKitScanEngine() }
+        if #available(iOS 18.0, *) {
+            switch scanEngineChoice() {
+            case "vision": return VisionFrameScanEngine()
+            default: return VisionKitScanEngine()
+            }
+        }
         #endif
-        // Host/preview fallback so the app is runnable in the Simulator on Intel too.
-        return MockScanEngine(scripted: [
-            [DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.08)],
-            [DetectedText(text: "Pliny the Elder", kind: "text", x: 0.15, y: 0.5, w: 0.6, h: 0.08)],
-        ])
+        // Host/preview fallback so the app is runnable in the Simulator on Intel too. Frames
+        // repeat because the tracker wants two frames of agreement before it asks.
+        let frame = [
+            DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.08),
+            DetectedText(text: "Pliny the Elder", kind: "text", x: 0.15, y: 0.55, w: 0.6, h: 0.08),
+        ]
+        return MockScanEngine(scripted: Array(repeating: frame, count: 3))
     }
 
     private static func telemetryStoreURL() -> URL {

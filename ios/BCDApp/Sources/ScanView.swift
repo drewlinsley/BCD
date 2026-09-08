@@ -1,13 +1,15 @@
 import SwiftUI
+import Combine
 import BCDKit
 #if canImport(VisionKit) && os(iOS)
 import VisionKit
 import AVFoundation
 #endif
 
-// The camera HUD — the whole product thesis in one screen. Live detections become
-// overlays anchored to their bounding boxes, color-coded by predicted enjoyment. A
-// persistent chat bar routes natural-language asks against the items currently in frame.
+// The camera HUD — the whole product thesis in one screen. It is fully live: point the phone at a
+// shelf and detections become overlays anchored to their boxes, color-coded by predicted
+// enjoyment, refreshed on a fixed cadence. No shutter, no freeze, no tap-to-scan. A persistent
+// chat bar applies a natural-language filter ("nothing over 6%") to whatever is currently in frame.
 
 struct ScanView: View {
     @EnvironmentObject var env: AppEnvironment
@@ -21,41 +23,76 @@ struct ScanView: View {
                 .ignoresSafeArea()
 
             GeometryReader { geo in
-                ForEach(model.overlays) { overlay in
-                    OverlayChip(candidate: overlay.candidate)
-                        .position(x: overlay.anchor.x * geo.size.width,
-                                  y: overlay.anchor.y * geo.size.height)
-                        .onTapGesture { selected = overlay.candidate }
+                ForEach(Array(model.overlays.enumerated()), id: \.element.id) { idx, overlay in
+                    let anchor = model.viewPoint(overlay.anchor, in: geo.size)
+                    OverlayChip(candidate: overlay.candidate,
+                                reaction: env.reactions
+                                    .reaction(for: overlay.candidate.resolved.product.id))
+                        .position(x: anchor.x * geo.size.width,
+                                  y: anchor.y * geo.size.height)
+                        // Overlays arrive best-first and SwiftUI draws later views on top, so
+                        // the best match was landing *underneath* every weaker one anchored
+                        // near it. Reported from the camera as a green box briefly visible but
+                        // "obscured by an orange/yellow box in front".
+                        .zIndex(Double(model.overlays.count - idx))
+                        .onTapGesture { selected = overlay.candidate }  // optional: open the detail receipt
                 }
             }
+            // Ease overlays in/out as the fixed-rate loop swaps the set each tick.
+            .animation(.easeInOut(duration: 0.2), value: model.overlays.count)
 
-            VStack(spacing: 8) {
-                if let latency = model.lastLatencyMs {
-                    Text("\(model.overlays.count) in view · \(Int(latency))ms")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
+            VStack(spacing: 12) {
+                statusPill
                 chatBar
             }
             .padding()
         }
-        .task { model.configure(env: env); model.start() }
+        .task { model.configure(env: env); model.startLive() }
         .onDisappear { model.stop() }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
         }
     }
 
+    // A one-line status: on-device interpretation, an active filter, or the live scan state.
+    @ViewBuilder private var statusPill: some View {
+        if model.isLookingAtTheLabel {
+            pill("Looking at the label…", system: "camera.viewfinder")
+        } else if model.isInterpreting {
+            pill("Reading with Apple Intelligence…", system: "sparkles")
+        } else if let f = model.filterText {
+            let n = model.overlays.count
+            pill(n == 0 ? "None in view match “\(f)”" : "\(n) match “\(f)”",
+                 system: "line.3.horizontal.decrease.circle")
+        } else {
+            // Live, fixed-rate: overlays refresh on their own, so no per-tick "Analyzing…" strobe.
+            let n = model.overlays.count
+            pill(n == 0 ? "Point at a shelf · scanning live" : "\(n) in view · live",
+                 system: "dot.radiowaves.left.and.right")
+        }
+    }
+
+    private func pill(_ text: String, system: String) -> some View {
+        Label(text, systemImage: system)
+            .font(.caption).foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    // Persistent, always-on. Typing an ask sets a live filter over the in-frame items; clearing it
+    // returns to the full set. No effect on the scan loop itself — the HUD keeps resolving live.
     private var chatBar: some View {
         HStack {
             Image(systemName: "sparkles")
             TextField("cheapest hazy here · nothing over 6%", text: $ask)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
-                .onSubmit { Task { await model.applyAsk(ask) } }
+                .onSubmit { Task { await model.applyFilter(ask) } }
             if !ask.isEmpty {
-                Button { ask = ""; Task { await model.applyAsk("") } } label: {
+                Button {
+                    ask = ""
+                    Task { await model.clearFilter() }
+                } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
             }
@@ -74,10 +111,19 @@ struct HUDOverlay: Identifiable {
 
 struct OverlayChip: View {
     let candidate: ScoredCandidate
+    /// This install's own verdict, if it has one — the same five-level scale, shown back.
+    var reaction: Reaction?
 
+    // Match score rides the reaction ramp so the HUD has one good-to-bad colour language
+    // rather than two competing ones.
     private var tint: Color {
-        guard let s = candidate.personalScore else { return .gray }
-        return s > 0.75 ? .green : (s > 0.5 ? .yellow : .orange)
+        guard let s = candidate.personalScore else { return Brand.reactionRest }
+        // `>=` on the middle band: 0.5 is the neutral score the recommender returns when it
+        // has no strong view, and `> 0.5` dropped it into the "poured it out" colour -- so a
+        // correctly identified beer the engine simply has no opinion about was painted with
+        // the worst verdict on the scale. Focal Banger scores exactly 0.5.
+        return s > 0.75 ? Reaction.chuggedIt.tint
+             : (s >= 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
     }
 
     var body: some View {
@@ -89,6 +135,11 @@ struct OverlayChip: View {
                 }
                 if candidate.coldStart {
                     Image(systemName: "flask.fill").font(.caption2)  // scored from chemistry
+                }
+                if let reaction {
+                    Divider().frame(height: 10)
+                    ReactionGlyph(reaction: reaction, size: 22)  // 22 is the glyph floor
+                    Text("you").font(.caption2).foregroundStyle(Brand.textMuted)
                 }
             }
             if let reason = candidate.reason {
@@ -106,53 +157,76 @@ struct OverlayChip: View {
 final class ScanViewModel: ObservableObject {
     @Published var overlays: [HUDOverlay] = []
     @Published var lastLatencyMs: Double?
+    @Published var isResolving = false
+    @Published var isInterpreting = false
+    /// A photo of the label is with the server.
+    @Published var isLookingAtTheLabel = false
+    /// The active natural-language filter (nil = none), mirrored for the status pill.
+    @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
     /// engine's scanner view — it must be the same instance, or detections wouldn't reach the HUD.
     @Published private(set) var engine: ScanEngine?
 
     private var coordinator: ScanCoordinator?
     private var env: AppEnvironment?
-    private var lastDetections: [String: CGPoint] = [:]
 
     func configure(env: AppEnvironment) {
         guard coordinator == nil else { return }
         self.env = env
         let engine = env.makeScanEngine()
         self.engine = engine
-        let coord = ScanCoordinator(engine: engine, api: env.api,
-                                    telemetry: env.telemetry)
+        let coord = ScanCoordinator(engine: engine, api: env.api, telemetry: env.telemetry,
+                                    llm: env.llm, sendsFrames: env.consent.labelPhotos)
         self.coordinator = coord
-        // Re-render overlays whenever the coordinator publishes new candidates.
-        Task { [weak self] in
-            guard let self else { return }
-            for await _ in coord.$candidates.values {
-                self.rebuildOverlays(from: coord.candidates)
-                self.lastLatencyMs = coord.lastLatencyMs
+        // Mirror the coordinator's box-anchored overlays straight into the view.
+        coord.$overlays
+            .map { ovs in
+                ovs.map { HUDOverlay(id: $0.id, candidate: $0.candidate,
+                                     anchor: CGPoint(x: $0.x, y: $0.y)) }
+            }
+            .assign(to: &$overlays)
+        coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
+        coord.$isResolving.assign(to: &$isResolving)
+        coord.$isInterpreting.assign(to: &$isInterpreting)
+        coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
+        coord.$filterText.assign(to: &$filterText)
+        // The catalog's vocabulary, for an engine whose recognizer takes custom words: told
+        // about "Alchemist" it stops correcting it into "Chemist". Best effort; no words is
+        // the recognizer's own dictionary, which is where it started.
+        if let consumer = engine as? LexiconConsumer {
+            let api = env.api
+            Task { @MainActor in
+                if let words = try? await api.fetchLexicon(), !words.isEmpty {
+                    consumer.lexicon = words
+                }
             }
         }
     }
 
-    func start() { coordinator?.start() }
+    /// Where an overlay anchor lands on screen. VisionKit reports boxes in view space; the
+    /// AVCapture engine reports them in its (aspect-filled) buffer's space and says so via
+    /// `contentAspect`, in which case the point is mapped through the crop.
+    func viewPoint(_ p: CGPoint, in size: CGSize) -> CGPoint {
+        guard let aspect = engine?.contentAspect, size.width > 0, size.height > 0 else { return p }
+        let mapper = AspectFillMapper(contentAspect: aspect)
+        let box = mapper.toView(BoundingBox(x: p.x, y: p.y, w: 0, h: 0),
+                                viewAspect: Double(size.width / size.height))
+        return CGPoint(x: box.x, y: box.y)
+    }
+
+    /// Fixed-rate live mode: the viewfinder re-resolves the latest frame on a cadence and swaps
+    /// overlays in place — no tapping, no accumulation. This is the entire scan interaction.
+    func startLive() {
+        // Re-read the consent every time the tab comes back: the switch lives in Settings and
+        // the coordinator is built once.
+        if let env { coordinator?.sendsFrames = env.consent.labelPhotos }
+        coordinator?.startLive()
+    }
     func stop() { coordinator?.stop() }
 
-    func applyAsk(_ ask: String) async {
-        guard let env, let coord = coordinator else { return }
-        guard !ask.isEmpty else { rebuildOverlays(from: coord.candidates); return }
-        let order = (try? await env.llm.rerank(coord.candidates, for: ask)) ?? []
-        let ranked = order.compactMap { id in
-            coord.candidates.first { $0.resolved.product.id == id }
-        }
-        rebuildOverlays(from: ranked.isEmpty ? coord.candidates : ranked)
-    }
-
-    private func rebuildOverlays(from candidates: [ScoredCandidate]) {
-        overlays = candidates.enumerated().map { idx, cand in
-            // Anchor to the detection's box if we have it; else fan out down the frame.
-            let anchor = CGPoint(x: 0.25 + 0.5 * Double(idx % 2),
-                                 y: 0.25 + 0.12 * Double(idx))
-            return HUDOverlay(id: cand.id, candidate: cand, anchor: anchor)
-        }
-    }
+    /// Chat-bar filter: parse the ask once and apply it to every live tick.
+    func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }
+    func clearFilter() async { await coordinator?.clearFilter() }
 }
 
 /// Camera layer. On a real device it presents VisionKit's `DataScannerViewController` (live
@@ -166,6 +240,8 @@ struct CameraLayer: View {
         if #available(iOS 18.0, *), DataScannerViewController.isSupported,
            let vk = engine as? VisionKitScanEngine {
             DataScannerView(engine: vk)
+        } else if #available(iOS 18.0, *), let vf = engine as? VisionFrameScanEngine {
+            CapturePreviewView(engine: vf)
         } else {
             placeholder
         }
@@ -204,5 +280,44 @@ struct DataScannerView: UIViewControllerRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator { var started = false }
+}
+
+/// Presents the AVCapture engine's preview layer and starts the session once the camera is
+/// authorised. The layer is aspect-fill, which is what `contentAspect` tells the HUD.
+@available(iOS 18.0, *)
+struct CapturePreviewView: UIViewRepresentable {
+    let engine: VisionFrameScanEngine
+
+    func makeUIView(context: Context) -> PreviewHostView {
+        let view = PreviewHostView()
+        view.attach(engine.makePreviewLayer())
+        return view
+    }
+
+    func updateUIView(_ view: PreviewHostView, context: Context) {
+        guard !context.coordinator.started else { return }
+        context.coordinator.started = true
+        let engine = self.engine
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            guard granted else { return }
+            Task { await engine.start() }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var started = false }
+}
+
+final class PreviewHostView: UIView {
+    private var previewLayer: CALayer?
+    func attach(_ layer: CALayer) {
+        previewLayer = layer
+        self.layer.addSublayer(layer)
+        layer.frame = bounds
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer?.frame = bounds
+    }
 }
 #endif

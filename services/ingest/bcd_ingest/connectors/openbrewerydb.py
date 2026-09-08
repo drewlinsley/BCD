@@ -83,6 +83,7 @@ class OpenBreweryDBConnector(Connector):
                 kind=rec.get("kind"),
                 country=rec.get("country"),
                 region=rec.get("region"),
+                city=rec.get("city"),
                 lat=rec.get("lat"),
                 lon=rec.get("lon"),
                 website=rec.get("website"),

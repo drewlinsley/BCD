@@ -124,5 +124,29 @@
         {"role": "yeast", "entity_kind": "yeast", "raw_name": "Hefeweizen Ale yeast"}
       ]
     }
+  },
+  {
+    "producer": {
+      "slug": "the-alchemist",
+      "name": "The Alchemist",
+      "kind": "brewery",
+      "country": "US",
+      "region": "VT",
+      "lat": 44.4654,
+      "lon": -72.6874,
+      "website": "https://alchemistbeer.com"
+    },
+    "product": {
+      "key": "heady-topper",
+      "name": "Heady Topper",
+      "category": "beer",
+      "style": "American Double IPA",
+      "abv": 8.0,
+      "upc": "0793573117267",
+      "container": "can",
+      "volume_ml": 473.0,
+      "description": "Iconic Vermont double IPA — unfiltered, heavily hopped, meant to be drunk straight from the can. Unlike the fictional demo beers above this is a real product; The Alchemist does not publicly disclose its hop bill, so no recipe is asserted here.",
+      "ingredients": []
+    }
   }
 ]

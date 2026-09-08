@@ -16,3 +16,9 @@ BCD_BUNDLE_ID = com.example.bcd
 // Wi-Fi, e.g. BCD_API_HOSTPORT = 192.168.1.50:8000.
 BCD_API_SCHEME = http
 BCD_API_HOSTPORT = localhost:8000
+
+// On-device scan pipeline. `visionkit` = DataScannerViewController (text + barcode, the
+// known-good path). `vision` = AVCapture + Vision: segments cans/bottles, OCR without
+// language correction, catalog lexicon as custom words — the coarse-to-fine pipeline in
+// full. Try `vision` on a device once `visionkit` is confirmed working.
+BCD_SCAN_ENGINE = visionkit

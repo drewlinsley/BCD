@@ -34,14 +34,15 @@
 
 ## Data flow: a scan
 
-1. **On-device** — `DataScannerViewController` (VisionKit) emits text + barcodes at frame rate with normalized bounding boxes. Zero network. `ScanCoordinator` dedupes stable text so we don't re-query it.
+1. **On-device, coarse** — the engine emits text + barcodes (and, with `VisionFrameScanEngine`, can/bottle regions from Vision instance masks) at frame rate with normalized boxes. Zero network. `TextClusterer` groups lines on one label; `ObjectTracker` follows each object across frames and counts how often each line was seen on it. Nothing is queried until an object has two frames of agreement.
 2. **Barcode → cache** — resolved against an on-device SQLite/FTS index of the top ~50k products for a <100ms overlay, offline. (Bar basements have no signal; this is where competitors break.)
-3. **Text → `/v1/scan/resolve`** — fresh detections batch to the server.
-4. **Resolver** — trigram + pgvector match against the product index → ranked candidates. Each gets a **personal score** from the user's `TasteProfile`. Cold products are scored from **chemistry alone** (the moat) and flagged.
-5. **Cold path** — anything unresolved goes to a cloud LLM with the venue's known menu as context.
-6. **HUD** — overlays stream onto their bounding boxes, color-coded by predicted enjoyment.
+3. **Object → `/v1/scan/resolve`** — one `DetectedObject` (all its lines, barcode, box) per ready object, batched.
+4. **Resolver** — retrieves candidates from the in-memory **label index** ([index.py](../services/api/bcd_api/index.py): identifying-token postings over products and producers, fuzzy on the query side, re-scored with pg_trgm's own similarity terms; ~1 ms a line against 534k products, whichever store backs it), judges an object's lines together (frame corroboration + the leftover-word rule), and returns a **verdict per object**: `resolved` (safe to overlay), `ambiguous` (a shortlist), or `unresolved`. Each resolved candidate gets a **personal score** from the user's `TasteProfile`; cold products are scored from **chemistry alone** (the moat) and flagged.
+5. **On-device, fine** — not resolved? A careful OCR pass on that object's crop (accurate, language correction off, catalog lexicon as custom words) and a re-query; still ambiguous? the on-device model picks among the shortlist or declines. Details in [04-ios-design.md](04-ios-design.md#coarse-to-fine-scan-pipeline).
+6. **Cold path** — anything still unresolved can go to a cloud LLM with the venue's known menu as context.
+7. **HUD** — overlays anchor to object boxes, color-coded by predicted enjoyment. Ambiguous objects get a "which one?" chip whose answer is logged as a correction; nothing else gets a name.
 
-Latency budget: barcode **<100ms** (on-device), text line **<400ms p50** to first overlay.
+Latency budget: barcode **<100ms** (on-device), text line **<400ms p50** to first overlay. Querying per object after two frames, rather than per line per frame, is what keeps the request rate inside it.
 
 ## Data flow: ingestion (medallion)
 
@@ -76,7 +77,7 @@ The reference machine is a **2018 MacBook Pro** — permanently capped at **Xcod
 | Canonical model | [packages/schema](../packages/schema/bcd_schema) — `Provenance`, `RecipeGraph`, `SensoryVector`, entities |
 | Crawl posture | [packages/crawler/policy.py](../packages/crawler/bcd_crawler/policy.py) |
 | Ingest | [services/ingest](../services/ingest/bcd_ingest) |
-| Resolve + score | [services/api/resolver.py](../services/api/bcd_api/resolver.py) |
+| Resolve + score | [services/api/resolver.py](../services/api/bcd_api/resolver.py), [index.py](../services/api/bcd_api/index.py) |
 | Cold-start sensory | [services/enrich](../services/enrich/bcd_enrich) |
 | Sentinels | [services/sentinel](../services/sentinel/bcd_sentinel) |
 | iOS core | [ios/BCDKit](../ios/BCDKit) |

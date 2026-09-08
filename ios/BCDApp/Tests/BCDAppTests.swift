@@ -12,12 +12,17 @@ final class BCDAppTests: XCTestCase {
             api: PreviewAPI(), llm: MockLLMProvider(),
             telemetry: TelemetryQueue(consent: ConsentState(analytics: true)),
             makeScanEngine: {
-                MockScanEngine(scripted: [[DetectedText(text: "Heady Topper", kind: "text")]])
+                // Two frames of agreement before the object path asks the server, and a
+                // box, because an object's overlay is pinned to where the object is.
+                let line = DetectedText(text: "Heady Topper", kind: "text",
+                                        x: 0.2, y: 0.3, w: 0.5, h: 0.08)
+                return MockScanEngine(scripted: [[line], [line], [line]])
             })
         let model = ScanViewModel()
         model.configure(env: env)
-        model.start()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        model.startLive()
+        // The live tick fires every 350ms; give it two ticks and the verdict's apply.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
         XCTAssertFalse(model.overlays.isEmpty)
     }
 }
@@ -34,12 +39,18 @@ private final class PreviewAPI: APIClientProtocol, @unchecked Sendable {
         let resolved = ResolvedProduct(
             product: product,
             producer: Producer(id: "pr", name: "Alchemist", kind: nil, country: nil,
-                               region: nil, lat: nil, lon: nil, website: nil),
+                               region: nil, city: nil, lat: nil, lon: nil, website: nil),
             brand: Brand(id: "b", producerId: "pr", name: "Heady"))
+        // Answer per object, the way the real server does on the coarse-to-fine path.
+        let objects = req.objects.map { obj in
+            ObjectResolution(objectId: obj.id, status: .resolved, query: "heady topper", candidates: [
+                ScoredCandidate(objectId: obj.id, resolved: resolved, matchScore: 1,
+                                personalScore: 0.8, reason: "tropical", coldStart: true),
+            ])
+        }
         return ScanResolveResponse(
-            candidates: [ScoredCandidate(detectionIndex: 0, resolved: resolved, matchScore: 1,
-                                         personalScore: 0.8, reason: "tropical", coldStart: true)],
-            unresolvedIndices: [], latencyMs: 1)
+            candidates: objects.flatMap(\.candidates), unresolvedIndices: [],
+            objects: objects, latencyMs: 1)
     }
     func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
     func sendTelemetry(_ batch: TelemetryBatch) async throws {}

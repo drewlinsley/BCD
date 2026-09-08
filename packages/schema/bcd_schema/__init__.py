@@ -4,10 +4,18 @@ Import from here; submodule layout may change but this surface is stable.
 """
 
 from .api import (
+    DetectedObject,
     DetectedText,
+    FeedbackRequest,
+    FeedbackResponse,
+    LexiconResponse,
+    ObjectResolution,
+    ObjectStatus,
     ProductSearchResponse,
     ScanResolveRequest,
     ScanResolveResponse,
+    ScanVisionRequest,
+    ScanVisionResponse,
     ScoredCandidate,
 )
 from .entities import (
@@ -57,7 +65,13 @@ __all__ = [
     "Brand",
     "Category",
     "ContainerType",
+    "DetectedObject",
     "DetectedText",
+    "LexiconResponse",
+    "ObjectResolution",
+    "ObjectStatus",
+    "FeedbackRequest",
+    "FeedbackResponse",
     "ExtractionMethod",
     "GenericIngredient",
     "Hop",
@@ -81,6 +95,8 @@ __all__ = [
     "SKU",
     "ScanResolveRequest",
     "ScanResolveResponse",
+    "ScanVisionRequest",
+    "ScanVisionResponse",
     "ScoredCandidate",
     "Sourced",
     "SensorySource",
