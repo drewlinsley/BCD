@@ -49,12 +49,17 @@ _OLLAMA_URL = "http://localhost:11434/api/chat"
 # 3B, and picked for reading text in pictures rather than for describing scenes — which is the
 # whole job here. Overridable with BCD_VISION_MODEL like the hosted one.
 _DEFAULT_LOCAL_MODEL = "qwen2.5vl:3b"
-# Two minutes, not twelve seconds. Ollama has no Metal backend on an Intel Mac, so this runs on
-# the CPU, and a vision model's image encoder plus a thousand-token prefill is not a thing that
-# finishes inside a HUD tick there. The timeout is sized to let a slow machine *answer* rather
-# than to keep the scan responsive; whether the answer arrives soon enough to be useful is a
-# measurement, and this is what makes the measurement possible.
-_LOCAL_TIMEOUT_S = 120.0
+# Five minutes, and that is not a guess. Ollama has no Metal backend on an Intel Mac, so this
+# runs on the CPU: measured on a 2018 i9, one 1024px frame costs ~111s cold — about 24s of it in
+# the vision encoder (three 512-token batches) and the rest prefilling ~1050 image tokens through
+# the model. A repeat of the same image lands in 25-45s off ollama's prompt cache, which is why a
+# first measurement can look four times better than it is.
+#
+# 120s was the first guess here and it was wrong by a hair: every cold frame overran it, ollama
+# aborted mid-generation, and the failure read as a timeout rather than as "too slow to ship".
+# The timeout is sized to let a slow machine *answer*, because an answer at 111s is evidence and
+# a timeout is not. It is emphatically not a claim that this path is fast enough to scan with.
+_LOCAL_TIMEOUT_S = 300.0
 
 # No boxes, and no negative instructions. A 3B model given the hosted model's prompt spends its
 # output on coordinates it cannot estimate and rules it cannot follow; asked for a list of names
