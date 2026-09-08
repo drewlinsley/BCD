@@ -42,11 +42,11 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         public init() {}
     }
 
-    public let frames: AsyncStream<ScanFrame>
+    public let frames: AsyncStream<[DetectedText]>
     public let session = AVCaptureSession()
     public var contentAspect: Double? { lock.withLock { _contentAspect } }
 
-    private var continuation: AsyncStream<ScanFrame>.Continuation?
+    private var continuation: AsyncStream<[DetectedText]>.Continuation?
     private let config: Config
     private let sessionQueue = DispatchQueue(label: "bcd.capture.session")
     private let videoQueue = DispatchQueue(label: "bcd.capture.video", qos: .userInitiated)
@@ -63,7 +63,7 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
 
     public init(config: Config = Config()) {
         self.config = config
-        var cont: AsyncStream<ScanFrame>.Continuation!
+        var cont: AsyncStream<[DetectedText]>.Continuation!
         self.frames = AsyncStream { cont = $0 }
         self.continuation = cont
         super.init()
@@ -159,12 +159,12 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
             }
         }
 
-        var regions = lock.withLock { lastRegions }
         if segment, let fresh = try? await segmentObjects(in: buffer) {
-            regions = fresh
             lock.withLock { lastRegions = fresh }
         }
-        continuation?.yield(ScanFrame(texts: texts, regions: regions.isEmpty ? nil : regions))
+        // Regions travel beside the text stream (`RegionProvider`), read by the coordinator
+        // as it ingests each frame, so a text-only engine and this one share one protocol.
+        continuation?.yield(texts)
     }
 
     /// Coarse stage: lift foreground instances, keep the drink containers, box them.
@@ -277,6 +277,15 @@ extension VisionFrameScanEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 @available(iOS 18.0, *)
+extension VisionFrameScanEngine: RegionProvider {
+    /// What the segmenter last saw. Refreshed every `segmentEveryNFrames`; between
+    /// refreshes the previous boxes stand, which is what the tracker's box smoothing wants.
+    public var latestRegions: [ObjectRegion]? {
+        let r = lock.withLock { lastRegions }
+        return r.isEmpty ? nil : r
+    }
+}
+
 extension VisionFrameScanEngine: LexiconConsumer {
     public var lexicon: [String] {
         get { lock.withLock { _lexicon } }

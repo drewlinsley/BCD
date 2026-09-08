@@ -39,7 +39,7 @@ curl -s -X POST localhost:8000/v1/scan/resolve -H 'content-type: application/jso
   -d '{"objects":[{"id":"can-1","texts":["THE ALCHEMIST","HEADY","TOPPER","16 FL OZ"],"frames_seen":4},
                   {"id":"can-2","texts":["Chemist","hop chemist","Mist"],"frames_seen":4},
                   {"id":"bottle-1","barcode":"080244009397"}]}'
-# → can-1 resolved: Heady Topper · can-2 ambiguous (shortlist, no overlay) · bottle-1 resolved by UPC
+# → can-1 resolved: Heady Topper · can-2 unresolved (nothing shown) · bottle-1 resolved by UPC
 ```
 
 The old per-line shape (`"detections":[{"text":...,"kind":"text"}]`) still works, through the same confidence floor.

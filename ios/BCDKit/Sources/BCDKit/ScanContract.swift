@@ -5,10 +5,10 @@ import Foundation
 // Two granularities coexist:
 //   - `DetectedText`   one OCR line or barcode — what the recognizer emits per frame.
 //   - `DetectedObject` one *physical thing* (a can, a bottle) — every OCR line that landed
-//                      on it over several frames, its barcode, and its box. This is what
-//                      the resolver reasons about: a can is one product, not five fragments.
+//                      on it over several frames, its barcode, and its box. The server
+//                      judges an object's lines together and answers with one verdict.
 
-public struct DetectedText: Codable, Sendable, Identifiable {
+public struct DetectedText: Codable, Sendable, Identifiable, Equatable {
     public var id: String { "\(kind):\(text):\(x ?? 0):\(y ?? 0)" }
     public let text: String
     public let kind: String        // "text" | "barcode"
@@ -33,10 +33,10 @@ public struct DetectedText: Codable, Sendable, Identifiable {
     }
 }
 
-public struct DetectedObject: Codable, Sendable, Identifiable {
+public struct DetectedObject: Codable, Sendable, Identifiable, Equatable {
     public let id: String            // client track id; the server echoes it back
     public let label: String?        // coarse class: "can" | "bottle" | "object"
-    public let texts: [String]       // every OCR line seen on this object (stable ones)
+    public let texts: [String]       // every stable OCR line seen on this object
     public let barcode: String?
     public let symbology: String?
     public let x: Double?
@@ -73,7 +73,7 @@ public struct ScanResolveRequest: Codable, Sendable {
     public let lat: Double?
     public let lon: Double?
     public let includeScore: Bool
-    /// Raise the server's confidence floor for a `resolved` verdict. nil = server default.
+    /// Raise the server's floor for a `resolved` object verdict. nil = server default.
     public let minMatchScore: Double?
 
     enum CodingKeys: String, CodingKey {
@@ -93,11 +93,11 @@ public struct ScanResolveRequest: Codable, Sendable {
 }
 
 public struct ScoredCandidate: Codable, Sendable, Identifiable {
-    public var id: String {
-        "\(objectId ?? detectionIndex.map { String($0) } ?? "-"):\(resolved.id)"
-    }
-    public let detectionIndex: Int?   // set on the per-line path
-    public let objectId: String?      // set on the per-object path
+    public var id: String { "\(objectId ?? String(detectionIndex)):\(resolved.id)" }
+    /// Which line of the request this answers; -1 for an object-level answer, which anchors
+    /// to its object's box rather than to a line.
+    public let detectionIndex: Int
+    public let objectId: String?
     public let resolved: ResolvedProduct
     public let matchScore: Double
     public let personalScore: Double?
@@ -113,12 +113,23 @@ public struct ScoredCandidate: Codable, Sendable, Identifiable {
         case coldStart = "cold_start"
     }
 
-    public init(detectionIndex: Int? = nil, objectId: String? = nil, resolved: ResolvedProduct,
+    public init(detectionIndex: Int = -1, objectId: String? = nil, resolved: ResolvedProduct,
                 matchScore: Double, personalScore: Double? = nil, reason: String? = nil,
                 coldStart: Bool = false) {
         self.detectionIndex = detectionIndex; self.objectId = objectId
         self.resolved = resolved; self.matchScore = matchScore
         self.personalScore = personalScore; self.reason = reason; self.coldStart = coldStart
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        detectionIndex = try c.decodeIfPresent(Int.self, forKey: .detectionIndex) ?? -1
+        objectId = try c.decodeIfPresent(String.self, forKey: .objectId)
+        resolved = try c.decode(ResolvedProduct.self, forKey: .resolved)
+        matchScore = try c.decode(Double.self, forKey: .matchScore)
+        personalScore = try c.decodeIfPresent(Double.self, forKey: .personalScore)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        coldStart = try c.decodeIfPresent(Bool.self, forKey: .coldStart) ?? false
     }
 }
 
@@ -143,31 +154,44 @@ public struct ObjectResolution: Codable, Sendable, Identifiable {
         self.objectId = objectId; self.status = status; self.query = query
         self.candidates = candidates
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        objectId = try c.decode(String.self, forKey: .objectId)
+        status = try c.decode(Status.self, forKey: .status)
+        query = try c.decodeIfPresent(String.self, forKey: .query) ?? ""
+        candidates = try c.decodeIfPresent([ScoredCandidate].self, forKey: .candidates) ?? []
+    }
 }
 
 public struct ScanResolveResponse: Codable, Sendable {
     public let candidates: [ScoredCandidate]
     public let unresolvedIndices: [Int]
+    /// One verdict per object in the request, in no particular order.
     public let objects: [ObjectResolution]
     public let latencyMs: Double?
     /// Whether more than one part of the frame agreed on some candidate — the label naming both
-    /// its maker and its drink, or naming one and printing a category that matches it. False
-    /// means the server returned a guess off a single fragment, which looks identical to a
-    /// confident answer once it is an overlay.
+    /// its maker and its drink, or naming one and printing a category that matches it — or an
+    /// object resolved outright. False means the server returned a guess off a single
+    /// fragment, which looks identical to a confident answer once it is an overlay.
     public let corroborated: Bool
 
     public init(candidates: [ScoredCandidate], unresolvedIndices: [Int],
-                latencyMs: Double?, corroborated: Bool = false) {
+                objects: [ObjectResolution] = [], latencyMs: Double?,
+                corroborated: Bool = false) {
         self.candidates = candidates
         self.unresolvedIndices = unresolvedIndices
+        self.objects = objects
         self.latencyMs = latencyMs
         self.corroborated = corroborated
     }
 
+    // Tolerate a server that predates the object path, or omits empty lists.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        candidates = try c.decode([ScoredCandidate].self, forKey: .candidates)
+        candidates = try c.decodeIfPresent([ScoredCandidate].self, forKey: .candidates) ?? []
         unresolvedIndices = try c.decodeIfPresent([Int].self, forKey: .unresolvedIndices) ?? []
+        objects = try c.decodeIfPresent([ObjectResolution].self, forKey: .objects) ?? []
         latencyMs = try c.decodeIfPresent(Double.self, forKey: .latencyMs)
         // Absent from an older server: read as "not corroborated", so a missing field makes the
         // fallback run more rather than silently switching it off.
@@ -175,10 +199,9 @@ public struct ScanResolveResponse: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case candidates, objects
+        case candidates, objects, corroborated
         case unresolvedIndices = "unresolved_indices"
         case latencyMs = "latency_ms"
-        case corroborated
     }
 }
 
@@ -251,21 +274,6 @@ public struct ScanVisionResponse: Codable, Sendable {
         detections = try c.decodeIfPresent([DetectedText].self, forKey: .detections) ?? []
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
-    }
-
-    public init(candidates: [ScoredCandidate], unresolvedIndices: [Int],
-                objects: [ObjectResolution] = [], latencyMs: Double?) {
-        self.candidates = candidates; self.unresolvedIndices = unresolvedIndices
-        self.objects = objects; self.latencyMs = latencyMs
-    }
-
-    // Tolerate a server that predates the object path (or omits empty lists).
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        candidates = try c.decodeIfPresent([ScoredCandidate].self, forKey: .candidates) ?? []
-        unresolvedIndices = try c.decodeIfPresent([Int].self, forKey: .unresolvedIndices) ?? []
-        objects = try c.decodeIfPresent([ObjectResolution].self, forKey: .objects) ?? []
-        latencyMs = try c.decodeIfPresent(Double.self, forKey: .latencyMs)
     }
 }
 

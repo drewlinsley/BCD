@@ -12,14 +12,17 @@ final class BCDAppTests: XCTestCase {
             api: PreviewAPI(), llm: MockLLMProvider(),
             telemetry: TelemetryQueue(consent: ConsentState(analytics: true)),
             makeScanEngine: {
-                // Two frames of agreement before the coordinator asks the server.
-                MockScanEngine(scripted: [[DetectedText(text: "Heady Topper", kind: "text")],
-                                          [DetectedText(text: "Heady Topper", kind: "text")]])
+                // Two frames of agreement before the object path asks the server, and a
+                // box, because an object's overlay is pinned to where the object is.
+                let line = DetectedText(text: "Heady Topper", kind: "text",
+                                        x: 0.2, y: 0.3, w: 0.5, h: 0.08)
+                return MockScanEngine(scripted: [[line], [line], [line]])
             })
         let model = ScanViewModel()
         model.configure(env: env)
         model.startLive()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // The live tick fires every 350ms; give it two ticks and the verdict's apply.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
         XCTAssertFalse(model.overlays.isEmpty)
     }
 }

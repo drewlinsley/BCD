@@ -19,15 +19,15 @@ import UIKit
 /// builds for `swift test`.
 @available(iOS 18.0, *)
 public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendable {
-    public let frames: AsyncStream<ScanFrame>
-    private var continuation: AsyncStream<ScanFrame>.Continuation?
+    public let frames: AsyncStream<[DetectedText]>
+    private var continuation: AsyncStream<[DetectedText]>.Continuation?
     private var scanner: DataScannerViewController?
     private let lock = NSLock()
     private var _lexicon: [String] = []
     private var viewSize: CGSize = .zero
 
     public override init() {
-        var cont: AsyncStream<ScanFrame>.Continuation!
+        var cont: AsyncStream<[DetectedText]>.Continuation!
         self.frames = AsyncStream { cont = $0 }
         self.continuation = cont
         super.init()
@@ -113,7 +113,7 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
                 return nil
             }
         }
-        continuation?.yield(ScanFrame(texts: detections))
+        continuation?.yield(detections)
     }
 
     private static func detected(_ text: String, kind: String, symbology: String? = nil,

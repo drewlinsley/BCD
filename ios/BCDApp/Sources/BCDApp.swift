@@ -117,11 +117,11 @@ final class AppEnvironment: ObservableObject {
         #endif
         // Host/preview fallback so the app is runnable in the Simulator on Intel too. Frames
         // repeat because the tracker wants two frames of agreement before it asks.
-        let frame = ScanFrame(texts: [
+        let frame = [
             DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.08),
             DetectedText(text: "Pliny the Elder", kind: "text", x: 0.15, y: 0.55, w: 0.6, h: 0.08),
-        ])
-        return MockScanEngine(frames: Array(repeating: frame, count: 3))
+        ]
+        return MockScanEngine(scripted: Array(repeating: frame, count: 3))
     }
 
     private static func telemetryStoreURL() -> URL {
