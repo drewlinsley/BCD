@@ -984,3 +984,57 @@ def test_lexicon_carries_names_not_generic_words(shelf):
     words = Resolver(shelf).lexicon(limit=100)
     assert "alchemist" in words and "topper" in words and "focal" in words
     assert "ipa" not in words and "brewing" not in words
+
+
+def test_duplicate_rows_do_not_flicker_between_frames():
+    """Two catalog rows for one bottle must not alternate on screen.
+
+    Bombay Sapphire was filed twice — "Bombay Sapphire Dry Gin" and "Bombay Sapphire London
+    Dry Gin" — and both account for the same reading with the same score, so the winner came
+    down to whichever the store happened to return first. pg_trgm does not promise an order
+    between equal scores, so consecutive frames of a *motionless* bottle named different rows
+    and the HUD flickered. The answer has to be a function of the reading alone.
+    """
+    a = (_product("Bombay Sapphire Dry Gin", "off:a"), 1.0)
+    b = (_product("Bombay Sapphire London Dry Gin", "off:b"), 1.0)
+    reading = DetectedText(text="BOMBAY SAPPHIRE LONDON DRY GIN", kind="text")
+
+    seen = set()
+    for matches in ([a, b], [b, a]):          # the only difference is retrieval order
+        r = Resolver(_FakeMatchStore(list(matches)))
+        resp = r.resolve(ScanResolveRequest(detections=[reading]))
+        assert resp.candidates, "a clean label reading should still resolve"
+        seen.add(resp.candidates[0].resolved.product.id)
+
+    assert len(seen) == 1, f"retrieval order changed the answer: {seen}"
+
+
+def test_tie_prefers_the_row_the_reading_accounts_for():
+    """A tie must not be broken by name length.
+
+    Bombay Sapphire East is filed as "East Vapour Infused London Dry Gin" under the maker
+    "Bombay Sapphire", so the maker supplies "bombay" and "sapphire" and a frame reading
+    BOMBAY / SAPPHIRE / LONDON DRY GIN is explained by BOTH rows. The row whose own name the
+    camera actually read has to win: "east", "vapour" and "infused" are nowhere in the frame.
+
+    Scope, honestly: against the live catalog this frame DID resolve to East when the tie was
+    broken on name length, and it does not here -- the seeded store gives the plain row more
+    frame support, so the tie-break never decides it. So this pins the outcome, not the
+    tie-break itself; the tie-break is covered by the flicker test above and was verified
+    end-to-end against the 534k-row catalog.
+    """
+    plain = _prod_of("Bombay Sapphire London Dry Gin", "off:plain", "pr:bs")
+    east = _prod_of("East Vapour Infused London Dry Gin", "off:east", "pr:bs")
+    gold = {"pr:bs": _producer("pr:bs", "Bombay Sapphire")}
+    lines = ["BOMBAY", "SAPPHIRE", "LONDON DRY GIN"]
+
+    for order in ([plain, east], [east, plain]):
+        store = _FrameStore({t: [(rec, 1.0) for rec in order] for t in lines}, gold)
+        r = Resolver(store)
+        resp = r.resolve(ScanResolveRequest(
+            detections=[DetectedText(text=t, kind="text") for t in lines]))
+        assert resp.candidates, "the frame names a gin the catalog holds"
+        assert resp.candidates[0].resolved.product.id == "off:plain", (
+            f"picked {resp.candidates[0].resolved.product.name!r} for a frame that never "
+            "read 'east', 'vapour' or 'infused'"
+        )

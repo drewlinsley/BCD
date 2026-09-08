@@ -586,6 +586,20 @@ class Resolver:
         return None
 
     def _hydrate(self, product_rec: dict) -> ResolvedProduct | None:
+        # A merged-away row leaves a tombstone under its old id ({"id", "redirects_to"}), and
+        # anything holding that id -- a SKU, a cached candidate, a client replaying an old
+        # answer -- still hands it here. Follow it to the row that now holds the product
+        # rather than validating a tombstone as a Product, which raises and 500s the scan.
+        hops = 0
+        while isinstance(product_rec, dict) and product_rec.get("redirects_to"):
+            if hops >= 8:
+                return None                      # cyclic or absurdly long chain
+            nxt = self.store.get_gold(product_rec["redirects_to"])
+            if not isinstance(nxt, dict) or nxt.get("id") == product_rec.get("id"):
+                return None
+            product_rec, hops = nxt, hops + 1
+        if not isinstance(product_rec, dict) or not product_rec.get("name"):
+            return None                          # not a product row; nothing to resolve
         producer = self.store.get_gold(product_rec.get("producer_id", ""))
         brand = self.store.get_gold(product_rec.get("brand_id", ""))
         if producer is None:
@@ -933,10 +947,27 @@ class Resolver:
         # comparison a tie at 1.00 cannot make. On a tie the richer record (has ABV / sensory)
         # represents it, so the surviving overlay carries the most complete data — and that
         # also picks the better-linked of two duplicate rows.
+        read_toks = {t for toks in line_tokens for t in toks}
+
         def _rank(entry: tuple[int, ScoredCandidate]) -> tuple:
             support, c = entry
             p = c.resolved.product
-            return (support, c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory))
+            # The last two are a tie-break, and they are why the HUD stopped flickering. Two
+            # rows can score identically on everything above, leaving the winner to whatever
+            # order the store happened to return -- which varies between queries, so
+            # consecutive frames of a motionless bottle named different rows.
+            #
+            # The tie is broken on how much of the row's OWN name the camera actually read.
+            # This is the mirror of the leftover-word rule: that one rejects a row that fails
+            # to explain the reading, this one prefers the row the reading explains. Length is
+            # NOT the right proxy and was tried first -- it picks the longer name, which is how
+            # "BOMBAY SAPPHIRE LOTTON DRY GIN" resolved to "East Vapour Infused London Dry
+            # Gin" (a real, different bottle by the same maker) over "Bombay Sapphire London
+            # Dry Gin": "east", "vapour" and "infused" are nowhere in the frame.
+            unread = sum(1 for t in _identifying_tokens(p.name or "")
+                         if not any(_trigram_sim(t, r) >= _TOKEN_SUPPORT_MIN for r in read_toks))
+            return (support, c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory),
+                    -unread, p.id)
 
         best: dict[str, tuple[int, ScoredCandidate]] = {}
         for entry in scored:
