@@ -425,10 +425,21 @@ def _frame_support(vocab: list[str], line_tokens: list[list[str]], *,
     """
     n = 0
     if vocab:
-        n = sum(
-            any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for v in vocab for t in toks)
-            for toks in line_tokens
-        )
+        # Counted by *what* each line agrees on, not by line. Two lines that name the candidate
+        # through the same words are the same printed phrase read twice, whatever the garble
+        # around them: "ITHE CAN! DRINKER" and "SITHE CAN! DRINKER" differ only in how THE
+        # misread, slipped past the re-read check on that difference, and certified `Day
+        # Drinker` off a Heady Topper can by agreeing with each other about DRINKER. Keyed on
+        # the candidate's words rather than the frame's so that differently garbled reads of
+        # one word land on the same key. A line that reads a *new* word of the name is still
+        # new evidence: HEADY beside HEADY TOPPER is two, DRINKER beside DRINKER is one.
+        agreed: set[frozenset[str]] = set()
+        for toks in line_tokens:
+            words = frozenset(v for v in vocab
+                              if any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for t in toks))
+            if words:
+                agreed.add(words)
+        n = len(agreed)
     if hint and category and category == hint:
         n += 1
     return n
@@ -547,7 +558,13 @@ def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     read = [t for t in _tokens(reading)
             if len(t) >= _MIN_SIGHTING_TOKEN and t not in _SIGHTING_NOISE
             and not is_generic_token(t)]
-    if not read or not any(t in in_name for t in read):
+    # The rule asks whether the row explains everything that was read, and a row explains one
+    # word for free: "DRINK FROM THE CAN!" misread as DRINK FRONT is, once the chrome is gone,
+    # the single word FRONT, and `Front Flips` accounted for it in full. A single word is not a
+    # label here any more than it is in `_is_whole_label` -- it may match, it may not certify.
+    if len(set(read)) < _MIN_SELF_PROOF_TOKENS:
+        return False
+    if not any(t in in_name for t in read):
         return False
     return not [t for t in read if t not in known]
 
