@@ -11,6 +11,7 @@ from bcd_api.resolver import (
     _identity_key,
     _token_supported,
     _upc_variants,
+    _frame_support,
 )
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
@@ -1101,3 +1102,42 @@ def test_aliases_are_words_the_label_prints():
         assert resp.candidates, "the frame names a gin the catalog holds"
         assert resp.candidates[0].resolved.product.id == "off:plain", (
             f"picked {resp.candidates[0].resolved.product.name!r} for a frame that never read EAST")
+
+
+def test_a_one_word_reading_cannot_account_for_an_object():
+    """The leftover-word rule asks whether the row explains everything read, and a row explains
+    one word for free.
+
+    On a can of Heady Topper (2026-09-10) "DRINK FROM THE CAN!" misread as DRINK FRONT. Once the
+    chrome is stripped that reading is the single word FRONT, `Front Flips` accounted for it in
+    full, and the object resolved to a beer from Maine at 0.545. A single word is not a label on
+    the object path any more than on the line path: it may match, it may not certify.
+    """
+    frame = {"THE CAN! DRINK FRONT": [(_prod_of("Front Flips", "p:ff", "pr:ml"), 0.545)]}
+    gold = {"pr:ml": _producer("pr:ml", "Mast Landing Brewing Company")}
+    verdict = Resolver(_FrameStore(frame, gold)).resolve_object(
+        DetectedObject(id="o1", texts=["THE CAN! DRINK FRONT"]))
+    assert verdict.status != "resolved", f"one word FRONT certified {verdict.candidates[0].resolved.product.name!r}"
+
+
+def test_two_reads_of_one_phrase_agree_once():
+    """Two lines that name a candidate through the same words are one printed phrase read twice.
+
+    "ITHE CAN! DRINKER" and "SITHE CAN! DRINKER" are the same fine print with THE garbled two
+    ways. The re-read check scored them 0.5 on that difference and kept both, and they then
+    certified `Day Drinker` by agreeing with each other about DRINKER (2026-09-10). Agreement is
+    counted by the candidate's words a line carries, so differently garbled reads of one word
+    land on the same key -- while a line reading a *new* word of the name is still new evidence.
+    """
+    assert _frame_support(["day", "drinker"],
+                          [["ithe", "can", "drinker"], ["sithe", "can", "drinker"]]) == 1
+    # ...and the control: two lines carrying different words of the name are two.
+    assert _frame_support(["alchemist", "heady", "topper"],
+                          [["heady", "topper"], ["the", "alchemist"]]) == 2
+
+    frame = {t: [(_prod_of("Day Drinker", "p:dd", "pr:fs"), 0.727)]
+             for t in ("ITHE CAN! DRINKER", "SITHE CAN! DRINKER")}
+    gold = {"pr:fs": _producer("pr:fs", "Feisty Spirits")}
+    verdict = Resolver(_FrameStore(frame, gold)).resolve_object(
+        DetectedObject(id="o1", texts=list(frame)))
+    assert verdict.status != "resolved", "its own echo certified `Day Drinker`"
