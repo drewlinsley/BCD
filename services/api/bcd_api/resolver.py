@@ -146,6 +146,8 @@ _SELF_PROOF_SIM = 0.8
 # "STONE IPA" -- the least substantial label the recogniser is meant to know -- and drops the
 # four-letter coincidences the log is full of: `Bale`, `Vern`, `Mist`, `Topo`, `Ver`.
 _MIN_SELF_PROOF_CHARS = 5
+# ...and it has to be a phrase, not a word -- see `_is_whole_label` for the measurement.
+_MIN_SELF_PROOF_TOKENS = 2
 
 
 def _identifying_tokens(name: str) -> list[str]:
@@ -302,7 +304,14 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
     and its producer. The producer is what carries the signal — "THE ALCHEMIST" is the line
     that tells the real Heady Topper apart from a one-word coincidence."""
     seen: dict[str, None] = {}
-    for part in (resolved.product.name, resolved.brand.name, resolved.producer.name):
+    # Aliases are the other names the label prints. A merge keeps every absorbed row's name
+    # here, and that is what put "Bombay Sapphire Vapour Infused London Dry Gin" -- the words
+    # actually on the bottle -- beside a row named without them. Without it, a frame that read
+    # VAPOUR INFUSED gave that line's support to `East Vapour Infused London Dry Gin`, a
+    # different gin by the same house whose name happens to print those words, and East won
+    # three of the thirty-nine Bombay frames in the log while EAST appeared in none of them.
+    for part in (resolved.product.name, resolved.brand.name, resolved.producer.name,
+                 *(resolved.product.aliases or [])):
         for t in _identifying_tokens(part or ""):
             seen[t] = None
     return list(seen)
@@ -880,6 +889,19 @@ class Resolver:
             """
             qualified = qualified_by_id.get(rid, name)
             if sum(len(t) for t in _identifying_tokens(qualified)) < _MIN_SELF_PROOF_CHARS:
+                return False
+            # A single word is not a label. The character floor above and the similarity bar
+            # below were each raised against the one-word coincidence -- `Bale`, `Mist`,
+            # "CHEMIST-VE" at 0.73 -- and each time the next one read *exactly*: "CHEMIST"
+            # off the tail of THE ALCHEMIST is a 1.00 against a distillery called `Chemist`,
+            # and "DeadEye", the on-device model's tidying of a garbled HEADY, is a 1.00
+            # against a rum called `Deadeye`. No threshold separates an exact read of a word
+            # from an exact read of a word. What separates them is that a label is a phrase:
+            # its words corroborate each other, and one word has nothing beside it to agree.
+            # Measured over the 882 frames in the scan log, a one-word line proved a row 14
+            # times and was right 0 -- and "STONE IPA", the least substantial label the
+            # recogniser is meant to know, is two words and still proves itself.
+            if len(_tokens(detections[line_i].text)) < _MIN_SELF_PROOF_TOKENS:
                 return False
             return raw_score >= _STRONG_MATCH and _accounts_for_the_line(
                 qualified, detections[line_i].text, threshold=_SELF_PROOF_SIM)
