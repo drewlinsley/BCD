@@ -448,9 +448,11 @@ def test_the_frame_promotes_the_beer_two_lines_name():
     resp = Resolver(_FrameStore(frame, gold)).resolve(req)
 
     assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
-    # ...and the coincidence is not merely second, it is reported less confidently, so the
-    # overlay stops claiming a certainty the frame does not support.
-    assert resp.candidates[0].match_score > resp.candidates[1].match_score
+    # ...and the coincidence is not beside it at all. It used to ride along in second place at
+    # a marked-down score; since a one-word line stopped proving a row on its own
+    # (`_is_whole_label`), "CHEMIST" has nothing to prove `Chemist` with, and a corroborated
+    # frame carries only what it proved.
+    assert [c.resolved.product.name for c in resp.candidates] == ["The Alchemist Heady Topper"]
 
 
 def test_a_lone_line_keeps_its_confidence():
@@ -1038,3 +1040,64 @@ def test_tie_prefers_the_row_the_reading_accounts_for():
             f"picked {resp.candidates[0].resolved.product.name!r} for a frame that never "
             "read 'east', 'vapour' or 'infused'"
         )
+
+
+def _prod_with_aliases(name, pid, producer_id, aliases):
+    return Product(id=pid, brand_id="b", producer_id=producer_id, category=Category.SPIRIT,
+                   name=name, aliases=aliases).model_dump(mode="json")
+
+
+@pytest.mark.parametrize("line,row", [
+    ("CHEMIST", "Chemist"),      # the tail of THE ALCHEMIST, read exactly, on a Heady Topper can
+    ("DeadEye", "Deadeye"),      # the on-device model's tidying of a garbled HEADY
+])
+def test_a_single_word_does_not_prove_a_label(line, row):
+    """An exact one-word read must not certify a one-word row.
+
+    Both of these were drawn over a can of Heady Topper on 2026-09-10: `Chemist` (a distillery)
+    and `Deadeye` (a rum), each a perfect 1.00 against the only line in its frame, each seven
+    letters -- past the character floor that was raised for `Bale` and `Mist`, and past the
+    similarity bar that was raised for "CHEMIST-VE". No threshold separates an exact read of a
+    word from an exact read of a word. A label is a phrase; one word has nothing beside it to
+    agree, so it may match but it may not prove.
+    """
+    frame = {line: [(_prod_of(row, "p:x", "pr:x"), 1.0)]}
+    gold = {"pr:x": _producer("pr:x", row)}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text=line, kind="text")]))
+    assert not resp.corroborated, f"{line!r} alone certified {row!r}"
+
+
+def test_two_words_still_prove_a_label():
+    """The control for the test above: "STONE IPA" is the least substantial label the
+    recogniser is meant to know, and it is two words, so it still proves itself."""
+    frame = {"STONE IPA": [(_prod_of("Stone IPA", "p:stone", "pr:stone"), 1.0)]}
+    gold = {"pr:stone": _producer("pr:stone", "Stone Brewing")}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(
+        ScanResolveRequest(detections=[DetectedText(text="STONE IPA", kind="text")]))
+    assert resp.corroborated
+    assert resp.candidates[0].resolved.product.name == "Stone IPA"
+
+
+def test_aliases_are_words_the_label_prints():
+    """A merged row's aliases are names the bottle carries, and the frame may support it
+    through them.
+
+    The Bombay Sapphire label prints VAPOUR INFUSED. Those words are in the *name* of `East
+    Vapour Infused London Dry Gin` -- a different gin by the same house -- and only in an
+    *alias* of the plain gin's row, so a frame reading BOMBAY / SAPPHIRE / INFUSED INFUSE gave
+    its third line to East alone and East won, on a bottle that printed EAST nowhere. Replayed
+    from the scan log (scans9, 2026-09-08 04:53:43).
+    """
+    plain = _prod_with_aliases("Bombay Sapphire London Dry Gin", "off:plain", "pr:bs",
+                               ["Bombay Sapphire Vapour Infused London Dry Gin"])
+    east = _prod_with_aliases("East Vapour Infused London Dry Gin", "off:east", "pr:bs", [])
+    gold = {"pr:bs": _producer("pr:bs", "Bombay Sapphire")}
+    lines = ["BOMBAY", "SAPPHIRE", "INFUSED INFUSE"]
+    for order in ([plain, east], [east, plain]):
+        frame = {t: [(rec, 0.6) for rec in order] for t in lines}
+        resp = Resolver(_FrameStore(frame, gold)).resolve(
+            ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in lines]))
+        assert resp.candidates, "the frame names a gin the catalog holds"
+        assert resp.candidates[0].resolved.product.id == "off:plain", (
+            f"picked {resp.candidates[0].resolved.product.name!r} for a frame that never read EAST")
