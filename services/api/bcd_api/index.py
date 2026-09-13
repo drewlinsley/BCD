@@ -72,6 +72,14 @@ FUZZY_MIN = 5
 #: Shortest token that may reach dictionary words it is a prefix of ("ALCHEMIS").
 PREFIX_MIN = 5
 PREFIX_MAX_EXPANSIONS = 8
+#: ...or a suffix of. A stylized wordmark loses its first letters before its last: the initial
+#: is the letter drawn largest and strangest, and on a can of Heady Topper the recognizer
+#: read THE ALCHEMIST as "CHEMIST-VER" sixty times for every four "ALCHEMIST". "chemist" is
+#: no edit of "alchemist" and no prefix of it, so the maker's row was never a candidate at
+#: all -- while "ACHEMIST", one edit away, reached it every time. Same floor and cap as the
+#: prefix case, of which this is the mirror.
+SUFFIX_MIN = 5
+SUFFIX_MAX_EXPANSIONS = 8
 #: Rows that survive the token stage into trigram scoring. The right row is nearly always
 #: in the top few by token evidence; this is the margin for the cases where a common brand
 #: word spreads its weight over many rows.
@@ -198,7 +206,7 @@ class LabelIndex:
     """Identifying-token postings over products and producers, plus what a match needs to
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
-    FORMAT = 1
+    FORMAT = 2      # 2: suffix lookups (`sorted_reversed`)
 
     def __init__(self) -> None:
         self.signature: str = ""
@@ -213,9 +221,11 @@ class LabelIndex:
         self.producer_index: dict[str, int] = {}
         self.products_by_producer: dict[int, array] = {}
         # token dictionary shared by both posting maps; `sorted_tokens` serves prefix lookups
+        # and `sorted_reversed` (every token spelled backwards, sorted) suffix lookups
         self.token_id: dict[str, int] = {}
         self.tokens: list[str] = []
         self.sorted_tokens: list[str] = []
+        self.sorted_reversed: list[str] = []
         self.product_post: dict[int, array] = {}
         self.producer_post: dict[int, array] = {}
         # products whose name carries no identifying token, reachable only as a whole:
@@ -273,6 +283,7 @@ class LabelIndex:
                     ix._post(ix.generic_post, w, i)
 
         ix.sorted_tokens = sorted(ix.token_id)
+        ix.sorted_reversed = sorted(t[::-1] for t in ix.token_id)
         ix.built_at = time.time()
         ix.build_seconds = time.perf_counter() - t0
         return ix
@@ -365,6 +376,19 @@ class LabelIndex:
                     out[tid] = PREFIX_WEIGHT
                     n += 1
                     if n >= PREFIX_MAX_EXPANSIONS:
+                        break
+        if len(q) >= SUFFIX_MIN:
+            rq = q[::-1]
+            start = bisect.bisect_left(self.sorted_reversed, rq)
+            n = 0
+            for rtok in self.sorted_reversed[start:start + 64]:
+                if not rtok.startswith(rq):
+                    break
+                tid = self.token_id[rtok[::-1]]
+                if tid in table and tid not in out:
+                    out[tid] = PREFIX_WEIGHT
+                    n += 1
+                    if n >= SUFFIX_MAX_EXPANSIONS:
                         break
         return list(out.items())
 

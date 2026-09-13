@@ -29,14 +29,24 @@ public struct VisionTextReader: Sendable {
             .integral
         guard rect.width >= 8, rect.height >= 8, let cg = image.cropping(to: rect) else { return [] }
 
+        // Latin only. A careful pass that reads the wordmark as Cyrillic is careful about the
+        // wrong thing. Unlike the live scanner's language list (see `VisionKitScanEngine.
+        // makeScanner`, which turned out to be a preference), this request has a switch for
+        // script detection, and it is off.
+        let languages = VisionKitScanEngine.recognitionLanguages.map { Locale.Language(identifier: $0) }
+
         var raw = RecognizeTextRequest()
         raw.recognitionLevel = .accurate
         raw.usesLanguageCorrection = false
+        raw.recognitionLanguages = languages
+        raw.automaticallyDetectsLanguage = false
 
         var steered = RecognizeTextRequest()
         steered.recognitionLevel = .accurate
         steered.usesLanguageCorrection = true
         steered.customWords = lexicon
+        steered.recognitionLanguages = languages
+        steered.automaticallyDetectsLanguage = false
 
         var out: [DetectedText] = []
         var seen = Set<String>()

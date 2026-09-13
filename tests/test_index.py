@@ -124,6 +124,19 @@ def test_reaches_a_truncated_word_by_prefix(index):
     assert [pid for pid, _ in index.match_producers("THE ALCHEMIS", limit=3)][0] == "prod:alch"
 
 
+def test_reaches_a_word_missing_its_first_letters_by_suffix(index):
+    """The mirror of the prefix case. A stylized wordmark loses its first letters first -- the
+    initial is the letter drawn largest and strangest -- and on a can of Heady Topper the
+    recognizer read THE ALCHEMIST as "CHEMIST-VER" sixty times for every four "ALCHEMIST".
+    "chemist" is no edit of "alchemist" and no prefix of it, so the maker's row was never a
+    candidate at all, and the maker pick had nothing to try."""
+    ids = [pid for pid, _ in index.match_producers("CHEMIST-VER", limit=3)]
+    assert "prod:alch" in ids
+    # ...and a token too short to be a safe suffix reaches nothing that way: "MIST" is not
+    # evidence of ALCHEMIST.
+    assert "prod:alch" not in [pid for pid, _ in index.match_producers("MIST", limit=3)]
+
+
 def test_a_generic_line_reaches_only_generic_names(index):
     ids = [pid for pid, _ in index.match_products("IPA", limit=5)]
     assert ids == ["p:ipa"]
