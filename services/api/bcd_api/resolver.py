@@ -91,6 +91,40 @@ def _tokens(s: str) -> list[str]:
     return [_norm_token(t) for t in _TOKEN_RE.findall(s or "")]
 
 
+# The recognizer picks a script per line by what the letterforms most resemble, and a stylized
+# Latin wordmark resembles other alphabets: on one can of Heady Topper, in one session, HEADY
+# TOPPER arrived as "ЯДУ ТОРР", "АДУ ТОРО" and "ГАДУ ТОРРА". Asking the scanner for en-US does
+# not stop it -- VisionKit's language list is a preference, not a pin, and the non-Latin share
+# of frames was 11.5% with it and 9-16% without. The shapes it read are right; only the
+# alphabet is wrong, and every Cyrillic letter has the Latin letter it is drawn like, which is
+# why the recognizer chose it. Mapped back, "ЯДУ ТОРР" is "RDY TOPP": a read of HEADY TOPPER as
+# good as any the Latin model gives, and one the maker pick can use. Hangul and CJK reads have
+# no such map and stay what they are, which is nothing.
+#
+# Applied to the camera's reading, not to the catalog, because the catalog is Latin: the
+# eighteen Cyrillic-named rows in it are OFF imports of Bulgarian and Russian products a US
+# shelf does not hold, and a Latin read of their labels is the trade for a Latin read of ours.
+_CONFUSABLE = str.maketrans({
+    "А": "A", "Б": "B", "В": "B", "Г": "T", "Д": "D", "Е": "E", "Ё": "E", "Ж": "X", "З": "E",
+    "И": "N", "Й": "N", "К": "K", "Л": "A", "М": "M", "Н": "H", "О": "O", "П": "N", "Р": "P",
+    "С": "C", "Т": "T", "У": "Y", "Ф": "O", "Х": "X", "Ц": "U", "Ч": "Y", "Ш": "W", "Щ": "W",
+    "Ъ": "B", "Ы": "BI", "Ь": "B", "Э": "E", "Ю": "IO", "Я": "R",
+    "Ѕ": "S", "І": "I", "Ї": "I", "Ј": "J", "Є": "E", "Ґ": "T", "Ў": "Y", "Ђ": "D", "Ћ": "H",
+    "Љ": "A", "Њ": "H", "Џ": "U",
+    "а": "a", "б": "b", "в": "b", "г": "t", "д": "d", "е": "e", "ё": "e", "ж": "x", "з": "e",
+    "и": "n", "й": "n", "к": "k", "л": "a", "м": "m", "н": "h", "о": "o", "п": "n", "р": "p",
+    "с": "c", "т": "t", "у": "y", "ф": "o", "х": "x", "ц": "u", "ч": "y", "ш": "w", "щ": "w",
+    "ъ": "b", "ы": "bi", "ь": "b", "э": "e", "ю": "io", "я": "r",
+    "ѕ": "s", "і": "i", "ї": "i", "ј": "j", "є": "e", "ґ": "t", "ў": "y", "ђ": "d", "ћ": "h",
+    "љ": "a", "њ": "h", "џ": "u",
+})
+
+
+def _latin(text: str) -> str:
+    """The camera's reading, in the alphabet the label is printed in."""
+    return (text or "").translate(_CONFUSABLE)
+
+
 def _trigrams(token: str) -> set[str]:
     # pg_trgm-style padding: two leading spaces + one trailing, then 3-grams. Mirrors the
     # store's similarity() closely enough to calibrate one threshold across both.
@@ -254,6 +288,54 @@ _PRODUCER_MAX_PRODUCTS = 4
 # A producer hit is indirect evidence, so it must never outrank a product the label actually
 # names — only the nothing it is competing against.
 _PRODUCER_EVIDENCE = 0.6
+
+# Telling a maker's beers apart by the *shape* of an unreadable wordmark.
+#
+# A stylized can OCRs its maker in plain type and its own name as garble: THE ALCHEMIST comes
+# through, HEADY TOPPER arrives as "FADY TOPPE", "ADY TOPP", "ROY TOP". Against the whole
+# catalog that garble is noise -- it is how `Roy!` and `Deadeye` got drawn. Against one
+# brewery's twenty beers it is not: measured over 245 logged frames with the maker read,
+# "heady topper" scores 0.22-0.47 against its garble and ~0.06 against "focal banger", and a
+# Focal Banger can reverses that at 0.30-0.64. The floor and margin below picked 100 of those
+# frames, 82 Heady and 18 Focal, and got none wrong; the other 145 had no wordmark to score.
+#
+# Three exclusions are what make the numbers mean anything, each earned from a false pick:
+# category and packaging chrome ("ALE / ALC. 8% BY VOL" scored 0.43 against a beer called
+# `Alena`), the maker's own tokens (a garbled ALCHEMIST resembles `Alena` too), and two-letter
+# fragments ("AL" off "ALC." scored 0.29). And a one-word name needs a near read where a
+# two-word name needs a resemblance, because a lone garbled word resembles many things and two
+# words agreeing on two words is the corroboration a label gives -- the same rule as
+# `_MIN_SELF_PROOF_TOKENS`, applied to the other side of the match.
+_MAKER_PICK_MIN = 0.20          # a two-word name, read as garble
+_MAKER_PICK_MIN_LONE = 0.40     # a one-word name has to be nearly read
+_MAKER_PICK_MARGIN = 0.12       # over the runner-up among the maker's beers
+_MAKER_PICK_MAX_PRODUCTS = 60   # a brewery's catalog; past this it is a distributor
+_MAKER_PICK_WINDOW = 3          # a name is one to three consecutive tokens
+_MAKER_PICK_MIN_TOKEN = 3       # "AL" and "DY" carry nothing on their own
+_MAKER_TOKEN_SIM = 0.5          # what counts as a (garbled) read of the maker's own name
+# The maker line is garbled too. The can prints THE ALCHEMIST and the scanner reads
+# "CHEMIST-VER" sixty times for every four "THE ALCHEMIST", and the producer guards --
+# built so that "BACAR" cannot reach Bacardi -- rightly refuse that as a read of the maker.
+# So the pick starts from a looser *hypothesis*: any maker the line resembles at all, tried
+# and discarded unless the wordmark then names one of its beers by a margin. Two weak reads
+# that agree are one strong read; a weak read that agrees with nothing stays nothing.
+#
+# How much resemblance: "CHEMIST-VER", the read the can gives most, is a 0.38 against `The
+# Alchemist`, and "HEMIST-VER" -- one more letter gone -- a 0.33. Measured over the 985
+# frames in the scan log, with the wordmark contest as the only thing standing between a
+# hypothesis and the screen: a floor of 0.40 drew Heady Topper on 16 frames, 0.35 on 66,
+# 0.30 on 71, and none of the three drew anything wrong. The floor is what the maker line
+# reads at, not what a clean read would score.
+_MAKER_HYPOTHESIS_MIN = 0.30
+_MAKER_HYPOTHESES = 6           # makers a line, or a word of it, may be tried against
+# The maker line carries more than the maker: "CHEMIST-VERMONT" is the name with the town
+# after it, and matched as a whole it resembles `Vermont Ice`, `Vermont Distillers` and five
+# more Vermont producers better than it resembles `The Alchemist` (0.38) -- which then never
+# made the six. So each word of the line long enough to be a name nominates makers on its
+# own as well: "chemist" reaches `The Alchemist` and "vermont" the Vermont producers, and
+# the wordmark contest sorts them out. Four letters is "mist", which reaches nothing worth
+# trying; five is where a fragment starts to be a word.
+_MAKER_HYPOTHESIS_WORD = 5
 # A candidate whose category *contradicts* the label's own fine print. Not merely unsupported —
 # the frame says one thing and the row says another, which is evidence against, not absence of
 # evidence. "A CHEMIST VER" off this can matched a distillery's `Chemist` at 1.00 while the same
@@ -542,6 +624,95 @@ def _object_vocabulary(c: ScoredCandidate) -> tuple[str, str]:
     return search_name(r.product.name, r.brand.name), r.producer.name
 
 
+def _window_tokens(line: str, maker_tokens: list[str]) -> list[str]:
+    """The words of a line a wordmark window may be made of: not chrome, not a category word,
+    and not the maker's own name or a garble of it.
+
+    Short fragments stay. A two-letter read is not a name and cannot make a window by itself
+    (`_wordmark_score` refuses one), but it is part of the shape of the line it sits in: on a
+    can of Heady Topper the wordmark arrived as "DY TOPP" five times in one session -- HEADY
+    TOPPER with the first letters of each word lost -- and dropping the DY left one word
+    against a two-word name, which is rightly no read at all. The window that reads that line
+    is "dy topp", and it resembles `heady topper` at 0.31 and nothing else the maker brews."""
+    return [t for t in _tokens(line)
+            if t not in _SIGHTING_NOISE and not is_generic_token(t)
+            and not any(_trigram_sim(t, m) >= _MAKER_TOKEN_SIM for m in maker_tokens)]
+
+
+def _own_name_tokens(name: str, maker_tokens: list[str]) -> list[str]:
+    """The words of a product's name that are the *beer's*: `_window_tokens` for a catalog
+    name, where a fragment is not a word at all."""
+    return [t for t in _window_tokens(name, maker_tokens) if len(t) >= _MAKER_PICK_MIN_TOKEN]
+
+
+def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[str],
+                    skip: frozenset[int] = frozenset(), min_width: int = 1,
+                    ) -> tuple[float, int, int]:
+    """How much some window of the frame looks like this beer's own name: the similarity, the
+    line it was on, and how many tokens the window had.
+
+    Windows of one to three consecutive tokens, with the same exclusions as `_own_name_tokens`:
+    the maker's line is evidence of the maker, and the fine print is evidence of nothing.
+    Lines in `skip` are ones a product already accounts for in full -- on a shelf, BLUE MOON
+    BELGIAN WHITE is Blue Moon's line, and the word WHITE in it is not evidence for a
+    `Guinness White Ale`."""
+    best, at, width = 0.0, -1, 0
+    for i, toks in enumerate(line_tokens):
+        if i in skip:
+            continue
+        toks = _window_tokens(" ".join(toks), maker_tokens)
+        for a in range(len(toks)):
+            for b in range(a + min_width, min(len(toks), a + _MAKER_PICK_WINDOW) + 1):
+                if not any(len(t) >= _MAKER_PICK_MIN_TOKEN for t in toks[a:b]):
+                    continue        # "AL" off "ALC." is not a window; "DY TOPP" is
+                sim = _trigram_sim(" ".join(toks[a:b]), own)
+                if sim > best:
+                    best, at, width = sim, i, b - a
+    return best, at, width
+
+
+def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str,
+                skip: frozenset[int] = frozenset(),
+                other_makers: list[str] = ()) -> tuple[dict, float, int] | None:
+    """The one of a maker's beers whose name the wordmark garble resembles, by a margin.
+
+    None when nothing in the frame looks like any of them, or when two look alike -- either
+    is "the maker was read and the beer was not", which is what the caller already knew."""
+    maker_tokens = [t for t in _tokens(maker_name) if len(t) >= _MAKER_PICK_MIN_TOKEN]
+    # The frame's maker words are excluded from the *windows*; the beer's own name is stripped
+    # only of its own maker's, so a sibling filed under a stray producer keeps its full name
+    # and simply finds nothing left in the frame to match it.
+    window_excl = list(maker_tokens) + list(other_makers)
+    scored: list[tuple[float, int, dict, bool]] = []
+    for rec in items:
+        own = _own_name_tokens(rec.get("name") or "", maker_tokens)
+        if sum(len(t) for t in own) < _MIN_SELF_PROOF_CHARS:
+            # A beer named after its maker -- "Bombay Sapphire London Dry Gin" is the maker
+            # plus a style -- has no name of its own to be recognised by, and a frame that
+            # read only the maker is consistent with it. The shape of a wordmark cannot
+            # choose between it and its siblings, so it is not asked to: this was how East
+            # displaced the plain gin on a bottle that never printed EAST.
+            return None
+        # A two-word name is read by a two-word window, literally: one word of "sapphire
+        # murcian lemon" read exactly is a prefix, not a name, and scored 0.43 off a bottle
+        # of the plain gin. A one-word name is read by whatever resembles it closely enough.
+        sim, at, width = _wordmark_score(line_tokens, " ".join(own), window_excl, skip,
+                                         min_width=1 if len(own) == 1 else 2)
+        scored.append((sim, at, rec, len(own) == 1))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best, at, rec, lone = scored[0]
+    runner = scored[1][0] if len(scored) > 1 else 0.0
+    # Two words agreeing on two words, or a near read of one: "ecan" off DRINK FROM THE CAN
+    # resembled `pecan cream` at 0.21, and "FOCAILS" resembles `focal banger` at 0.24 -- one
+    # token against a phrase, which the two-token window above no longer admits at all.
+    floor = _MAKER_PICK_MIN_LONE if lone else _MAKER_PICK_MIN
+    if best < floor or best - runner < _MAKER_PICK_MARGIN:
+        return None
+    return rec, best, at
+
+
 def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     """`_accounts_for_sighting`, for a reading that is the camera's rather than a model's.
 
@@ -589,7 +760,11 @@ def _explains_enough(c: ScoredCandidate, reading: str) -> bool:
         return t in among or any(_trigram_sim(t, k) >= _TOKEN_SUPPORT_MIN for k in among)
 
     read = [t for t in read if not is_generic_token(t)]
-    if not read:
+    # A shortlist is a choice, and one word gives the model nothing to choose by. The same
+    # night `_accounts_for_object` learned that FRONT does not certify `Front Flips`, "DRINK
+    # FRONT" shortlisted it alone and "MIST" shortlisted `Sno Mist` alone, and a model asked
+    # to pick among one picked it -- the misfires back on the screen by the other door.
+    if len(set(read)) < _MIN_SELF_PROOF_TOKENS:
         return False
     explained = [t for t in read if seen(t, known)]
     if len(explained) / len(read) <= _OBJECT_EXPLAINED:
@@ -692,6 +867,91 @@ class Resolver:
                     out.append((i, rec, round(sc * _PRODUCER_EVIDENCE, 3)))
         return out
 
+    def _by_wordmark(self, lines: list[tuple[int, str]], hint: str | None,
+                     line_tokens: list[list[str]], claimed: frozenset[int],
+                     ) -> tuple[list[tuple[int, dict, float]], set[str]]:
+        """The maker's beer, told from its siblings by the shape of an unreadable wordmark.
+
+        Separate from `_by_producer` and additive to it. That path *enumerates* a small
+        maker's products as discounted candidates for the frame to sort out; this one tries
+        every maker a line so much as resembles -- the maker line is garbled too, THE
+        ALCHEMIST arriving as "CHEMIST-VER" sixty times for every four clean reads, and the
+        producer guards rightly refuse that as a read -- and keeps a maker only when the
+        wordmark then names one of its beers by a margin (`_pick_among`). Two weak reads that
+        agree are one strong read; a resemblance that agrees with nothing stays nothing. The
+        beer picked is returned in the second value as *proven*: the maker line and the
+        wordmark line are two parts of the frame agreeing, the second by shape rather than by
+        letters. This is how a can whose name OCR cannot read resolves without a photo
+        leaving the phone.
+        """
+        match = getattr(self.store, "match_producers", None)
+        products_of = getattr(self.store, "products_of", None)
+        picked: set[str] = set()
+        if match is None or products_of is None:
+            return [], picked
+        # Every maker any line resembles, best hypothesis per maker across the frame's lines
+        # (a maker read outright on one line and merely resembled on another is read).
+        best: dict[str, tuple[int, str, dict, float, bool]] = {}
+        for i, text in lines:
+            ident = _identifying_tokens(text)
+            if not ident:
+                continue
+            queries = [text] + [t for t in ident if len(t) >= _MAKER_HYPOTHESIS_WORD]
+            for q in queries:
+                for prod, sc in match(q, limit=_MAKER_HYPOTHESES):
+                    pid = prod.get("id") or ""
+                    if sc < _MAKER_HYPOTHESIS_MIN:
+                        continue
+                    pname = prod.get("name") or ""
+                    # Whether the *line* reads as this maker, whichever query found it.
+                    read = (sc >= _PRODUCER_MATCH_MIN and _token_supported(text, pname)
+                            and (len(pname) >= _SHORT_NAME_LEN
+                                 or _short_name_supported(text, pname)))
+                    prev = best.get(pid)
+                    if prev is None or (read, sc) > (prev[4], prev[3]):
+                        best[pid] = (i, text, prod, sc, read)
+        # The words of a maker the frame *read* are maker evidence for every pick, not only
+        # that maker's. BOMBAY SAPPHIRE read the maker outright, and a one-product producer
+        # registered as "Bombay spirits" holds a stray row for the Murcian Lemon -- whose own
+        # name, under *that* maker, kept the word "sapphire". The window "sapphire santed"
+        # then named it off a bottle of the plain gin, fifteen times.
+        #
+        # Read means read as a phrase: two or more of the maker's own words in the frame,
+        # the same standard a label is held to (`_MIN_SELF_PROOF_TOKENS`). The catalog has
+        # producers named after beers -- a permit filed as `Topper's`, another as `Heady
+        # Topper` -- and on one word, "topper" off the wordmark DY TOPPER, they too were
+        # "read", and excluding their words let a hypothesis that found no beer veto the one
+        # that did: the can drew nothing under CHEMIST-VERMONT. One word is a hypothesis; a
+        # phrase is a maker.
+        frame_toks = {t for toks in line_tokens for t in toks}
+        maker_words: list[str] = []
+        for _, _, prod, _, read in best.values():
+            if not read:
+                continue
+            words = [t for t in _tokens(prod.get("name") or "") if len(t) >= _MAKER_PICK_MIN_TOKEN]
+            present = [w for w in _identifying_tokens(prod.get("name") or "")
+                       if any(_trigram_sim(w, r) >= _TOKEN_SUPPORT_MIN for r in frame_toks)]
+            if len(set(present)) >= _MIN_SELF_PROOF_TOKENS:
+                maker_words += words
+        out: list[tuple[int, dict, float]] = []
+        for i, _, prod, _, _ in best.values():
+            items = products_of(prod.get("id") or "", limit=_MAKER_PICK_MAX_PRODUCTS + 1)
+            if hint:
+                items = [p for p in items if (p.get("category") or "") == hint]
+            if not items or len(items) > _MAKER_PICK_MAX_PRODUCTS:
+                continue
+            pick = _pick_among(items, line_tokens, prod.get("name") or "", claimed | {i},
+                               maker_words)
+            if pick is None:
+                continue
+            rec, shape, at = pick
+            picked.add(rec.get("id") or "")
+            # Anchored to the wordmark's line, which is where the beer's name is; scored as
+            # maker evidence lifted by how well the shape was read.
+            out.append((at if at >= 0 else i, rec,
+                        round(_PRODUCER_EVIDENCE + (1 - _PRODUCER_EVIDENCE) * shape, 3)))
+        return out, picked
+
     def _match_lines(self, texts: list[str]) -> list[list[tuple[dict, float]]]:
         """A frame's name matches, concurrently where the store can. The fallback keeps any
         store that only implements the single-line `match_products` working unchanged."""
@@ -775,7 +1035,9 @@ class Resolver:
         `resolve_object`, which runs the same judgement over one can's worth of lines and
         turns it into a verdict the HUD can act on without reading the candidates.
         """
-        frame = self._resolve_lines(req.detections, req.include_score, profile)
+        detections = [d.model_copy(update={"text": _latin(d.text)}) if d.kind != "barcode" else d
+                      for d in req.detections]
+        frame = self._resolve_lines(detections, req.include_score, profile)
         corroborated = bool(frame.proven)
         # A frame nothing corroborates has no evidence to rank a list with, so offering one
         # implies a differentiation we cannot make. Measured over 78 such frames from a real
@@ -795,10 +1057,19 @@ class Resolver:
 
         objects = [self.resolve_object(o, profile, req.include_score, req.min_match_score)
                    for o in req.objects]
-        for res in objects:
-            if res.status == "resolved":
-                candidates.append(res.candidates[0])
-                corroborated = True
+        settled = [res.candidates[0] for res in objects if res.status == "resolved"]
+        if settled:
+            # An object's verdict makes the response corroborated, and the client draws a
+            # corroborated response whole -- so the frame's one unproven guess, kept above
+            # only because the model was about to be asked, would go up beside the verdict
+            # as if it were one too. On a can of Heady Topper the tracked object settled on
+            # the beer while the live lines guessed `Vermont Pale Lager` off VERMONT, and
+            # both were drawn (2026-09-11). The verdict is the answer; the guess was for a
+            # question that is no longer being asked.
+            if not corroborated:
+                candidates = []
+            candidates += settled
+            corroborated = True
         return ScanResolveResponse(
             candidates=candidates,
             unresolved_indices=frame.unresolved,
@@ -878,10 +1149,21 @@ class Resolver:
         backing: dict[str, set[int]] = {}
         for i, rec, _ in hits:
             backing.setdefault(rec.get("id") or "", set()).add(i)
+        by_maker: set[str] = set()
         if not any(len(v) >= _MIN_FRAME_FOR_PENALTY for v in backing.values()):
             # Nothing the frame corroborates: the label has not named a product to us. Ask who
             # made it before giving up — on a stylized can the maker is the readable half.
-            hits += self._by_producer([(i, detections[i].text) for i in to_match], hint)
+            maker_lines = [(i, detections[i].text) for i in to_match]
+            hits += self._by_producer(maker_lines, hint)
+            # Lines some product already accounts for in full are that product's: on a
+            # shelf, BLUE MOON BELGIAN WHITE is Blue Moon's line, and the word WHITE in it
+            # is not evidence for a `Guinness White Ale`.
+            claimed = frozenset(
+                i for i, rec, _ in hits
+                if _accounts_for_the_line(self._qualified_name(rec), detections[i].text,
+                                          threshold=_SELF_PROOF_SIM))
+            wordmark_hits, by_maker = self._by_wordmark(maker_lines, hint, line_tokens, claimed)
+            hits += wordmark_hits
             resolved_lines.update(i for i, _, _ in hits)
 
         unresolved = [i for i in range(len(detections)) if i not in resolved_lines]
@@ -988,6 +1270,29 @@ class Resolver:
         # also picks the better-linked of two duplicate rows.
         read_toks = {t for toks in line_tokens for t in toks}
 
+        def _is_proven(c: ScoredCandidate) -> bool:
+            # A barcode is an identifier, not a reading of one. Nothing in the frame needs to
+            # agree with it, and a scan that succeeded must not be sent to the model to be
+            # second-guessed -- nor capped below, since two barcodes legitimately name two
+            # products.
+            return (
+                c.resolved.product.id in by_upc
+                # The maker was read and, among its beers, the wordmark's shape picked this
+                # one by a margin (`_pick_among`). Two parts of the frame agreeing, the second
+                # by shape rather than by letters.
+                or c.resolved.product.id in by_maker
+                or named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
+                # A line this candidate accounts for *entirely* proves it on its own, however
+                # many other labels share the frame. This used to require the frame to hold
+                # fewer than two identity lines -- which is to say, it only worked on a single
+                # label photographed alone, and switched itself off on the one input the HUD
+                # exists for. A shelf gives every product one line naming it and no second line
+                # to agree, so nothing could corroborate, and the unproven-frame cap then threw
+                # away all but one: three beers in view returned a single guess the client
+                # withheld, and the shelf showed nothing at all.
+                or whole_label.get(c.resolved.product.id, False)
+            )
+
         def _rank(entry: tuple[int, ScoredCandidate]) -> tuple:
             support, c = entry
             p = c.resolved.product
@@ -1005,8 +1310,16 @@ class Resolver:
             # Dry Gin": "east", "vapour" and "infused" are nowhere in the frame.
             unread = sum(1 for t in _identifying_tokens(p.name or "")
                          if not any(_trigram_sim(t, r) >= _TOKEN_SUPPORT_MIN for r in read_toks))
-            return (support, c.match_score, bool(p.spec and p.spec.abv_pct), bool(p.sensory),
-                    -unread, p.id)
+            # Proof first. The one-candidate-per-line collapse below hands each line to its
+            # best-ranked candidate, and ranked on resemblance alone, the wordmark line went
+            # to whatever the garble happened to spell: "DY TOPP" is a 0.62 against `Lefty
+            # Topp's`, with the word TOPP to back it, and the beer the maker's catalog had
+            # just picked by the shape of that same line -- proven, and the only proven thing
+            # in the frame -- was dropped as a second reading of text already spoken for. A
+            # candidate the frame has proven represents its line ahead of one it merely
+            # resembles; among the proven, and among the rest, nothing changes.
+            return (_is_proven(c), support, c.match_score, bool(p.spec and p.spec.abv_pct),
+                    bool(p.sensory), -unread, p.id)
 
         best: dict[str, tuple[int, ScoredCandidate]] = {}
         for entry in scored:
@@ -1026,25 +1339,6 @@ class Resolver:
         for entry in ranked:
             per_line.setdefault(entry[1].detection_index, entry)
         ranked = sorted(per_line.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
-        def _is_proven(c: ScoredCandidate) -> bool:
-            # A barcode is an identifier, not a reading of one. Nothing in the frame needs to
-            # agree with it, and a scan that succeeded must not be sent to the model to be
-            # second-guessed -- nor capped below, since two barcodes legitimately name two
-            # products.
-            return (
-                c.resolved.product.id in by_upc
-                or named_by_id.get(c.resolved.product.id, 0) >= _MIN_FRAME_FOR_PENALTY
-                # A line this candidate accounts for *entirely* proves it on its own, however
-                # many other labels share the frame. This used to require the frame to hold
-                # fewer than two identity lines -- which is to say, it only worked on a single
-                # label photographed alone, and switched itself off on the one input the HUD
-                # exists for. A shelf gives every product one line naming it and no second line
-                # to agree, so nothing could corroborate, and the unproven-frame cap then threw
-                # away all but one: three beers in view returned a single guess the client
-                # withheld, and the shelf showed nothing at all.
-                or whole_label.get(c.resolved.product.id, False)
-            )
-
         proven = [c for _, c in ranked if _is_proven(c)]
         return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved)
 
@@ -1074,7 +1368,7 @@ class Resolver:
                          `Top's` here, "ACHE MIST-VERM" does not put `Ache` here.
           * `unresolved` nothing the reading supports. Show nothing; keep reading.
         """
-        texts = [t for t in obj.texts if t and t.strip()]
+        texts = [_latin(t) for t in obj.texts if t and t.strip()]
         query = " | ".join(texts + ([obj.barcode] if obj.barcode else []))
 
         def tagged(c: ScoredCandidate) -> ScoredCandidate:

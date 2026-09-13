@@ -8,10 +8,12 @@ import pytest
 from bcd_api.resolver import (
     Resolver,
     _accounts_for_sighting,
-    _identity_key,
-    _token_supported,
-    _upc_variants,
     _frame_support,
+    _identity_key,
+    _latin,
+    _token_supported,
+    _tokens,
+    _upc_variants,
 )
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
@@ -972,6 +974,28 @@ def test_the_client_can_raise_the_floor(shelf):
     assert res.status != "resolved"
 
 
+def test_an_objects_verdict_does_not_carry_the_frames_guess_with_it():
+    """A response with a resolved object is corroborated, and the client draws a corroborated
+    response whole. The frame's single unproven guess -- kept only for a model that will now
+    not be asked -- went up beside the verdict: `Vermont Pale Lager` off the word VERMONT,
+    next to the Heady Topper the tracked object had settled on (2026-09-11)."""
+    alch = _producer("pr:alch", "The Alchemist")
+    hf = _producer("pr:hf", "Hill Farmstead Brewery")
+    lager = _prod_of("Vermont Pale Lager", "p:vpl", "pr:hf")
+    store = _MakerStore(
+        by_text={"HEMIST-VERMONT": [(lager, 0.6)]},          # the live lines' one guess
+        gold={"pr:alch": alch, "pr:hf": hf},
+        producers={"chemist": [(alch, 0.5)], "CHEMIST-VERMONT": [(alch, 0.5)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST]},
+    )
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text=t, kind="text") for t in ("CYTOPPER", "HEMIST-VERMONT")],
+        objects=[DetectedObject(id="o1", texts=["CHEMIST-VERMONT", "MY-TOPPER", "ALE\nALC. 8% BY VOL"])]))
+    assert resp.corroborated
+    assert [c.resolved.product.name for c in resp.candidates] == ["The Alchemist Heady Topper"], (
+        f"the frame's guess rode along: {[c.resolved.product.name for c in resp.candidates]}")
+
+
 def test_objects_and_lines_share_one_response(shelf):
     r = Resolver(shelf)
     resp = r.resolve(ScanResolveRequest(
@@ -1141,3 +1165,306 @@ def test_two_reads_of_one_phrase_agree_once():
     verdict = Resolver(_FrameStore(frame, gold)).resolve_object(
         DetectedObject(id="o1", texts=list(frame)))
     assert verdict.status != "resolved", "its own echo certified `Day Drinker`"
+
+
+# ---- the maker's beers, told apart by the shape of the wordmark ----
+
+_ALCHEMIST = [("The Alchemist Heady Topper", "p:ht"), ("Focal Banger", "p:fb"),
+              ("Beelzebub", "p:bz"), ("Petit Mutant", "p:pm"), ("Holy Cow", "p:hc"),
+              ("Alena", "p:al"), ("Luscious", "p:lu"), ("Rapture", "p:ra"), ("Skadoosh", "p:sk"),
+              ("Just Say Gay", "p:jsg"), ("Beautiful Neon Light", "p:bnl"), ("Broken Spoke", "p:bs")]
+
+
+def _alchemist_store(*lines):
+    """The maker read cleanly, twelve of its beers on file, and nothing the product path can
+    match -- the wordmark is garble."""
+    maker = _producer("pr:alch", "The Alchemist")
+    return _MakerStore(
+        by_text={},
+        gold={"pr:alch": maker},
+        producers={line: [(maker, 1.0)] for line in lines},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST]},
+    )
+
+
+def _frame(*texts):
+    return ScanResolveRequest(detections=[DetectedText(text=t, kind="text") for t in texts])
+
+
+@pytest.mark.parametrize("wordmark,expect", [
+    ("FADY TOPPE", "The Alchemist Heady Topper"),     # scans5 2026-09-04, 23 frames like it
+    ("ADY TOPP", "The Alchemist Heady Topper"),
+    ("ROY TOPP / FADY TOPP", "The Alchemist Heady Topper"),
+    ("FOCAL BAN", "Focal Banger"),                    # the other can, same maker
+])
+def test_the_wordmark_shape_picks_the_makers_beer(wordmark, expect):
+    """A stylized can reads its maker in plain type and its own name as garble. Against the
+    catalog the garble is noise; against the maker's dozen beers it is not. Measured over 245
+    logged frames: 100 picks, 82 Heady and 18 Focal Banger, none wrong."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", wordmark, "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"{wordmark!r} under a read maker should resolve"
+    assert resp.candidates[0].resolved.product.name == expect
+    # Indirect evidence still: scored below a label that named the beer outright.
+    assert resp.candidates[0].match_score < 1.0
+
+
+def test_the_fine_print_does_not_pick_a_beer():
+    """Every can prints ALE / ALC. 8% BY VOL, and "ale" scores 0.43 against a beer called
+    `Alena`. Chrome is excluded from the scoring on both sides; the maker alone names nothing."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert not resp.corroborated
+    assert all(c.resolved.product.name != "Alena" for c in resp.candidates)
+
+
+def test_the_makers_own_garbled_name_does_not_pick_a_beer():
+    """"alcher" and "ALCHEMIS" are garbles of the maker, and they resemble `Alena` too. The
+    maker's tokens -- and anything that reads as a garble of them -- are not the beer's."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", "w alchemistbeer.c", "Wo alcher"))
+    assert not resp.corroborated
+    assert all(c.resolved.product.name != "Alena" for c in resp.candidates)
+
+
+def test_one_token_against_a_two_word_name_is_not_a_read():
+    """"FOCAILS" (scans5 03:12:59) resembles "focal banger" at 0.24 -- one token against a
+    phrase. "ecan", off DRINK FROM THE CAN, resembled `pecan cream` at 0.21 the same way and
+    was picked. Two words agreeing on two words, or a near read: one token is the 0.40 floor
+    whichever side it is on."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", "FOCAILS"))
+    assert not resp.corroborated
+
+
+@pytest.mark.parametrize("wordmark", ["DY TOPP", "DY TOPT", "BADY TO"])
+def test_a_short_fragment_counts_toward_the_shape(wordmark):
+    """The wordmark arrived as "DY TOPP" five times in one session (2026-09-11): HEADY TOPPER
+    with the first letters of each word lost. Dropping the two-letter DY as carrying nothing
+    left TOPP alone against a two-word name, which is rightly no read -- so a can with its maker
+    in plain type and its name in that shape drew nothing for a minute. DY is not a name, but
+    it is half the shape of the line it sits in, and "dy topp" resembles `heady topper` at 0.31
+    and nothing else the maker brews."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", wordmark, "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"{wordmark!r} under a read maker should resolve"
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+@pytest.mark.parametrize("fragment", ["DY", "AL", "ALE\nAL"])
+def test_a_short_fragment_is_not_a_window_by_itself(fragment):
+    """"AL" off "ALC." scored 0.29 against `Alena` once; a fragment may make a shape with a word
+    beside it, never alone."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", fragment))
+    assert not resp.corroborated
+
+
+@pytest.mark.parametrize("wordmark", ["ЯДУ ТОРР", "АДУ ТОРО", "ГАДУ ТОРРА", "ПОУ ТОРРЕ"])
+def test_a_cyrillic_read_of_a_latin_wordmark_is_read_in_latin(wordmark):
+    """The recognizer picks a script per line by what the letterforms resemble, and asking it
+    for en-US does not stop it: 11.5% of one session's frames came back non-Latin with the pin,
+    9-16% without. On a can of Heady Topper the wordmark arrived as "ЯДУ ТОРР" -- the right
+    shapes in the wrong alphabet. Each Cyrillic letter is drawn like the Latin one it was read
+    for, so mapped back it is "RDY TOPP", a read the maker pick uses like any other."""
+    assert _tokens(_latin("ЯДУ ТОРР")) == ["rdy", "topp"]
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", wordmark, "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"{wordmark!r} under a read maker should resolve"
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_a_cyrillic_read_reaches_the_object_path_in_latin():
+    """The same alphabet at the other door: an object's texts are the camera's too."""
+    store = _alchemist_store("THE ALCHEMIST")
+    verdict = Resolver(store).resolve_object(
+        DetectedObject(id="o1", texts=["THE ALCHEMIST", "ЯДУ ТОРР", "ALE\nALC. 8% BY VOL\n1 PINT"]))
+    assert verdict.status == "resolved"
+    assert verdict.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+@pytest.mark.parametrize("reading,row", [
+    ("MIST", "Sno Mist"),                       # 04:15:34, shortlisted alone at 1.00
+    ("THE CAN! DRINK FRONT", "Front Flips"),    # 04:15:27, shortlisted alone at 0.41
+])
+def test_one_word_does_not_make_a_shortlist(reading, row):
+    """A shortlist is a choice. "MIST" put `Sno Mist` on one by itself, "DRINK FRONT" put
+    `Front Flips` on one by itself, and the model asked to pick among one picked it -- so the
+    beer `_accounts_for_object` had just learned not to certify off one word was drawn anyway,
+    by the other door (2026-09-11). One word may match; it may not shortlist."""
+    frame = {reading: [(_prod_of(row, "p:x", "pr:x"), 1.0)]}
+    gold = {"pr:x": _producer("pr:x", "Some Brewing")}
+    verdict = Resolver(_FrameStore(frame, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status == "unresolved", f"{reading!r} gave the model {verdict.candidates[0].resolved.product.name!r} to rubber-stamp"
+
+
+def test_a_proven_pick_keeps_its_line_from_a_coincidence():
+    """"DY TOPP" is a 0.62 against `Snipes Mountain Lefty Topp's`, with the word TOPP to back
+    it -- and the same line, by its shape, is what picked Heady Topper from the maker's beers.
+    One candidate represents each line, and ranked on resemblance the coincidence took the
+    line and the proven beer was dropped as a second reading of it: the maker pick fired and
+    the screen stayed blank (2026-09-11, five frames). Proof outranks resemblance."""
+    maker = _producer("pr:alch", "The Alchemist")
+    lefty = _prod_of("Snipes Mountain Lefty Topp's", "p:lefty", "pr:snipes")
+    store = _MakerStore(
+        by_text={"DY TOPP": [(lefty, 0.62)]},
+        gold={"pr:alch": maker, "pr:snipes": _producer("pr:snipes", "Snipes Mountain")},
+        # The maker line as the can actually reads: a hypothesis, not a read, so no line of
+        # the frame supports the beer by its letters -- the shape is all it has.
+        producers={"ACHEMIST-VERM": [(maker, 0.44)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST]},
+    )
+    resp = Resolver(store).resolve(_frame("DY TOPP", "CAN! DRINK FROMTHO", "ACHEMIST-VERM"))
+    assert resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+    assert [c.resolved.product.name for c in resp.candidates] == ["The Alchemist Heady Topper"]
+
+
+def test_the_town_on_the_maker_line_does_not_hide_the_maker():
+    """"CHEMIST-VERMONT" is the maker's name with its town after it. Matched as a line it
+    resembles seven Vermont producers better than it resembles `The Alchemist`, which never
+    made the hypotheses (2026-09-11, a whole scan blank). Each word of the line nominates
+    makers on its own: "chemist" reaches the brewery, "vermont" the town's, and the wordmark
+    contest sorts them out."""
+    alch = _producer("pr:alch", "The Alchemist")
+    vt = _producer("pr:vt", "Vermont Beer Makers")
+    store = _MakerStore(
+        by_text={}, gold={"pr:alch": alch, "pr:vt": vt},
+        # The line's whole-text matches, then each word's, as the index answers them.
+        producers={"CHEMIST-VERMONT": [(vt, 0.67)], "chemist": [(alch, 0.5)], "vermont": [(vt, 1.0)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST],
+                 "pr:vt": [_beer("Vermont Pale Lager", "p:vpl", "pr:vt"),
+                           _beer("Green Mountain Amber", "p:gma", "pr:vt")]},
+    )
+    resp = Resolver(store).resolve(_frame("ADY TOPPE", "CHEMIST-VERMONT", "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+def test_a_maker_named_after_a_beer_cannot_veto_the_beer():
+    """The catalog holds producers named after beers -- a permit filed as `Topper's`. The
+    wordmark line DY TOPPER therefore "reads" a maker, and excluding a read maker's words
+    from every window let that hypothesis, which found no beer, veto The Alchemist's, which
+    found one (2026-09-11). A maker is read as a phrase, two or more of its words in the
+    frame; on one word it is a hypothesis, and a hypothesis excludes nothing."""
+    alch = _producer("pr:alch", "The Alchemist")
+    tops = _producer("pr:tops", "Topper's")
+    store = _MakerStore(
+        by_text={}, gold={"pr:alch": alch, "pr:tops": tops},
+        producers={"CHEMIST-VERMONT": [(alch, 0.5)], "DY TOPPER": [(tops, 0.78)],
+                   "topper": [(tops, 1.0)], "chemist": [(alch, 0.5)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST],
+                 "pr:tops": [_beer("Topper's Lager", "p:tl", "pr:tops"),
+                             _beer("Topper's Stout", "p:ts", "pr:tops")]},
+    )
+    resp = Resolver(store).resolve(_frame("DY TOPPER", "CHEMIST-VERMONT", "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+    assert [c.resolved.product.name for c in resp.candidates] == ["The Alchemist Heady Topper"]
+    # ...and the control the rule was written for: the maker read on the label's own line
+    # is still no evidence for a sibling filed under a stray producer.
+    bs = _producer("pr:bs", "Bombay Sapphire")
+    stray = _producer("pr:stray", "Bombay spirits")
+    store = _MakerStore(
+        by_text={}, gold={"pr:bs": bs, "pr:stray": stray},
+        producers={"BOMBAY SAPPHIRE": [(bs, 1.0), (stray, 0.6)], "bombay": [(bs, 0.7), (stray, 0.7)],
+                   "sapphire": [(bs, 0.7)]},
+        catalog={"pr:bs": [_prod_of("Bombay Sapphire London Dry Gin", "off:plain", "pr:bs"),
+                           _prod_of("Bombay Bramble", "off:bramble", "pr:bs")],
+                 "pr:stray": [_prod_of("Bombay Sapphire Murcian Lemon", "off:lemon", "pr:stray")]},
+    )
+    resp = Resolver(store).resolve(_frame("BOMBAY SAPPHIRE", "SAPPHIRE SANTED"))
+    assert all(c.resolved.product.id != "off:lemon" for c in resp.candidates), "the maker's own word named the stray row"
+
+
+def test_a_beer_named_after_its_maker_cannot_lose_a_shape_contest():
+    """"Bombay Sapphire London Dry Gin" is the maker plus a style: nothing of its own for a
+    wordmark to resemble. A frame that read BOMBAY / SAPPHIRE and some garble is consistent
+    with it, so the shape may not hand the frame to a sibling with a longer name -- which is
+    exactly how `East Vapour Infused London Dry Gin` displaced it in four logged frames."""
+    maker = _producer("pr:bs", "Bombay Sapphire")
+    store = _MakerStore(
+        by_text={}, gold={"pr:bs": maker},
+        producers={"BOMBAY SAPPHIRE": [(maker, 1.0)]},
+        catalog={"pr:bs": [_prod_of("Bombay Sapphire London Dry Gin", "off:plain", "pr:bs"),
+                           _prod_of("East Vapour Infused London Dry Gin", "off:east", "pr:bs"),
+                           _prod_of("Bombay Sapphire Murcian Lemon", "off:lemon", "pr:bs"),
+                           _prod_of("Bombay Sapphire Gin & Light Tonic", "off:tonic", "pr:bs"),
+                           _prod_of("Bombay Bramble", "off:bramble", "pr:bs")]},
+    )
+    resp = Resolver(store).resolve(_frame("BOMBAY SAPPHIRE", "INEUSED INFUSE"))
+    assert all(c.resolved.product.id != "off:east" for c in resp.candidates if resp.corroborated)
+
+
+def test_a_line_a_product_accounts_for_is_not_a_wordmark():
+    """On a shelf, BLUE MOON BELGIAN WHITE is Blue Moon's line. The word WHITE in it scored
+    `Guinness White Ale`'s own name at 1.00 and the maker path drew it beside the Guinness
+    that was actually there. A line some product accounts for in full is that product's."""
+    guinness = _producer("pr:g", "Guinness")
+    bm = _prod_of("Blue Moon Belgian White", "p:bm", "pr:bm")
+    store = _MakerStore(
+        by_text={"BLUE MOON BELGIAN WHITE": [(bm, 1.0)]},
+        gold={"pr:g": guinness, "pr:bm": _producer("pr:bm", "Blue Moon")},
+        producers={"GUINNESS DRAUGHT STOUT": [(guinness, 1.0)]},
+        catalog={"pr:g": [_beer("Guinness White Ale", "p:gw", "pr:g"), _beer("Guinness Draught", "p:gd", "pr:g"),
+                          _beer("Guinness Extra Stout", "p:ge", "pr:g"), _beer("Guinness Foreign Extra", "p:gf", "pr:g"),
+                          _beer("Guinness Over The Moon Milk Stout", "p:gm", "pr:g")]},
+    )
+    resp = Resolver(store).resolve(_frame("BLUE MOON BELGIAN WHITE", "GUINNESS DRAUGHT STOUT"))
+    assert all(c.resolved.product.name != "Guinness White Ale" for c in resp.candidates)
+
+
+def test_a_garbled_maker_is_read_by_the_wordmark_that_agrees_with_it():
+    """The maker line is garbled too: THE ALCHEMIST reaches the resolver as "CHEMIST-VER" sixty
+    times for every four clean reads, and the producer guards rightly refuse that. The pick
+    starts from a maker merely resembled and keeps it only when the wordmark names one of
+    its beers by a margin -- two weak reads that agree are one strong read."""
+    maker = _producer("pr:alch", "The Alchemist")
+    store = _MakerStore(
+        by_text={}, gold={"pr:alch": maker},
+        producers={"ELCHEMIST-VE": [(_producer("pr:chem", "Chemist"), 1.0), (maker, 0.44)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST],
+                 "pr:chem": [Product(id=f"p:c{i}", brand_id="b", producer_id="pr:chem", category=Category.SPIRIT,
+                                     name=n).model_dump(mode="json")
+                             for i, n in enumerate(("Chemist Gin", "Chemist Single Malt Pecan Cream Liqueur",
+                                                    "Chemist Forager's Gin", "Chemist Eau De Vie", "Chemist 151"))]},
+    )
+    resp = Resolver(store).resolve(_frame("ELCHEMIST-VE", "FADY TOPPE", "ALE\nALC. 8% BY VOL"))
+    assert resp.corroborated
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+    # ...and the resemblance alone, with no wordmark agreeing, reads nothing.
+    resp = Resolver(store).resolve(_frame("ELCHEMIST-VE", "ECAN! DRINK FROM THE!"))
+    assert not resp.corroborated
+
+
+def test_a_one_word_beer_needs_a_near_read():
+    """A lone garbled word resembles many things. `Beelzebub` off "BELZBU" (0.5) is a read;
+    off a passing resemblance it is not."""
+    store = _alchemist_store("THE ALCHEMIST")
+    near = Resolver(store).resolve(_frame("THE ALCHEMIST", "BEELZEBU"))
+    assert near.corroborated and near.candidates[0].resolved.product.name == "Beelzebub"
+    far = Resolver(store).resolve(_frame("THE ALCHEMIST", "BEEZE"))
+    assert not far.corroborated
+
+
+def test_two_beers_that_look_alike_pick_neither():
+    """The margin: when the garble fits two of the maker's beers about equally, the honest
+    answer is the maker, not a coin flip.
+
+    Five beers, not three, so the maker is past `_PRODUCER_MAX_PRODUCTS` and the pick is the
+    only route in. (With three, the older two-lines-agree proof certifies *both* look-alikes
+    off TWIN BREWING + SUMMER and draws one by id -- a weakness of that rule, not of this one,
+    and not what this test is about.)
+    """
+    maker = _producer("pr:tw", "Twin Brewing")
+    store = _MakerStore(
+        by_text={}, gold={"pr:tw": maker},
+        producers={"TWIN BREWING": [(maker, 1.0)]},
+        catalog={"pr:tw": [_beer("Summer Haze", "p:a", "pr:tw"), _beer("Summer Daze", "p:b", "pr:tw"),
+                           _beer("Winter Warmer", "p:c", "pr:tw"), _beer("Autumn Amber", "p:d", "pr:tw"),
+                           _beer("Spring Bock", "p:e", "pr:tw")]},
+    )
+    resp = Resolver(store).resolve(_frame("TWIN BREWING", "SUMMER"))
+    assert not resp.corroborated
+    # ...while a read that reaches the distinguishing word does decide it.
+    resp = Resolver(store).resolve(_frame("TWIN BREWING", "SUMMER HAZ"))
+    assert resp.corroborated and resp.candidates[0].resolved.product.name == "Summer Haze"

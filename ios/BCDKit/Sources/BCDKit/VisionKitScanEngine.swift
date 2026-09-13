@@ -37,7 +37,21 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
 
     @MainActor public func makeScanner() -> DataScannerViewController {
         let scanner = DataScannerViewController(
-            recognizedDataTypes: [.text(), .barcode()],
+            // English first. Left to guess the language per line, Vision reads a stylized
+            // wordmark as whatever script its letterforms most resemble, and the scan log is
+            // full of the result: HEADY TOPPER arriving as "ГАДУ ТОРРА", "ПОУ ТОРРЕ" and
+            // "РОУ ТОРРИ" (Cyrillic), "대EMS" (Hangul), "シッタ" and "而Y" (CJK). Those reads
+            // carry the same shape information as "FADY TOPPA" -- the Latin misread the
+            // matcher can use -- and matched nothing, because the catalog is not in Cyrillic.
+            //
+            // This list does NOT pin the script. It was added as the fix and measured on the
+            // next scan: 11.5% of the session's frames were non-Latin with it, 9-16% in the
+            // sessions before. VisionKit takes the languages as a preference and still detects
+            // the script per line. The fix that works is on the server, where the resolver
+            // maps each Cyrillic letter back to the Latin letter it is drawn like ("ЯДУ ТОРР"
+            // becomes "RDY TOPP") before matching. The preference stays because it costs
+            // nothing and English is what the catalog is in.
+            recognizedDataTypes: [.text(languages: Self.recognitionLanguages), .barcode()],
             // `.balanced`, not `.fast`. Reported from the camera as "the barcode is a bit hard
             // to read", and the log agreed: one clean decode in roughly two minutes, while
             // VisionKit repeatedly read the digits *printed under* the code as text -- "11726",
@@ -81,6 +95,11 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
         guard let photo = try? await scanner.capturePhoto() else { return nil }
         return await MainActor.run { Self.jpeg(photo) }
     }
+
+    /// The languages the recognizers prefer. A preference only for the live scanner (see
+    /// `makeScanner`); the fine reader's `RecognizeTextRequest` turns script detection off
+    /// as well, which that API honours.
+    public static let recognitionLanguages = ["en-US"]
 
     static let maxCaptureEdge: CGFloat = 1024
     static let captureQuality: CGFloat = 0.6

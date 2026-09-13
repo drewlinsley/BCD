@@ -136,6 +136,9 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         var textReq = RecognizeTextRequest()
         textReq.recognitionLevel = .fast
         textReq.usesLanguageCorrection = false
+        textReq.recognitionLanguages = VisionKitScanEngine.recognitionLanguages
+            .map { Locale.Language(identifier: $0) }                             // see makeScanner
+        textReq.automaticallyDetectsLanguage = false
         let barcodeReq = DetectBarcodesRequest()
 
         var texts: [DetectedText] = []
