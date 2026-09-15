@@ -22,7 +22,16 @@ public final class ObjectStage {
         /// Raise the server's floor for a `resolved` verdict (nil = server default).
         public var minMatchScore: Double?
         /// Try a careful OCR pass on unresolved/ambiguous objects (once each).
-        public var fineReadEnabled = true
+        ///
+        /// Off. With the VisionKit engine the careful pass is `capturePhoto()`, and a photo is
+        /// a shutter sound: pointed at a shelf, the app audibly took a picture of every bottle
+        /// it tracked. Reported from the camera as "I can hear the camera click, which I DO
+        /// NOT WANT" (2026-09-14). What the pass bought is hard to find -- over every logged
+        /// session 846 fine reads left the object unresolved and 30 preceded a resolution the
+        /// coarse text may have earned anyway -- while the maker pick and the server's rules
+        /// now do the reading the pass was for. An engine that can read a frame silently
+        /// (`VisionFrameScanEngine`) may turn this back on.
+        public var fineReadEnabled = false
         /// Let the on-device model adjudicate an ambiguous shortlist (once each).
         public var adjudicateAmbiguous = true
         public var tracker = ObjectTracker.Config()

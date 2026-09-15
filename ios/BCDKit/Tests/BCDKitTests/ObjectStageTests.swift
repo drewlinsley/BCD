@@ -264,7 +264,11 @@ func objCandidate(_ id: String, _ name: String, score: Double = 1.0) -> ScoredCa
     }
 
     @Test func anUnresolvedObjectGetsOneFineReadThenReQueries() async {
-        let stage = ObjectStage()
+        // The fine read is off by default (it is a shutter click on the VisionKit engine);
+        // this is the behaviour when an engine that can read silently turns it on.
+        var policy = ObjectStage.Policy()
+        policy.fineReadEnabled = true
+        let stage = ObjectStage(policy: policy)
         let reader = MockScanEngine(scripted: [])
         reader.fineReads = ["HEADY TOPPER"]
         stage.ingest(label(["Chemist"])); stage.ingest(label(["Chemist"]))
@@ -382,4 +386,77 @@ private final class ObjectAPI: APIClientProtocol, @unchecked Sendable {
         coord.stop()
         #expect(coord.overlays.isEmpty)
     }
+
+    @Test func aNamedCanDoesNotGetASecondNameFromALineOnIt() async throws {
+        // A tracked bottle of Bombay Sapphire settled on the gin while the frame path, run
+        // over the same lines, proved `East Vapour Infused` off INFUSED and pinned it to the
+        // same bottle (2026-09-15). The server drops that when the object rides along with
+        // the tick; between those ticks the line comes back, and the HUD applies the same
+        // rule by geometry: a line inside a resolved object's box is that label read again.
+        // A line on the next bottle over is not.
+        let engine = ObjectEngine()
+        let api = SiblingAPI()
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+        let scene = label(["SAPPHIRE LONDON DRY GIN INFUSED", "BOMBAY"]) + label(["GOSLINGS BLACK SEAL"], y: 0.70)
+        engine.push(scene)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        await coord.resolveLatest()
+        // Lines only: the frame path draws the sibling on the gin and the rum on the rum.
+        #expect(Set(coord.overlays.map(\.id)) == ["east", "rum"])
+        engine.push(scene)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        await coord.resolveLatest()                     // the gin's object is ready and settles
+        for _ in 0..<20 where !coord.overlays.map(\.id).contains("plain") {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(Set(coord.overlays.map(\.id)) == ["plain", "rum"], "\(coord.overlays.map(\.id))")
+        // A later tick reads the label a little differently -- a new garble is a round trip
+        // with no object on it, the text having been seen once -- and the server answers the
+        // lines with the sibling again. The settled object still owns the box it sits in.
+        let regarbled = label(["SAPPHIRE LONDON DRY GIN INFUSE", "BOMBAY"]) + label(["GOSLINGS BLACK SEAL"], y: 0.70)
+        engine.push(regarbled)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        await coord.resolveLatest()
+        #expect(api.requests.last?.objects.isEmpty == true, "the premise: this tick carried no object")
+        #expect(api.requests.last?.detections.count == 3)
+        #expect(Set(coord.overlays.map(\.id)) == ["plain", "rum"], "\(coord.overlays.map(\.id))")
+        coord.stop()
+    }
+}
+
+/// The server as the Bombay shelf had it: the lines prove a sibling on the gin's label and
+/// the rum on its own; an object made of the gin's lines settles on the gin, and nothing
+/// else settles.
+private final class SiblingAPI: APIClientProtocol, @unchecked Sendable {
+    var requests: [ScanResolveRequest] = []
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        requests.append(req)
+        var candidates: [ScoredCandidate] = []
+        for (i, d) in req.detections.enumerated() {
+            if d.text.hasPrefix("SAPPHIRE") { candidates.append(lineCandidate("east", "East Vapour Infused London Dry Gin", index: i)) }
+            if d.text.hasPrefix("GOSLINGS") { candidates.append(lineCandidate("rum", "Goslings Black Seal", index: i)) }
+        }
+        var objects: [ObjectResolution] = []
+        for o in req.objects {
+            if o.texts.contains("BOMBAY") {
+                objects.append(ObjectResolution(objectId: o.id, status: .resolved,
+                                                candidates: [objCandidate("plain", "Bombay Sapphire London Dry Gin")]))
+                // What the server does when the object rides along: its lines are answered.
+                candidates.removeAll { $0.resolved.product.id == "east" }
+            } else {
+                objects.append(ObjectResolution(objectId: o.id, status: .unresolved))
+            }
+        }
+        return ScanResolveResponse(candidates: candidates + objects.flatMap(\.candidates),
+                                   unresolvedIndices: [], objects: objects, latencyMs: 2, corroborated: true)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
+private func lineCandidate(_ id: String, _ name: String, index: Int) -> ScoredCandidate {
+    let c = objCandidate(id, name)
+    return ScoredCandidate(detectionIndex: index, resolved: c.resolved, matchScore: c.matchScore,
+                           personalScore: c.personalScore, reason: nil, coldStart: false)
 }

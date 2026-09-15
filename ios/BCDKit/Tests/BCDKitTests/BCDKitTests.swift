@@ -128,6 +128,29 @@ import Foundation
     }
 
     @MainActor
+    @Test func aDeadServerIsSaidAfterThreeTicksAndUnsaidOnTheFirstAnswer() async throws {
+        // The API lives on a laptop. With the lid closed the phone scanned for a minute and the
+        // HUD stayed blank -- indistinguishable from a can it could not read. One failed tick
+        // is a dropped packet; three is a server that is not there, and the HUD must say so.
+        let engine = PushEngine()
+        let api = DeadThenAliveAPI()
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+        for i in 0..<3 {
+            engine.push([DetectedText(text: "FRAME \(i)", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+            try await Task.sleep(nanoseconds: 60_000_000)
+            #expect(!coord.isServerUnreachable)
+            await coord.resolveLatest()
+        }
+        #expect(coord.isServerUnreachable)
+        api.alive = true
+        engine.push([DetectedText(text: "FRAME 3", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(!coord.isServerUnreachable)
+    }
+
+    @MainActor
     @Test func liveAutoInterpretsWhenNothingResolves() async throws {
         // A stylized label OCRs as garbage that matches nothing. With no shutter, the live tick
         // itself triggers the on-device fallback: it names the product, and *that* clean name
@@ -631,6 +654,20 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
 /// Answers *something* for any frame — a confident-looking guess off a single fragment, marked
 /// uncorroborated the way the server marks it. Reproduces the real failure: a Heady Topper can
 /// whose garbled rim print matched a distillery named `Chemist` at a plausible score.
+/// An API that is not there, until it is.
+private final class DeadThenAliveAPI: APIClientProtocol, @unchecked Sendable {
+    var alive = false
+    var resolveCallCount = 0
+    struct Unreachable: Error {}
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        guard alive else { throw Unreachable() }
+        return ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: 1)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
 private final class UncorroboratedAPI: APIClientProtocol, @unchecked Sendable {
     let known: Set<String>
     var resolveCallCount = 0
