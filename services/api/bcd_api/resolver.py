@@ -150,6 +150,68 @@ def _flatten(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
+#: Words and numbers of a name, for asking whether a line prints the name whole. Not `_tokens`:
+#: that drops digits, and "Stella Artois 0.0%" is not Stella Artois, "Sierra Nevada 6 & Out"
+#: is not the pale ale. Three letters, not four: "Ice" is what tells `Miller High Life Ice`
+#: from the beer, "New Day" what tells `Little Willow New Day` from the brewery's line.
+_NAME_WORD_RE = re.compile(r"[^\W_]{3,}|\d+", re.UNICODE)
+
+
+def _name_words(name: str) -> list[str]:
+    """Every word of the name but a company suffix -- category words included. The first
+    cut dropped those as it drops them everywhere else, and what was left of `West Coast
+    Wheat` was "west coast", which a double IPA's can printed as WEST COAST STYLE; what was
+    left of `Toppling Goliath Brewing Co. Zz Hop` was the brewery, which the brewery's own
+    line printed whole (2026-09-15). The words a name shares with its category are not what
+    picks it off a shelf, but they are part of the name, and a line that prints the name
+    prints them."""
+    out = []
+    for w in _NAME_WORD_RE.findall((name or "").lower()):
+        w = _norm_token(w)
+        if w not in _PRODUCER_SUFFIX and w not in out:
+            out.append(w)
+    return out
+
+
+#: A "line" this long is a paragraph -- the back-label essay, the Surgeon General's warning
+#: (about forty words) -- and nothing on a label is named inside a paragraph. The largest
+#: block a label prints as one line, Miller High Life's ("BREWING COMPANY MILWAUKEE PREMIUM
+#: Miller BREWED HIGH LIFE EST 1903 The Champagne of Beers 12 FLUID OUNCES 1.355 LITERS"), is
+#: about twenty.
+_PARAGRAPH_WORDS = 30
+
+
+def _reads_the_name(name: str, line: str) -> bool:
+    """Whether a line prints a multi-word name whole, in order and together, whatever else is
+    on it.
+
+    Every word and number of the name, not only the identifying ones: the first cut of this
+    took `_identifying_tokens` and drew `Sierra Nevada 6 & Out` off SIERRA NEVADA PALE ALE
+    thirteen times, the 6 and the OUT being too short to ask for. In order and within one
+    stray word of each other: "Miller BREWED HIGH LIFE" is the name with a flourish between;
+    "we have worked so / you MUST pour" on the back of a Heady Topper can is not `Must Have`,
+    and a paragraph is where two common words will always end up near each other."""
+    words = _name_words(name)
+    if len(words) < _MIN_SELF_PROOF_TOKENS or sum(len(w) for w in words) < _MIN_SELF_PROOF_CHARS:
+        return False
+    toks = [_norm_token(w) for w in _NAME_WORD_RE.findall((line or "").lower())]
+    if len(toks) > _PARAGRAPH_WORDS:
+        return False
+    span = len(words) + 1
+    for start in range(max(1, len(toks) - span + 1)):
+        window = toks[start:start + span]
+        at = 0
+        for w in words:                      # in the name's order, each after the last
+            while at < len(window) and _trigram_sim(w, window[at]) < _TOKEN_SUPPORT_MIN:
+                at += 1
+            if at >= len(window):
+                break
+            at += 1
+        else:
+            return True
+    return False
+
+
 def _accounts_for_the_line(name: str, line: str, *, threshold: float | None = None) -> bool:
     """Whether the candidate is the whole of what was read, or only a piece of it.
 
@@ -186,9 +248,15 @@ _MIN_SELF_PROOF_TOKENS = 2
 
 def _identifying_tokens(name: str) -> list[str]:
     """Name tokens that could actually pick this product off a shelf: long enough to be a real
-    word, and not a category or packaging word every other label carries too."""
+    word, and not a category or packaging word every other label carries too.
+
+    Nor a word every producer's name carries. Nearly every can prints BREWING COMPANY, and a
+    producer named "Pariah Brewing Company" was agreed with by a Miller High Life can on the
+    word COMPANY -- which, with COLORS off the fine print "NO COLORS OR FLAVORS FROM ARTIFICIAL
+    SOURCES", made two lines naming a beer called `Colors` (2026-09-14)."""
     return [t for t in _tokens(name)
-            if len(t) >= _MIN_NAME_TOKEN_LEN and not is_generic_token(t)]
+            if len(t) >= _MIN_NAME_TOKEN_LEN and not is_generic_token(t)
+            and t not in _PRODUCER_SUFFIX]
 
 
 def _token_supported(query: str, name: str) -> bool:
@@ -336,6 +404,31 @@ _MAKER_HYPOTHESES = 6           # makers a line, or a word of it, may be tried a
 # the wordmark contest sorts them out. Four letters is "mist", which reaches nothing worth
 # trying; five is where a fragment starts to be a word.
 _MAKER_HYPOTHESIS_WORD = 5
+
+
+def _affix_read(line: str, maker_name: str) -> bool:
+    """Whether some word of the line is a word of the maker's name with letters lost at one
+    end -- the recognizer's failure on stylized type, and the only resemblance a hypothesis
+    may rest on.
+
+    "CHEMIST", "HEMIST", "ACHEMIST" and "FICHEMIST" all end the way ALCHEMIST ends; "CAMPAR"
+    starts the way CAMPARI starts. "LOURE" shares three letters with `Money Lure` and is a
+    garble of FLAVORS, and the resemblance the matcher scored it at (0.38) nominated that
+    brewery off a can's fine print, whose next line then named `Colorado Fisherman` by shape
+    (2026-09-14). A trigram score cannot tell those apart; the shape of the loss can."""
+    # ...and on a word of the maker's that is the maker's: "Aperi" starts the way APERITIVO
+    # starts, and a producer registered as `Terrativo Aperitivo` was hypothesised off a
+    # bottle of Campari on the word for what is in it (2026-09-15).
+    makers = _identifying_tokens(maker_name)
+    for w in _tokens(line):
+        for m in makers:
+            if w == m:
+                return True
+            if len(w) >= _MAKER_HYPOTHESIS_WORD and len(m) >= _MAKER_HYPOTHESIS_WORD:
+                k = _MAKER_HYPOTHESIS_WORD
+                if w[:k] == m[:k] or w[-k:] == m[-k:]:
+                    return True
+    return False
 # A candidate whose category *contradicts* the label's own fine print. Not merely unsupported —
 # the frame says one thing and the row says another, which is evidence against, not absence of
 # evidence. "A CHEMIST VER" off this can matched a distillery's `Chemist` at 1.00 while the same
@@ -397,6 +490,50 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
         for t in _identifying_tokens(part or ""):
             seen[t] = None
     return list(seen)
+
+
+def _own_vocabulary(resolved: ResolvedProduct) -> list[str]:
+    """The identifying words of a product's name that are not its maker's -- what tells it
+    from its siblings. A name that is nothing but the maker's (`Miller High Life`, by Miller
+    High Life) is its own: the flagship is named for the house, and its words are the words
+    that name it."""
+    makers = set()
+    for part in _maker_names(resolved):
+        makers.update(_identifying_tokens(part))
+    named = _identifying_tokens(resolved.product.name or "")
+    own = [t for t in named if t not in makers] or named
+    # The other names a merge left on the row are the label's words too ("Bombay Sapphire
+    # Vapour Infused London Dry Gin" beside a row named without them) -- more of the
+    # bottle's own vocabulary, never a substitute for it.
+    for alias in resolved.product.aliases or []:
+        own += [t for t in _identifying_tokens(alias) if t not in makers and t not in own]
+    return own
+
+
+def _is_business_name(resolved: ResolvedProduct) -> bool:
+    """Whether the row is named for its maker, suffix and all, and for nothing else: a
+    permit filed under the brewery's name with no beer on it. The catalog holds one such row
+    for most of the breweries in it -- 164,000 rows are named exactly as their brand -- and
+    the ones that carry a trade suffix are companies, not drinks: `Toppling Goliath Brewing
+    Co.` was drawn beside `Toppling Goliath Brewing Co. Dino Break` off the brewery line of a
+    Dino Break can, and alone when only that line was in view (2026-09-15). A maker's name
+    without a suffix (`Sierra Nevada`, `Campari`) may be a flagship's, and stays."""
+    name = _tokens(resolved.product.name)
+    if not any(t in _PRODUCER_SUFFIX for t in name):
+        return False
+    core = {t for t in name if t not in _PRODUCER_SUFFIX}
+    if not core:
+        return False
+    return any(core == {t for t in _tokens(m) if t not in _PRODUCER_SUFFIX}
+               for m in _maker_names(resolved))
+
+
+def _maker_names(resolved: ResolvedProduct) -> list[str]:
+    """The brand and producer names the catalog actually holds. `_hydrate` stands in a brand
+    named for the product when the row has none, and that placeholder would make every row
+    its own maker."""
+    return [m.name for m in (resolved.brand, resolved.producer)
+            if m is not None and m.id != "unknown" and m.name]
 
 
 # Two lines that read the same printed phrase are one piece of evidence, not two.
@@ -521,7 +658,11 @@ def _frame_support(vocab: list[str], line_tokens: list[list[str]], *,
                               if any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for t in toks))
             if words:
                 agreed.add(words)
-        n = len(agreed)
+        # ...and a set that is part of another is the same phrase read worse, not a second one
+        # agreeing. A Campari label read "MILANO BITTER" once and "MILANO TER" once, the
+        # second with the last word truncated, and {milano, bitter} beside {milano} made two
+        # lines naming `Gran Milano Bitter` -- a different maker's amaro (2026-09-14).
+        n = sum(1 for a in agreed if not any(a < b for b in agreed))
     if hint and category and category == hint:
         n += 1
     return n
@@ -656,12 +797,26 @@ def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[s
     Lines in `skip` are ones a product already accounts for in full -- on a shelf, BLUE MOON
     BELGIAN WHITE is Blue Moon's line, and the word WHITE in it is not evidence for a
     `Guinness White Ale`."""
+    # A wordmark is stacked type, and the recognizer reads HEADY over TOPPER as one word when
+    # the leading is tight: "OYTOPPER", "CYTOPPER", "ATOPPER" on nine frames of one scan. The
+    # letters are the same either way, so a single token is compared to the name written as
+    # one word -- but only a token with one of the name's words *whole* inside it. That is the
+    # corroboration a second word would have given: "OYTOPPER" carries TOPPER, and is a 0.40
+    # against "headytopper"; "FOCAILS" carries nothing of `focal banger` whole, and stays the
+    # one-token-against-a-phrase garble the two-word window refuses.
+    whole = [w for w in own.split() if len(w) >= _MIN_NAME_TOKEN_LEN]
+    merged = own.replace(" ", "")
     best, at, width = 0.0, -1, 0
     for i, toks in enumerate(line_tokens):
         if i in skip:
             continue
         toks = _window_tokens(" ".join(toks), maker_tokens)
         for a in range(len(toks)):
+            if (min_width > 1 and len(toks[a]) > _MIN_NAME_TOKEN_LEN
+                    and any(w in toks[a] for w in whole)):
+                sim = _trigram_sim(toks[a], merged)
+                if sim > best:
+                    best, at, width = sim, i, 1
             for b in range(a + min_width, min(len(toks), a + _MAKER_PICK_WINDOW) + 1):
                 if not any(len(t) >= _MAKER_PICK_MIN_TOKEN for t in toks[a:b]):
                     continue        # "AL" off "ALC." is not a window; "DY TOPP" is
@@ -900,9 +1055,9 @@ class Resolver:
             for q in queries:
                 for prod, sc in match(q, limit=_MAKER_HYPOTHESES):
                     pid = prod.get("id") or ""
-                    if sc < _MAKER_HYPOTHESIS_MIN:
-                        continue
                     pname = prod.get("name") or ""
+                    if sc < _MAKER_HYPOTHESIS_MIN or not _affix_read(text, pname):
+                        continue
                     # Whether the *line* reads as this maker, whichever query found it.
                     read = (sc >= _PRODUCER_MATCH_MIN and _token_supported(text, pname)
                             and (len(pname) >= _SHORT_NAME_LEN
@@ -1068,6 +1223,23 @@ class Resolver:
             # question that is no longer being asked.
             if not corroborated:
                 candidates = []
+            # And a verdict speaks for the lines it was reached over. The frame path is the
+            # shelf's: every product that proves itself is drawn, because on a shelf each
+            # label gets one line and nothing to agree with it. Run over one bottle's lines
+            # it draws the bottle's siblings too. A bottle of Bombay Sapphire tracked as an
+            # object settled on the gin, and the same tick's lines -- the same lines, the
+            # object's own -- proved `East Vapour Infused London Dry Gin` off INFUSED and
+            # `Bombay citron pressé` off the maker line, each by the words it shares with the
+            # label and none by the word (EAST, CITRON) that would have told it apart. Three
+            # names on one bottle (2026-09-15). The object judged those lines together and
+            # chose; a line the object owns has been answered, and a second reading of it is
+            # not a second product.
+            resolved_ids = {r.object_id for r in objects if r.status == "resolved"}
+            owned = {_flatten(_latin(t)) for o in req.objects if o.id in resolved_ids
+                     for t in o.texts} - {""}
+            candidates = [c for c in candidates
+                          if not (0 <= c.detection_index < len(detections)
+                                  and _flatten(detections[c.detection_index].text) in owned)]
             candidates += settled
             corroborated = True
         return ScanResolveResponse(
@@ -1202,15 +1374,33 @@ class Resolver:
             # recogniser is meant to know, is two words and still proves itself.
             if len(_tokens(detections[line_i].text)) < _MIN_SELF_PROOF_TOKENS:
                 return False
-            return raw_score >= _STRONG_MATCH and _accounts_for_the_line(
-                qualified, detections[line_i].text, threshold=_SELF_PROOF_SIM)
+            # Nor is a piece of a line. A tracked object accumulates its reads, and among the
+            # reads of BLACK SEAL 80 PROOF BERMUDA BLACK RUM was "BLACK SEA" -- the first line
+            # with its last letter lost, two words, and a 1.00 against a spirit called `Black
+            # Sea` (2026-09-14). A line whose text sits inside another line of the frame is
+            # that line read short, and the whole label is the fuller read.
+            flat = _flatten(detections[line_i].text)
+            if any(j != line_i and flat and flat in _flatten(d.text) and flat != _flatten(d.text)
+                   for j, d in enumerate(detections)):
+                return False
+            if raw_score >= _STRONG_MATCH and _accounts_for_the_line(
+                    qualified, detections[line_i].text, threshold=_SELF_PROOF_SIM):
+                return True
+            # Or the line reads the whole *name*, fine print and all. A label is one block of
+            # type to the recognizer -- "BREWING COMPANY MILWAUKEE PREMIUM Miller BREWED HIGH
+            # LIFE EST 1903 The Champagne of Beers 12 FLUID OUNCES" is one line -- and against
+            # a line like that no name is ever most of the text. But every identifying word of
+            # `Miller High Life` is in it. Two or more of the name's own words, all read on one
+            # line, is the phrase rule met a second way; a name with one such word ("Colors",
+            # `Black Sea` once "sea" is too short to count) is not helped by it.
+            return _reads_the_name(qualified, detections[line_i].text)
 
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
         whole_label: dict[str, bool] = {}
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
-            if resolved is None:
+            if resolved is None or _is_business_name(resolved):
                 continue
             cat = resolved.product.category.value if resolved.product.category else None
             vocab = _candidate_vocabulary(resolved)
@@ -1222,6 +1412,15 @@ class Resolver:
             # reach the corroboration bar off one mis-segmented fragment, and a certified frame
             # is precisely the one the client does not ask the model about.
             named = _frame_support(vocab, independent)
+            # And lines that agree only on the maker's words have named the maker. A can of
+            # Long Live Beerworks read LIVE on one line and LONG FIRES on another, and those
+            # two named `Long Live Beerwoks Hola Fantasma` -- one of the brewery's beers, the
+            # one the store's top three for "JONG LIVE" happened to hold, with HOLA and
+            # FANTASMA read nowhere (2026-09-15). Evidence every sibling shares equally is
+            # evidence for the maker, and one piece of it: the second line has to read a word
+            # that is this beer's and not its siblings'.
+            if named > 1 and not _frame_support(_own_vocabulary(resolved), independent):
+                named = 1
             named_by_id[resolved.product.id] = named
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
@@ -1310,6 +1509,19 @@ class Resolver:
             # Dry Gin": "east", "vapour" and "infused" are nowhere in the frame.
             unread = sum(1 for t in _identifying_tokens(p.name or "")
                          if not any(_trigram_sim(t, r) >= _TOKEN_SUPPORT_MIN for r in read_toks))
+            # How much of what was read this row accounts for. `High Life` -- a permit filed
+            # under the importer -- and `Miller High Life` both print whole on a Miller can,
+            # and both are proven; the one that also explains MILLER is the one in view.
+            # Every read word of substance counts, category words included: IPA is what tells
+            # the row named "Dogfish Head 60 Minute IPA" from the one named "Dogfish Head 60
+            # Minute", WHISKEY the two Stranahan's rows, and a brand row from the product
+            # beside it. Only a producer's trade suffix is left out -- BREWING COMPANY is on
+            # every can and is nobody's.
+            words = {_norm_token(w) for w in _NAME_WORD_RE.findall(" ".join(filter(None, (
+                p.name, c.resolved.brand.name, c.resolved.producer.name,
+                *(p.aliases or [])))).lower())} - _PRODUCER_SUFFIX
+            explained = sum(1 for r in read_toks if len(r) >= 3
+                            and any(_trigram_sim(v, r) >= _TOKEN_SUPPORT_MIN for v in words))
             # Proof first. The one-candidate-per-line collapse below hands each line to its
             # best-ranked candidate, and ranked on resemblance alone, the wordmark line went
             # to whatever the garble happened to spell: "DY TOPP" is a 0.62 against `Lefty
@@ -1318,8 +1530,13 @@ class Resolver:
             # in the frame -- was dropped as a second reading of text already spoken for. A
             # candidate the frame has proven represents its line ahead of one it merely
             # resembles; among the proven, and among the rest, nothing changes.
-            return (_is_proven(c), support, c.match_score, bool(p.spec and p.spec.abv_pct),
-                    bool(p.sensory), -unread, p.id)
+            # ...and, everything else equal, the shorter name: "Miller High Life High Life"
+            # -- a permit filed as brand plus label -- explains the same three words as
+            # `Miller High Life` with two words to spare, and the one with nothing to spare is
+            # the one the line printed.
+            return (_is_proven(c), support, explained, c.match_score,
+                    bool(p.spec and p.spec.abv_pct), bool(p.sensory), -unread,
+                    -len(_tokens(p.name or "")), p.id)
 
         best: dict[str, tuple[int, ScoredCandidate]] = {}
         for entry in scored:

@@ -50,6 +50,12 @@ public final class ScanCoordinator: ObservableObject {
     @Published public private(set) var isInterpreting = false
     /// A picture of the label is with the server (the escalation past text).
     @Published public private(set) var isLookingAtTheLabel = false
+    /// The catalog has not answered for several ticks running. The API lives on a laptop; a
+    /// closed lid or a different Wi-Fi network is a dead server, and until this flag existed a
+    /// dead server looked exactly like an unreadable can -- a blank HUD, tick after tick. A scan
+    /// was lost that way (2026-09-13: the Mac was in clamshell sleep, the phone scanned for a
+    /// minute, and nothing fired, nothing logged, nothing said).
+    @Published public private(set) var isServerUnreachable = false
     /// What the vision model last said it could read, whether or not the catalog had it.
     /// Surfaced so "nothing was readable" and "nothing is in the catalog" stay distinguishable
     /// on screen — from the outside they look identical, and they are the two halves of every
@@ -86,6 +92,10 @@ public final class ScanCoordinator: ObservableObject {
     /// Consecutive ticks the frame has gone unrecognised. Not "unresolved" — a garbled can
     /// returns a confident wrong row most ticks, so counting empty responses would never fire.
     private var unreadTicks = 0
+    private var failedTicks = 0                     // consecutive resolve calls that threw
+    /// Ticks the catalog must fail to answer before the HUD says so: one is a dropped packet,
+    /// three at the tick rate is a second of silence, which is not a packet.
+    static let unreachableAfterTicks = 3
     private var lastVisionAt: Date?
     /// Whether the camera frame itself may leave the device. Settable, not `let`: the consent
     /// it mirrors lives in Settings, and this object outlives a trip there and back.
@@ -212,6 +222,8 @@ public final class ScanCoordinator: ObservableObject {
         isInterpreting = false
         isScanning = false
         displayedCorroborated = false
+        failedTicks = 0
+        isServerUnreachable = false
     }
 
     /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
@@ -385,6 +397,8 @@ public final class ScanCoordinator: ObservableObject {
                                      minMatchScore: objectStage.policy.minMatchScore)
         do {
             let resp = try await api.resolveScan(req)
+            failedTicks = 0
+            isServerUnreachable = false
             lastLatencyMs = resp.latencyMs
             if !objects.isEmpty { applyObjectVerdicts(resp.objects, sent: objects) }
             // Branch on what the *catalog* returned, not on what survives the filter: an
@@ -485,8 +499,12 @@ public final class ScanCoordinator: ObservableObject {
                 }
             }
         } catch {
-            // Keep the last good overlays and try again next tick.
+            // Keep the last good overlays and try again next tick -- and after enough ticks,
+            // say so. Retrying is right for one dropped request; a run of them is a server
+            // that is not there, and the HUD staying blank tells the user the *can* failed.
             objectStage.retry(objects)
+            failedTicks += 1
+            if failedTicks >= Self.unreachableAfterTicks { isServerUnreachable = true }
         }
     }
 
@@ -513,10 +531,21 @@ public final class ScanCoordinator: ObservableObject {
     /// `overlays` = the tick's line overlays + one per resolved object. An object's answer
     /// wins over a line's answer for the same product, because it is pinned to the can
     /// rather than to whichever line matched this tick.
+    ///
+    /// And over a line's answer *on the same can*. A resolved object is a label the server
+    /// judged whole; a line inside its box read again this tick is that label read again,
+    /// and the frame path -- which draws every product a line proves, because on a shelf
+    /// each label gets one line -- proves the bottle's siblings off it: a tracked Bombay
+    /// Sapphire settled on the gin while the lines on it drew `East Vapour Infused` and
+    /// `citron pressé` beside it (2026-09-15). The server drops those when the object rides
+    /// along with the tick; this is the same rule for the ticks it does not.
     private func publishOverlays() {
         let fromObjects = objectStage.overlays
         let taken = Set(fromObjects.map(\.id))
-        overlays = fromObjects + lineOverlays.filter { !taken.contains($0.id) }
+        let settled = objectStage.objects.filter { $0.anchored && $0.status.candidate != nil }.map(\.box)
+        overlays = fromObjects + lineOverlays.filter { line in
+            !taken.contains(line.id) && !settled.contains { $0.contains(x: line.x, y: line.y) }
+        }
     }
 
     /// Stuck-frame fallback: hand the raw (garbled) OCR to the on-device model, resolve the product

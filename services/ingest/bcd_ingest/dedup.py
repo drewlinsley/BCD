@@ -92,6 +92,17 @@ _STYLE = {
     "alc", "bottles", "can", "cans", "crowler", "draft", "draught", "growler", "keg",
     "liter", "liters", "litre", "litres", "milliliter", "milliliters", "net", "ounce",
     "ounces", "pack", "pint", "pints", "sixpack", "volume",
+    # The ingredient line. "NO COLORS OR FLAVORS FROM ARTIFICIAL SOURCES" is printed on a
+    # Miller High Life can, and "with natural and artificial flavors" on every flavored malt
+    # beverage's TTB filing -- and in 2026-09-15's log those words, and only those, made two
+    # lines of a Miller can agree on a stout whose registered name is its whole label.
+    "flavor", "flavors", "flavours", "flavoured", "color", "colors", "colour", "colours",
+    "colored", "coloured", "artificial", "artificially",
+    # What an aperitivo shelf prints for what is in the bottle, in the languages it prints
+    # it in. A producer registered as "Terrativo Aperitivo" was hypothesised off a Campari
+    # label on the word APERITIVO alone (2026-09-15).
+    "aperitivo", "aperitif", "amaro", "vermouth", "vermut", "bitter", "bitters", "liquore",
+    "grappa", "sambuca", "limoncello",
 }
 
 

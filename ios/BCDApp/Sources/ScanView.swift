@@ -56,7 +56,11 @@ struct ScanView: View {
 
     // A one-line status: on-device interpretation, an active filter, or the live scan state.
     @ViewBuilder private var statusPill: some View {
-        if model.isLookingAtTheLabel {
+        if model.isServerUnreachable {
+            // First, because it explains everything below it: with no server there is no
+            // reading, no interpretation and no filter, only a viewfinder.
+            pill("Can't reach the catalog server", system: "wifi.exclamationmark")
+        } else if model.isLookingAtTheLabel {
             pill("Looking at the label…", system: "camera.viewfinder")
         } else if model.isInterpreting {
             pill("Reading with Apple Intelligence…", system: "sparkles")
@@ -161,6 +165,7 @@ final class ScanViewModel: ObservableObject {
     @Published var isInterpreting = false
     /// A photo of the label is with the server.
     @Published var isLookingAtTheLabel = false
+    @Published var isServerUnreachable = false
     /// The active natural-language filter (nil = none), mirrored for the status pill.
     @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
@@ -189,6 +194,7 @@ final class ScanViewModel: ObservableObject {
         coord.$isResolving.assign(to: &$isResolving)
         coord.$isInterpreting.assign(to: &$isInterpreting)
         coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
+        coord.$isServerUnreachable.assign(to: &$isServerUnreachable)
         coord.$filterText.assign(to: &$filterText)
         // The catalog's vocabulary, for an engine whose recognizer takes custom words: told
         // about "Alchemist" it stops correcting it into "Chemist". Best effort; no words is

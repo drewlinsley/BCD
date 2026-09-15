@@ -8,9 +8,13 @@ import pytest
 from bcd_api.resolver import (
     Resolver,
     _accounts_for_sighting,
+    _affix_read,
     _frame_support,
+    _identifying_tokens,
     _identity_key,
+    _is_business_name,
     _latin,
+    _reads_the_name,
     _token_supported,
     _tokens,
     _upc_variants,
@@ -1376,6 +1380,166 @@ def test_a_maker_named_after_a_beer_cannot_veto_the_beer():
     assert all(c.resolved.product.id != "off:lemon" for c in resp.candidates), "the maker's own word named the stray row"
 
 
+@pytest.mark.parametrize("wordmark", ["OYTOPPER", "CYTOPPER", "ATOPPER", "TOPPER"])
+def test_a_wordmark_read_as_one_word_is_compared_as_one_word(wordmark):
+    """Stacked type reads as one word when the leading is tight: HEADY over TOPPER came in as
+    "OYTOPPER", "CYTOPPER", "ATOPPER" on nine frames of one scan (2026-09-11), and one token
+    against a two-word name is refused. A token that carries one of the name's words whole is
+    compared to the name written as one word -- the whole word is the corroboration a second
+    token would have been."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", wordmark, "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert resp.corroborated, f"{wordmark!r} under a read maker should resolve"
+    assert resp.candidates[0].resolved.product.name == "The Alchemist Heady Topper"
+
+
+@pytest.mark.parametrize("wordmark", ["LYTOPER", "YTOPPFR", "FOCAILS"])
+def test_a_merged_read_needs_a_whole_word_inside_it(wordmark):
+    """"LYTOPER" and "YTOPPFR" are the same wordmark with a letter wrong, and "FOCAILS" is the
+    garble that started the two-word rule: none carries a word of the name whole, and none is
+    a read."""
+    store = _alchemist_store("THE ALCHEMIST")
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", wordmark))
+    assert not resp.corroborated
+
+
+def test_a_merged_read_of_a_word_two_siblings_share_picks_neither():
+    """"WILDCHILDX" carries WILD and CHILD whole -- and `Wild Child Peche` and `Wild Child
+    Positive` both have them. The margin rule holds for merged reads as for any other."""
+    maker = _producer("pr:alch", "The Alchemist")
+    store = _MakerStore(
+        by_text={}, gold={"pr:alch": maker},
+        producers={"THE ALCHEMIST": [(maker, 1.0)]},
+        catalog={"pr:alch": [_beer("Wild Child Peche", "p:wcp", "pr:alch"),
+                             _beer("Wild Child Positive", "p:wcpo", "pr:alch"),
+                             _beer("Focal Banger", "p:fb", "pr:alch")]},
+    )
+    resp = Resolver(store).resolve(_frame("THE ALCHEMIST", "WILDCHILDX", "ALE\nALC. 8% BY VOL\n1 PINT"))
+    assert not resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+
+
+# ---- the spirits shelf, 2026-09-14: five wrong draws, five doors ----
+
+
+def test_a_producers_trade_suffix_identifies_nothing():
+    """Nearly every can prints BREWING COMPANY. A Miller High Life can agreed with `Pariah
+    Brewing Company` on COMPANY, and with COLORS off "NO COLORS OR FLAVORS FROM ARTIFICIAL
+    SOURCES" that was two lines naming a beer called `Colors`."""
+    assert _identifying_tokens("Pariah Brewing Company") == ["pariah"]
+    # COLORS itself has since become chrome (the ingredient line, see `_STYLE`), so the row
+    # here is one named for the slogan's last word, which is not.
+    assert _identifying_tokens("Colors") == []
+    assert _identifying_tokens("Sources") == ["sources"]
+    frame = {"• COLORS OR FLAVORS FROM\nARTIFICIAL\nSOURCES": [(_prod_of("Sources", "p:sources", "pr:pariah"), 1.0)]}
+    gold = {"pr:pariah": _producer("pr:pariah", "Pariah Brewing Company")}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(
+        "BREWING COMPANY MIL\nPREMIUM\nMiller.\nBREWED\nHIGH LIFE\nEST 1903",
+        "• COLORS OR FLAVORS FROM\nARTIFICIAL\nSOURCES"))
+    assert not resp.corroborated, "COMPANY corroborated `Sources`"
+
+
+def test_a_phrase_read_with_a_word_lost_is_the_same_phrase():
+    """A Campari label read "MILANO BITTER" once and "MILANO TER" once, and {milano, bitter}
+    beside {milano} made two lines naming `Gran Milano Bitter` -- another maker's amaro."""
+    assert _frame_support(["gran", "milano", "bitter"],
+                          [["since", "campar", "milano", "bitter"],
+                           ["since", "campar", "milano", "ter"]]) == 1
+    # ...while two lines each carrying a word the other lacks are still two.
+    assert _frame_support(["gran", "milano", "bitter"],
+                          [["milano", "amaro"], ["gran", "bitter"]]) == 2
+
+
+def test_a_line_that_is_a_piece_of_another_line_is_that_line_read_short():
+    """Among a tracked object's reads of BLACK SEAL 80 PROOF BERMUDA BLACK RUM was "BLACK
+    SEA" -- the first line with its last letter lost, two words, a 1.00 against a spirit
+    called `Black Sea`. The whole label is the fuller read."""
+    sea = _prod_of("Black Sea", "p:sea", "pr:sea")
+    frame = {"BLACK SEA": [(sea, 1.0)],
+             "BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM": [(sea, 0.4)]}
+    gold = {"pr:sea": _producer("pr:sea", "Black Sea")}
+    verdict = Resolver(_FrameStore(frame, gold)).resolve_object(
+        DetectedObject(id="o1", texts=["BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM", "BLACK SEA"]))
+    assert verdict.status != "resolved", "a truncated read certified `Black Sea`"
+
+
+def test_a_maker_hypothesis_rests_on_a_word_of_the_makers_name_with_an_end_lost():
+    """"LOURE", a garble of FLAVORS off a can's fine print, resembled `Money Lure` at 0.38 and
+    nominated that brewery; the next read of the same fine print then named `Colorado
+    Fisherman` by shape. The resemblance a hypothesis may rest on is the recognizer's own
+    failure -- letters lost at one end -- and nothing else."""
+    assert _affix_read("CHEMIST-VER", "The Alchemist")          # end kept, start lost
+    assert _affix_read("ACHEMIST-VERM", "The Alchemist")
+    assert _affix_read("CAMPAR", "Campari")                     # start kept, end lost
+    assert _affix_read("VERMONT BEER MAKERS", "Vermont Beer Makers")
+    assert not _affix_read("NO COLDEN LOURE FROM", "Money Lure")
+    assert not _affix_read("MIST", "Alchemist")                 # too short to be an end
+    lure = _producer("pr:lure", "Money Lure")
+    store = _MakerStore(
+        by_text={}, gold={"pr:lure": lure},
+        producers={"NO COLDEN LOURE FROM": [(lure, 0.38)], "loure": [(lure, 0.38)]},
+        catalog={"pr:lure": [_beer("Colorado Fisherman", "p:cf", "pr:lure"),
+                             _beer("Ripped Lip", "p:rl", "pr:lure"),
+                             _beer("Captain Quint", "p:cq", "pr:lure")]},
+    )
+    resp = Resolver(store).resolve(_frame("NO COLDEN LOURE FROM", "NO COLORS OR FLAVORS FROM",
+                                          "ARTIFICIAL"))
+    assert not resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+
+
+@pytest.mark.parametrize("line", [
+    "BREWING COMPANY MIL\nPREMIUM\nMiller.\nBREWED\nHIGH LIFE\nEST 1903\nThe Champagne of Bette\nDID DUNCES\n1.355 LITE",
+    "Miller\nHIGH LIFE\n8570 1903",
+])
+def test_a_line_that_prints_the_whole_name_proves_it(line):
+    """A label is one block of type to the recognizer, and against a line like Miller's no
+    name is ever most of the text -- but every word of `Miller High Life` is in it, in order,
+    with one flourish (BREWED) between. Until this door the can drew nothing, or drew what
+    an echo of HIGH happened to corroborate."""
+    assert _reads_the_name("Miller High Life", line)
+    miller = _prod_of("Miller High Life", "p:mhl", "pr:miller")
+    frame = {line: [(miller, 0.5)]}
+    gold = {"pr:miller": _producer("pr:miller", "Miller Brewing Company")}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(line, "RIDGE FARM\n1937"))
+    assert resp.corroborated
+    assert resp.candidates[0].resolved.product.name == "Miller High Life"
+
+
+@pytest.mark.parametrize("name,line", [
+    ("Sierra Nevada 6 & Out", "SIERRA NEVADA PALE ALE"),          # the 6 and the OUT are unread
+    ("Stella Artois 0.0%", "<Stella Artois> <Stella Artois>"),    # so is the 0.0
+    ("Miller High Life Ice", "Miller.\nBREWED\nHIGH LIFE"),        # ICE is three letters and unread
+    ("Must Have", "the hop we have worked so\neu MUST pour it into a glas"),        # out of order
+    ("Keep Pouring", "Pouring it in a glass ... When it is young Keep it cold"),   # not together
+    ("Colors", "• COLORS OR FLAVORS FROM"),                       # one word
+])
+def test_the_whole_name_means_every_word_in_order_and_together(name, line):
+    assert not _reads_the_name(name, line)
+
+
+def test_a_paragraph_names_nothing():
+    """Two common words will always end up near each other in a back-label essay."""
+    essay = " ".join(["word"] * 40) + " keep pouring " + " ".join(["more"] * 5)
+    assert not _reads_the_name("Keep Pouring", essay)
+    assert _reads_the_name("Keep Pouring", "KEEP POURING IPA 6.5% ALC BY VOL")
+
+
+def test_the_row_that_explains_more_of_the_line_represents_it():
+    """`High Life`, a permit filed under an importer, and `Miller High Life` both print whole
+    on a Miller can and both are proven; the one that also explains MILLER is in view. And
+    "Miller High Life High Life" -- brand plus label, filed as one -- explains the same words
+    with two to spare, and the one with nothing to spare is the one the line printed."""
+    line = "BREWING COMPANY MIL\nPREMIUM\nMiller.\nBREWED\nHIGH LIFE\nEST 1903"
+    frame = {line: [(_prod_of("High Life", "p:hl", "pr:winters"), 1.0),
+                    (_prod_of("Miller High Life High Life", "p:mhlhl", "pr:redds"), 1.0),
+                    (_prod_of("Miller High Life", "p:mhl", "pr:miller"), 1.0)]}
+    gold = {"pr:winters": _producer("pr:winters", "Winters"),
+            "pr:redds": _producer("pr:redds", "Redd's"),
+            "pr:miller": _producer("pr:miller", "Miller Brewing Company")}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(line))
+    assert resp.corroborated
+    assert [c.resolved.product.id for c in resp.candidates] == ["p:mhl"]
+
+
 def test_a_beer_named_after_its_maker_cannot_lose_a_shape_contest():
     """"Bombay Sapphire London Dry Gin" is the maker plus a style: nothing of its own for a
     wordmark to resemble. A frame that read BOMBAY / SAPPHIRE and some garble is consistent
@@ -1468,3 +1632,125 @@ def test_two_beers_that_look_alike_pick_neither():
     # ...while a read that reaches the distinguishing word does decide it.
     resp = Resolver(store).resolve(_frame("TWIN BREWING", "SUMMER HAZ"))
     assert resp.corroborated and resp.candidates[0].resolved.product.name == "Summer Haze"
+
+
+# ---- one bottle, one name, 2026-09-15 ----
+
+
+def _prod_branded(name, pid, producer_id, brand_id):
+    return Product(id=pid, brand_id=brand_id, producer_id=producer_id,
+                   category=Category.BEER, name=name).model_dump(mode="json")
+
+
+def _brand(bid, name, producer_id):
+    return Brand(id=bid, producer_id=producer_id, name=name).model_dump(mode="json")
+
+
+def test_a_settled_objects_verdict_speaks_for_its_own_lines():
+    """The frame path is the shelf's -- every product that proves itself is drawn -- and run
+    over one bottle's lines it draws the bottle's siblings. A tracked bottle of Bombay
+    Sapphire settled on the gin while the same tick's lines, the object's own, proved `East
+    Vapour Infused London Dry Gin` off INFUSED: three names on one bottle (2026-09-15). A line
+    the object owns has been answered. A line it does not own -- the next bottle over -- has
+    not."""
+    label = "SAPPHIRE\nDistilled\nLONDON\nDRY GIN\nINFUSED"
+    maker_line = "BOMBAy"
+    # The catalog's plain gin carries the label's own words as an alias (a merge left them).
+    plain = _prod_with_aliases("Bombay Sapphire London Dry Gin", "off:plain", "pr:bs",
+                               ["Bombay Sapphire Vapour Infused London Dry Gin"])
+    east = _prod_of("East Vapour Infused London Dry Gin", "off:east", "pr:bs")
+    rum = _prod_of("Goslings Black Seal Bermuda Black Rum", "off:rum", "pr:gos")
+    frame = {label: [(east, 0.75)],                          # the store's top three miss the plain gin
+             maker_line: [(east, 0.4)],
+             "BOMBAY SAPPHIRE LONDON DRY GIN": [(plain, 0.95)],   # a read the object accumulated
+             "GOSLINGS BLACK SEAL BERMUDA BLACK RUM": [(rum, 0.95)]}
+    gold = {"pr:bs": _producer("pr:bs", "Bombay Sapphire"), "pr:gos": _producer("pr:gos", "Goslings")}
+    r = Resolver(_FrameStore(frame, gold))
+    alone = r.resolve(_frame(label, maker_line))
+    assert alone.corroborated and [c.resolved.product.id for c in alone.candidates] == ["off:east"], (
+        "the premise: on the frame path INFUSED beside BOMBAY proves the sibling")
+    resp = r.resolve(ScanResolveRequest(
+        detections=[DetectedText(text=t, kind="text")
+                    for t in (label, maker_line, "GOSLINGS BLACK SEAL BERMUDA BLACK RUM")],
+        objects=[DetectedObject(id="o1", texts=[label, maker_line, "BOMBAY SAPPHIRE LONDON DRY GIN"])]))
+    assert resp.objects[0].status == "resolved"
+    assert resp.objects[0].candidates[0].resolved.product.id == "off:plain"
+    drawn = [c.resolved.product.id for c in resp.candidates]
+    assert "off:east" not in drawn, f"the sibling was drawn beside the verdict: {drawn}"
+    assert "off:plain" in drawn and "off:rum" in drawn, f"the verdict or the next bottle went missing: {drawn}"
+
+
+@pytest.mark.parametrize("name,line", [
+    ("West Coast Wheat", "DINO BREAK\nWEST COAST STYLE DOUBLE INDIA PALE ALE WITH SIMCOE"),
+    ("Toppling Goliath Brewing Co. Zz Hop", "TOPPLING GOLIATH BREWING CO."),
+    ("Bombay Sapphire London Dry Gin", "Bombay Sapphire"),   # the brand alone is every sibling's line
+])
+def test_the_whole_name_includes_its_category_words(name, line):
+    """What was left of `West Coast Wheat` without its category word was "west coast", which
+    a double IPA's can printed as WEST COAST STYLE. The words a name shares with its category
+    are part of the name, and a line that prints the name prints them."""
+    assert not _reads_the_name(name, line)
+    assert _reads_the_name("West Coast Wheat", "WEST COAST WHEAT ALE 5.2%")
+    assert _reads_the_name("Sierra Nevada Pale Ale", "SIERRA NEVADA\nPALE ALE")
+
+
+def test_lines_agreeing_only_on_the_makers_words_have_named_the_maker():
+    """A can of Long Live Beerworks read LIVE on one line and LONG FIRES on another, and those
+    two named `Long Live Beerwoks Hola Fantasma` -- the brewery's beer that the store's top
+    three for "JONG LIVE" happened to hold, HOLA and FANTASMA read nowhere. Evidence every
+    sibling shares equally is one piece of evidence, for the maker."""
+    hola = _prod_of("Long Live Beerwoks Hola Fantasma", "p:hola", "pr:ll")
+    gold = {"pr:ll": _producer("pr:ll", "Long Live Beerworks")}
+    frame = {"JONG LIVE": [(hola, 0.58)], "HOLA FANTASMA": [(hola, 0.9)]}
+    r = Resolver(_FrameStore(frame, gold))
+    resp = r.resolve(_frame("LIVE", "Long fires", "JONG LIVE", "WIDESCREEN"))
+    assert not resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+    # ...and a second line that reads a word of the beer's own is the second piece.
+    resp = r.resolve(_frame("JONG LIVE", "HOLA FANTASMA"))
+    assert resp.corroborated and resp.candidates[0].resolved.product.id == "p:hola"
+
+
+def test_a_business_name_is_not_a_product():
+    """A permit filed under the brewery's name with no beer on it: `Toppling Goliath Brewing
+    Co.` was drawn beside `Toppling Goliath Brewing Co. Dino Break` off the brewery line of a
+    Dino Break can. A maker's name without a suffix may be a flagship's, and stays."""
+    tg = _producer("pr:tg", "Toppling Goliath Brewing Co.")
+    gold = {"pr:tg": tg, "b:tg": _brand("b:tg", "Toppling Goliath Brewing Co.", "pr:tg"),
+            "pr:campari": _producer("pr:campari", "Campari"), "b:campari": _brand("b:campari", "Campari", "pr:campari")}
+    house = _prod_branded("Toppling Goliath Brewing Co.", "p:tg", "pr:tg", "b:tg")
+    dino = _prod_branded("Toppling Goliath Brewing Co. Dino Break", "p:dino", "pr:tg", "b:tg")
+    campari = _prod_branded("Campari", "p:campari", "pr:campari", "b:campari")
+    r = Resolver(_FrameStore({}, gold))
+    assert _is_business_name(r._hydrate(house))
+    assert not _is_business_name(r._hydrate(dino))
+    assert not _is_business_name(r._hydrate(campari))
+    # A row the catalog holds no brand for is not its own maker.
+    assert not _is_business_name(r._hydrate(_prod_of("Pariah Brewing Company", "p:pariah", "pr:none")))
+    brewery_line = "TOPPLING GOLIATH BREWING CO."
+    beer_line = "DINO BREAK\nWEST COAST STYLE DOUBLE INDIA PALE ALE WITH SIMCOE, AMARILLO & CENTENNIAL HOPS"
+    frame = {brewery_line: [(house, 1.0), (dino, 0.8)], beer_line: [(dino, 0.69)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame("BEAGLEPUSS", beer_line, brewery_line))
+    assert resp.corroborated
+    assert [c.resolved.product.id for c in resp.candidates] == ["p:dino"]
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame("AGEPUSS", "SESAME", brewery_line))
+    assert not resp.corroborated, "the brewery alone named a product"
+
+
+def test_a_maker_hypothesis_rests_on_a_word_that_identifies_the_maker():
+    """"Aperi" starts the way APERITIVO starts, and a producer registered as `Terrativo
+    Aperitivo` was hypothesised off a bottle of Campari on the word for what is in it."""
+    assert not _affix_read("Aperi\nRascal", "Terrativo Aperitivo")
+    assert _affix_read("TERRAT", "Terrativo Aperitivo")
+    assert _identifying_tokens("Terrativo Aperitivo") == ["terrativo"]
+
+
+def test_the_ingredient_line_identifies_nothing():
+    """"NO COLORS OR FLAVORS FROM ARTIFICIAL SOURCES" on a Miller can, read twice, agreed with
+    a stout whose registered name is its whole label -- on those words and no other."""
+    dump = ("Great Falls Brewing Co Peanut Butter Happy Camper S'Mores Stout Malt Beverage With "
+            "Natural And Artificial Flavors And Artificial Color Artificially Colored With Titanium Oxide")
+    ident = _identifying_tokens(dump)
+    assert not {"flavors", "artificial", "color", "colored", "artificially", "natural"} & set(ident)
+    assert "titanium" in ident
+    assert _frame_support(ident, [["colors", "flavors", "from", "artificia", "our"],
+                                  ["ho", "color", "ca", "hung", "hom"]]) == 0
