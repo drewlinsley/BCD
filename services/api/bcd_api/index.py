@@ -392,18 +392,20 @@ class LabelIndex:
                         break
         return list(out.items())
 
-    def _token_stage(self, text: str, table: dict[int, array], size: int) -> list[int]:
-        """Rows with the most identifying-token evidence for `text`, by IDF-weighted sum."""
-        ident = identifying_tokens(text)
-        if not ident:
-            return []
+    def _token_weights(self, text: str, table: dict[int, array], size: int) -> dict[int, float]:
+        """Every row with identifying-token evidence for `text`, with its IDF-weighted sum."""
         acc: dict[int, float] = {}
-        for q in ident:
+        for q in identifying_tokens(text):
             for tid, w in self._expand(q, table):
                 rows = table[tid]
                 weight = w * math.log(1.0 + size / len(rows))
                 for r in rows:
                     acc[r] = acc.get(r, 0.0) + weight
+        return acc
+
+    def _token_stage(self, text: str, table: dict[int, array], size: int) -> list[int]:
+        """Rows with the most identifying-token evidence for `text`, by IDF-weighted sum."""
+        acc = self._token_weights(text, table, size)
         if len(acc) <= CANDIDATES:
             return sorted(acc, key=acc.__getitem__, reverse=True)
         return [r for r, _ in heapq.nlargest(CANDIDATES, acc.items(), key=lambda kv: kv[1])]
@@ -443,6 +445,34 @@ class LabelIndex:
             scored.append((-sim, -similarity(self.qualified[r], text), self.ids[r], r))
         scored.sort()
         return [(self.ids[r], round(-s, 3)) for s, _, _, r in scored[:limit]]
+
+    def match_frame(self, lines: Sequence[str], limit: int = 8) -> list[tuple[str, int, float]]:
+        """Products the frame's lines name *between them*: (product id, the line it scores
+        best against, that score), by how much of the frame's identifying vocabulary the
+        name accounts for.
+
+        A line is matched on its own, and a name printed across two lines is on neither.
+        A bottle of Gosling's reads "BLACK SEAL / 80 PROOF / BERMUDA BLACK RUM" on one line
+        and "Goslings / Since 1806" on another; `Goslings Black Seal` is fifth against the
+        first (behind a gin called `Black Seal`, a stout, and two other Bermuda rums) and
+        sixth against the second (behind the brand row, a row named `1806`, and every
+        shorter Goslings), and a top three per line never held it (2026-09-15). Against the
+        frame's tokens together it is first. The score reported is still the one line's, so
+        the resolver's floor and token-support guards judge it exactly as they judge a
+        per-line hit.
+        """
+        lines = [(t or "").strip() for t in lines]
+        lines = [t for t in lines if t]
+        if not lines:
+            return []
+        weights = self._token_weights(" ".join(lines), self.product_post, len(self.ids))
+        out = []
+        for r, _w in heapq.nlargest(limit, weights.items(), key=lambda kv: kv[1]):
+            sim, at = max((match_score(self.names[r], self.qualified[r], t), i)
+                          for i, t in enumerate(lines))
+            if sim > 0.0:
+                out.append((self.ids[r], at, round(sim, 3)))
+        return out
 
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[str, float]]:
         text = (text or "").strip()
@@ -512,6 +542,14 @@ class IndexedStore:
                             limit: int = 3) -> list[list[tuple[dict, float]]]:
         return [self.match_products(t, limit) for t in texts]
 
+    def match_frame(self, lines: Sequence[str], limit: int = 8) -> list[tuple[dict, int, float]]:
+        out = []
+        for pid, at, sim in self.index.match_frame(lines, limit):
+            rec = self._store.get_gold(pid)
+            if rec is not None:
+                out.append((rec, at, sim))
+        return out
+
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
         out = []
         for pid, sim in self.index.match_producers(text, limit):
@@ -521,8 +559,17 @@ class IndexedStore:
         return out
 
     def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
-        """A producer's catalog, best-known first, as the stores order it."""
-        recs = self._records(self.index.products_of(producer_id))
+        """A producer's catalog, best-known first, as the stores order it.
+
+        A catalog larger than `limit` is handed back cut to `limit`, unsorted: every caller
+        asks for one more row than it is willing to consider and drops the maker on seeing
+        it, so which rows those are does not matter -- and hydrating them all did. Once the
+        Milwaukee permit was named Miller Brewing Company, every line reading MILLER
+        fetched its 512 rows one by one to be told it was a distributor (2026-09-15)."""
+        ids = self.index.products_of(producer_id)
+        if len(ids) > limit:
+            return self._records(ids[:limit])
+        recs = self._records(ids)
         recs.sort(key=lambda r: (r.get("sensory") is None,
                                  (r.get("spec") or {}).get("abv_pct") is None,
                                  r.get("name") or ""))
