@@ -110,6 +110,11 @@ public final class ObjectStage {
         let objs = ready.map { $0.detectedObject(minCount: policy.tracker.minTextCount) }
         for t in ready {
             tracker.markQueried(t.id)
+            // A resolved object being asked again -- its evidence changed -- keeps its
+            // answer up until the new one lands. Marking it `resolving` took the overlay
+            // down for the round trip, and on a live shelf the evidence changes every few
+            // ticks: reported from the camera as the box "winking in and out" (2026-09-16).
+            if case .resolved? = verdicts[t.id] { continue }
             verdicts[t.id] = .resolving
         }
         queryCount += 1
@@ -128,7 +133,7 @@ public final class ObjectStage {
     /// The request failed before the server judged it: let the same evidence ask again.
     public func retry(_ objs: [DetectedObject]) {
         for o in objs {
-            verdicts[o.id] = nil
+            if case .resolving? = verdicts[o.id] { verdicts[o.id] = nil }   // an answer stays
             tracker.unmarkQueried(o.id)
         }
         publish()

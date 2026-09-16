@@ -94,9 +94,9 @@ private func approx(_ a: BoundingBox?, _ b: BoundingBox, tol: Double = 1e-9) -> 
 
 @Suite struct Tracking {
     private func frame(_ lines: [(String, Double)], x: Double = 0.1,
-                       regions: [ObjectRegion]? = nil) -> ScanFrame {
+                       regions: [ObjectRegion]? = nil, at: TimeInterval = 0) -> ScanFrame {
         ScanFrame(texts: lines.map { DetectedText(text: $0.0, x: x, y: $0.1, w: 0.2, h: 0.04) },
-                  regions: regions)
+                  regions: regions, timestamp: at)
     }
 
     @Test func oneObjectAccumulatesEvidenceAcrossFrames() {
@@ -181,27 +181,50 @@ private func approx(_ a: BoundingBox?, _ b: BoundingBox, tol: Double = 1e-9) -> 
     }
 
     @Test func missingObjectsAreDroppedAfterGrace() {
+        // In seconds, not frames: the recognizer reports a frame on every change it sees,
+        // so a shelf can arrive at thirty a second, and twelve frames was under half a
+        // second -- the box "winking in and out" (2026-09-16).
         var cfg = ObjectTracker.Config()
-        cfg.maxMissing = 2
+        cfg.missingGrace = 1.0
         let tracker = ObjectTracker(config: cfg)
-        tracker.update(with: frame([("HEADY", 0.3)]))
-        for _ in 0..<2 { #expect(tracker.update(with: ScanFrame(texts: [])).count == 1) }
-        #expect(tracker.update(with: ScanFrame(texts: [])).isEmpty)
+        tracker.update(with: frame([("HEADY", 0.3)], at: 10.0))
+        for t in [10.2, 10.5, 10.9] {
+            #expect(tracker.update(with: ScanFrame(texts: [], timestamp: t)).count == 1,
+                    "unseen for \(t - 10.0)s is glare, a hand, a wobble")
+        }
+        #expect(tracker.update(with: ScanFrame(texts: [], timestamp: 11.1)).isEmpty)
     }
 
     @Test func aLineTheCameraStoppedReadingLeavesTheObject() {
         // Across a pan one track gathered CAMPARI, then BLACK SEAL, and stayed settled on the
         // first over the second (2026-09-16). The bag has to forget what it no longer sees.
         var cfg = ObjectTracker.Config()
-        cfg.textDecay = 3
+        cfg.textDecay = 1.0
         let tracker = ObjectTracker(config: cfg)
-        for _ in 0..<3 { tracker.update(with: frame([("CAMPARI", 0.30), ("MILANO", 0.36)])) }
-        var t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)]))[0]
-        #expect(t.stableTexts(minCount: 2).contains("CAMPARI"), "one frame without it is a blink")
-        for _ in 0..<3 { t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)]))[0] }
+        for t in [0.0, 0.1, 0.2] {
+            tracker.update(with: frame([("CAMPARI", 0.30), ("MILANO", 0.36)], at: t))
+        }
+        var t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)], at: 0.5))[0]
+        #expect(t.stableTexts(minCount: 2).contains("CAMPARI"), "half a second without it is a blink")
+        for now in [0.8, 1.1, 1.4] {
+            t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)], at: now))[0]
+        }
         #expect(!t.stableTexts(minCount: 2).contains("CAMPARI"))
         #expect(t.stableTexts(minCount: 2) == ["MILANO", "BLACK SEAL"], "\(t.stableTexts(minCount: 2))")
         #expect(tracker.isReady(t), "the evidence changed, so the object is asked about again")
+    }
+
+    @Test func aWordmarkGarbledDifferentlyEveryFrameStillAccumulates() {
+        // Twenty frames of decay held two or three reads of a stylized label: at thirty
+        // frames a second nothing accumulated. Three seconds of reads is the point.
+        let tracker = ObjectTracker()
+        var t: ObjectTracker.Track?
+        for i in 0..<60 {
+            let garble = ["HEADY", "FADY", "HEAOY", "HEADV"][i % 4]
+            t = tracker.update(with: frame([(garble, 0.30), ("TOPPER", 0.36)],
+                                           at: Double(i) / 30.0))[0]
+        }
+        #expect(t!.stableTexts(minCount: 2).count == 5, "\(t!.stableTexts(minCount: 2))")
     }
 }
 
@@ -276,6 +299,31 @@ func objCandidate(_ id: String, _ name: String, score: Double = 1.0) -> ScoredCa
         stage.ingest(label(["HEADY TOPPER"], y: 0.33))
         #expect(stage.pending().isEmpty)
         #expect(stage.overlays[0].y > before)
+    }
+
+    @Test func aResolvedObjectAskedAgainKeepsItsAnswerUpMeanwhile() async {
+        // Its evidence grew, so it is asked again -- and marking it `resolving` took the
+        // overlay down for the round trip. On a live shelf that is every few ticks:
+        // reported from the camera as the box "winking in and out" (2026-09-16).
+        var policy = ObjectStage.Policy()
+        policy.tracker.requeryCooldown = 0
+        let stage = ObjectStage(policy: policy)
+        stage.ingest(label(["HEADY TOPPER"])); stage.ingest(label(["HEADY TOPPER"]))
+        let sent = stage.pending()
+        let verdict = ObjectResolution(objectId: sent[0].id, status: .resolved,
+                                       candidates: [objCandidate("p1", "Heady Topper")])
+        await stage.apply([verdict], sent: sent, fineReader: nil, llm: nil, telemetry: nil)
+        #expect(stage.overlays.map(\.id) == ["p1"])
+        // a second line becomes stable: new evidence, a new query
+        stage.ingest(label(["HEADY TOPPER", "THE ALCHEMIST"]))
+        stage.ingest(label(["HEADY TOPPER", "THE ALCHEMIST"]))
+        let again = stage.pending()
+        #expect(again.count == 1, "the grown evidence is asked about")
+        #expect(stage.overlays.map(\.id) == ["p1"], "and the answer stays up while it is")
+        // the request fails: the answer still stays, and the evidence may ask again
+        stage.retry(again)
+        #expect(stage.overlays.map(\.id) == ["p1"])
+        #expect(stage.pending().count == 1)
     }
 
     @Test func anUnresolvedObjectGetsOneFineReadThenReQueries() async {

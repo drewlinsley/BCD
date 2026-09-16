@@ -275,3 +275,47 @@ def test_the_frame_names_the_rum_and_only_the_rum():
     verdict = Resolver(IndexedStore(store, LabelIndex.build(store))).resolve(
         ScanResolveRequest(objects=[obj])).objects[0]
     assert verdict.status == "resolved" and verdict.candidates[0].resolved.product.id == "p:black"
+
+
+def _campari_shelf() -> MedallionStore:
+    """A catalog shaped like the one around a bottle of Campari on 2026-09-16: the wordmark
+    read as CAMPAR reaches six Campari rows by one edit at 0.7 of the weight, and the house
+    line's words -- DAVIDE, CARPET for the garbled CAMPARI -- each match thirty rows exactly,
+    every one of which outweighs the row the line actually names."""
+    s = MedallionStore(root=tempfile.mkdtemp())
+    s.put_gold("prod:x", "producer", Producer(id="prod:x", name="Some House").model_dump(mode="json"))
+
+    def product(pid: str, name: str) -> None:
+        s.put_gold(pid, "product", Product(id=pid, name=name, producer_id="prod:x",
+                                           brand_id="brand:none", category=Category.SPIRIT
+                                           ).model_dump(mode="json"))
+
+    for i in range(4934):
+        product(f"p:filler{i}", f"Filler Row {i} Zx{i}")
+    product("p:campari", "Campari")
+    for i, tail in enumerate(["Negroni", "Cask Tales", "Cask Tales Rum", "Cask Tales Bourbon",
+                              "Cask Tales Tequila"]):
+        product(f"p:campari{i}", f"Campari {tail}")
+    for i in range(30):
+        product(f"p:davide{i}", f"Davide Q{i}ver")
+        product(f"p:carpet{i}", f"W{i}ing Carpet")
+    return s
+
+
+def test_a_garbled_word_is_heard_over_the_lines_ordinary_ones():
+    """"CAMPAR Davide Carpet MIL A": the wordmark with its last letter lost, then the house's
+    line garbled. `Campari` is a one-edit match at 0.7 of the weight; DAVIDE and CARPET are
+    exact and each match thirty rows at full weight, and the top 48 by total evidence held
+    only those -- the row the bottle names was cut before it was scored (2026-09-16)."""
+    index = LabelIndex.build(_campari_shelf())
+    ids = [pid for pid, _ in index.match_products("CAMPAR\nDavide Carpet\nMIL\nA", limit=3)]
+    assert "p:campari" in ids, ids
+
+
+def test_an_exact_word_earns_no_extra_seats():
+    # The guarantee is for garbles. An exact word is already heard at full weight, and
+    # letting its group in too put one-word rows -- a 1.0 by containment each -- on every
+    # word of a long label, ahead of the label's own row.
+    index = LabelIndex.build(_campari_shelf())
+    acc, reached = index._token_evidence("CAMPAR Davide Carpet", index.product_post, len(index.ids))
+    assert len(reached) == 1, "only CAMPAR, the garbled one, gets a group"

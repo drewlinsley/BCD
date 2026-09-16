@@ -1160,6 +1160,63 @@ def test_a_verdict_owns_only_the_lines_that_are_its_labels():
     assert "Goslings Black Seal" in names, names
 
 
+def test_the_labels_word_beside_one_of_its_houses_is_the_houses_line():
+    """The first cut of the house rule asked for the house's name whole and in order, and
+    the next scan never gave it: "Davide Carpet MIL A", "Davide Cry M1 LA N" -- DAVIDE
+    clean, CAMPARI and MILANO garbled past reading, on forty frames of forty (2026-09-16).
+    What those lines carry is CAMPAR beside DAVIDE: two words of the house on one line."""
+    line = "SINCE\nCAMPAR\nDavide Cry\nM1\nLA\nN"
+    campari = Product(id="off:campari", brand_id="b:campari", producer_id="pr:dcm",
+                      category=Category.SPIRIT, name="Campari").model_dump(mode="json")
+    store = _FrameStore(by_text={line: [(campari, 0.67)]},
+                        gold={"pr:dcm": _producer("pr:dcm", "Davide Campari-Milano")})
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text=line), DetectedText(text="RAN")]))
+    assert resp.corroborated and [c.resolved.product.name for c in resp.candidates] == ["Campari"]
+    # ...and DAVIDE alone, the house's one clean word, is not the house.
+    store = _FrameStore(by_text={"CAMPAR\nDavide Carpet": []},
+                        gold={"pr:dcm": _producer("pr:dcm", "Davide Campari-Milano")})
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text="Davide Carpet"), DetectedText(text="RAN")]))
+    assert not resp.corroborated
+
+
+def test_one_whole_word_picks_a_beer_only_under_a_maker_read_outright():
+    """"SAPPHIRE" beside ROMBAY picked `Bombay sapphire murcian lemon` by shape off a bottle
+    of the plain gin, under the one-product importer that holds the stray row -- a maker
+    ROMBAY merely resembled (2026-09-16). "TOPPER" under THE ALCHEMIST, read, is still the
+    beer with its first word lost."""
+    importer = _producer("pr:imp", "Bombay spirits")
+    lemon = _beer("Bombay sapphire murcian lemon", "p:lemon", "pr:imp")
+    store = _MakerStore(by_text={}, gold={"pr:imp": importer},
+                        producers={"ROMBAY": [(importer, 0.4)], "rombay": [(importer, 0.4)]},
+                        catalog={"pr:imp": [lemon]})
+    resp = Resolver(store).resolve(_frame("ROMBAY", "SAPPHIRE\n10202307"))
+    assert not resp.corroborated, [c.resolved.product.name for c in resp.candidates]
+    _, res = _verdict(store, ["ROMBAY", "SAPPHIRE\n10202307"])
+    assert res.status != "resolved"
+
+
+def test_two_reads_of_one_line_back_a_row_once():
+    """"CHEMIS T-VER" and "CHEMIST-VERN" are one rim of one can read twice. A distillery
+    named `Chemist` backed by both looked like the frame agreeing on something, so the
+    maker was never asked and the Heady Topper under that rim never found (2026-09-16)."""
+    chemist = _producer("pr:chem", "Chemist")
+    alch = _producer("pr:alch", "The Alchemist")
+    row = Product(id="p:chem", brand_id="b", producer_id="pr:chem", category=Category.SPIRIT,
+                  name="Chemist").model_dump(mode="json")
+    store = _MakerStore(
+        by_text={"CHEMIS T-VER": [(row, 1.0)], "CHEMIST-VERN": [(row, 1.0)]},
+        gold={"pr:chem": chemist, "pr:alch": alch},
+        producers={"CHEMIST-VERN": [(alch, 0.5)], "chemist": [(alch, 0.5)],
+                   "CHEMIS T-VER": [(alch, 0.5)], "chemis": [(alch, 0.5)]},
+        catalog={"pr:alch": [_beer(n, pid, "pr:alch") for n, pid in _ALCHEMIST]},
+    )
+    resp = Resolver(store).resolve(_frame("ПУТОРРАНДУ ТОРР", "CHEMIS T-VER", "CHEMIST-VERN"))
+    names = [c.resolved.product.name for c in resp.candidates]
+    assert names == ["The Alchemist Heady Topper"], names
+
+
 def test_lexicon_carries_names_not_generic_words(shelf):
     words = Resolver(shelf).lexicon(limit=100)
     assert "alchemist" in words and "topper" in words and "focal" in words

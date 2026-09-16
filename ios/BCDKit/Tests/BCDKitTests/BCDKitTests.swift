@@ -598,6 +598,16 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
         #expect(DisplayName.product("Pliny the Elder",
                                     producer: "Russian River Brewing Co") == "Pliny the Elder")
     }
+
+    @Test func keepsTheBrandWhenAllThatIsLeftIsAStyle() {
+        // "London Dry Gin" is what the bottle is, not what it is called. Reported from the
+        // camera as the detail screen showing the wrong name (2026-09-16).
+        #expect(DisplayName.product("Bombay Sapphire London Dry Gin",
+                                    producer: "Bombay Sapphire") == "Bombay Sapphire London Dry Gin")
+        #expect(DisplayName.product("Guinness Extra Stout", producer: "Guinness") == "Guinness Extra Stout")
+        // ...while a name of its own still sheds the brand.
+        #expect(DisplayName.product("Goslings Black Seal", producer: "Goslings") == "Black Seal")
+    }
 }
 
 @Suite struct FramePrioritisation {

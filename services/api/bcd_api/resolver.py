@@ -659,16 +659,29 @@ def _house_names_the_label(resolved: ResolvedProduct, detections: list[DetectedT
 
     Only a flagship (`_own_vocabulary`: a name with no word that is not its maker's) and
     only a house named by two words or more: `Campari` under "Cutty Sark", the importer's
-    other brand that TTB filed it beneath, is proven by no line of a Campari bottle."""
+    other brand that TTB filed it beneath, is proven by no line of a Campari bottle.
+
+    Two words of the house on one line, the label's own among them. The first cut asked
+    for the house's name whole and in order, and the next scan never gave it: the small
+    type under the wordmark came as "Davide Carpet MIL A", "Davide Cry M1 LA N", "Davide
+    Copen" -- DAVIDE clean, CAMPARI and MILANO garbled past reading -- on every one of
+    forty frames (2026-09-16). What those lines do carry is CAMPAR beside DAVIDE: the
+    label's word and a word of its house that is not the label's, read together."""
     words = _identifying_tokens(resolved.product.name or "")
     if len(words) != 1 or len(words[0]) < _MIN_SELF_PROOF_CHARS:
         return False
     _, flagship = _own_vocabulary(resolved)
     if not flagship or not _read_as(words[0], read_toks):
         return False
-    return any(len(_identifying_tokens(m)) >= _MIN_SELF_PROOF_TOKENS
-               and any(_reads_the_name(m, d.text, loose=True) for d in detections)
-               for m in _maker_names(resolved))
+    lines = [set(_tokens(d.text)) for d in detections]
+    for m in _maker_names(resolved):
+        house = _identifying_tokens(m)
+        if len(house) < _MIN_SELF_PROOF_TOKENS:
+            continue
+        if any(sum(1 for w in house if _read_as(w, toks)) >= _MIN_SELF_PROOF_TOKENS
+               for toks in lines):
+            return True
+    return False
 
 
 # Two lines that read the same printed phrase are one piece of evidence, not two.
@@ -769,27 +782,39 @@ def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
     def _substance(toks: list[str]) -> int:
         return sum(len(t) for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN)
 
-    kept: list[list[str]] = []
+    return [toks for toks, _ in _line_groups(line_tokens)]
+
+
+def _line_groups(line_tokens: list[list[str]]) -> list[tuple[list[str], set[int]]]:
+    """`_independent_lines` with its bookkeeping: each kept reading with the indices of the
+    lines that are re-reads of it (a line with nothing identifying in it belongs to none)."""
+    def _substance(toks: list[str]) -> int:
+        return sum(len(t) for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN)
+
+    kept: list[tuple[list[str], set[int]]] = []
     # By identifying substance, not token count: "PDY TOPP" and "FADY-TOPP" both hold two
     # tokens, so counting them left the poorer reading first and the fuller one then looked
     # like new evidence rather than the same words read again. Two halves of one wordmark
     # certified `Snipes Mountain Lefty Topp's` off a Heady Topper can.
-    for toks in sorted(line_tokens, key=_substance, reverse=True):
-        sig = [t for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN]
+    order = sorted(range(len(line_tokens)), key=lambda i: _substance(line_tokens[i]),
+                   reverse=True)
+    for i in order:
+        sig = [t for t in line_tokens[i] if len(t) >= _MIN_NAME_TOKEN_LEN]
         if not sig:
             continue
-        echo = next((seen for seen in kept
-                     if sum(any(_same_read(t, k) for k in seen) for t in sig) / len(sig)
+        echo = next((group for group in kept
+                     if sum(any(_same_read(t, k) for k in group[0]) for t in sig) / len(sig)
                      >= _LINE_REREAD), None)
         if echo is None:
-            kept.append(sig)
+            kept.append((sig, {i}))
         else:
             # The echo's words join the line it re-reads, so the line keeps its best read of
             # each word. The fullest reading is not the cleanest: "WORMTOWNT" outranks
             # "WORMTOWN" on substance, and a kept line that only had the garble no longer
             # agreed with the beer at all; "DINO BREAN" was kept over "DINO BREAK" the
             # same way and lost the word that names it (2026-09-15).
-            echo.extend(t for t in sig if t not in echo)
+            echo[0].extend(t for t in sig if t not in echo[0])
+            echo[1].add(i)
     return kept
 
 
@@ -952,7 +977,7 @@ def _own_name_tokens(name: str, maker_tokens: list[str]) -> list[str]:
 
 def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[str],
                     skip: frozenset[int] = frozenset(), min_width: int = 1,
-                    ) -> tuple[float, int, int]:
+                    whole_word: bool = True) -> tuple[float, int, int]:
     """How much some window of the frame looks like this beer's own name: the similarity, the
     line it was on, and how many tokens the window had.
 
@@ -976,8 +1001,16 @@ def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[s
             continue
         toks = _window_tokens(" ".join(toks), maker_tokens)
         for a in range(len(toks)):
+            # A token that IS one of the name's words, and nothing more, is one word --
+            # the corroboration it carries is the maker's line, so it counts only when
+            # the maker was read outright (`whole_word`). "SAPPHIRE" beside ROMBAY picked
+            # `Bombay sapphire murcian lemon` by shape off a bottle of the plain gin,
+            # under the one-product importer that holds the stray row, which ROMBAY
+            # merely resembled (2026-09-16); "TOPPER" under THE ALCHEMIST, read, is the
+            # beer with its first word lost.
             if (min_width > 1 and len(toks[a]) > _MIN_NAME_TOKEN_LEN
-                    and any(w in toks[a] for w in whole)):
+                    and any(w in toks[a] and (whole_word or len(toks[a]) > len(w))
+                            for w in whole)):
                 sim = _trigram_sim(toks[a], merged)
                 if sim > best:
                     best, at, width = sim, i, 1
@@ -992,7 +1025,8 @@ def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[s
 
 def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str,
                 skip: frozenset[int] = frozenset(),
-                other_makers: list[str] = ()) -> tuple[dict, float, int] | None:
+                other_makers: list[str] = (),
+                maker_read: bool = True) -> tuple[dict, float, int] | None:
     """The one of a maker's beers whose name the wordmark garble resembles, by a margin.
 
     None when nothing in the frame looks like any of them, or when two look alike -- either
@@ -1016,7 +1050,8 @@ def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str
         # murcian lemon" read exactly is a prefix, not a name, and scored 0.43 off a bottle
         # of the plain gin. A one-word name is read by whatever resembles it closely enough.
         sim, at, width = _wordmark_score(line_tokens, " ".join(own), window_excl, skip,
-                                         min_width=1 if len(own) == 1 else 2)
+                                         min_width=1 if len(own) == 1 else 2,
+                                         whole_word=maker_read)
         scored.append((sim, at, rec, len(own) == 1))
     if not scored:
         return None
@@ -1265,19 +1300,23 @@ class Resolver:
             if not read:
                 continue
             words = [t for t in _tokens(prod.get("name") or "") if len(t) >= _MAKER_PICK_MIN_TOKEN]
+            # Present the way a re-read is present (`_same_read`): a tracked bottle of the
+            # plain gin gave BOMBAY as ROMBAY, GOMBAY and ÇOMBAY and never once whole, so
+            # the maker counted as read on SAPPHIRE alone, its words stayed in the windows,
+            # and "sapphire bor" picked the Murcian Lemon under the importer (2026-09-16).
             present = [w for w in _identifying_tokens(prod.get("name") or "")
-                       if any(_trigram_sim(w, r) >= _TOKEN_SUPPORT_MIN for r in frame_toks)]
+                       if any(_same_read(w, r) for r in frame_toks)]
             if len(set(present)) >= _MIN_SELF_PROOF_TOKENS:
                 maker_words += words
         out: list[tuple[int, dict, float]] = []
-        for i, _, prod, _, _ in best.values():
+        for i, _, prod, _, read in best.values():
             items = products_of(prod.get("id") or "", limit=_MAKER_PICK_MAX_PRODUCTS + 1)
             if hint:
                 items = [p for p in items if (p.get("category") or "") == hint]
             if not items or len(items) > _MAKER_PICK_MAX_PRODUCTS:
                 continue
             pick = _pick_among(items, line_tokens, prod.get("name") or "", claimed | {i},
-                               maker_words)
+                               maker_words, maker_read=read)
             if pick is None:
                 continue
             rec, shape, at = pick
@@ -1463,7 +1502,10 @@ class Resolver:
         """
         line_tokens = [_tokens(d.text) for d in detections]
         # What corroboration is allowed to count: the frame's distinct readings, not its echoes.
-        independent = _independent_lines(line_tokens)
+        groups = _line_groups(line_tokens)
+        independent = [toks for toks, _ in groups]
+        # ...and which reading each line is: two re-reads of one line back a row once.
+        reading_of = {i: g for g, (_, members) in enumerate(groups) for i in members}
         identity_lines = sum(1 for d in detections if _is_identity_text(d.text))
         hint = _category_hint(detections)
         frame_kinds = {k for d in detections for k in _kinds(d.text)}
@@ -1549,9 +1591,14 @@ class Resolver:
                 resolved_lines.add(i)
         # Distinct lines backing each record, read straight off the hits — enough to tell
         # whether the frame agreed on anything, without paying to hydrate first.
+        #
+        # Distinct readings, not lines: "CHEMIS T-VER" and "CHEMIST-VERN" are one rim of one
+        # can read twice, and a distillery named `Chemist` backed by both looked like the
+        # frame agreeing on something -- so the maker was never asked, and the Heady Topper
+        # under that rim was never found (2026-09-16).
         backing: dict[str, set[int]] = {}
         for i, rec, _ in hits:
-            backing.setdefault(rec.get("id") or "", set()).add(i)
+            backing.setdefault(rec.get("id") or "", set()).add(reading_of.get(i, -1 - i))
         by_maker: set[str] = set()
         if not any(len(v) >= _MIN_FRAME_FOR_PENALTY for v in backing.values()):
             # Nothing the frame corroborates: the label has not named a product to us. Ask who
