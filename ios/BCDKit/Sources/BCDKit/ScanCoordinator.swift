@@ -156,6 +156,44 @@ public final class ScanCoordinator: ObservableObject {
         return Date().timeIntervalSince(at) * 1000 < overlayHoldMs
     }
 
+    /// Where each product's chip is drawn, once it has been drawn.
+    ///
+    /// An overlay is anchored to whichever detection named the product *this* tick, and on
+    /// one label that is a different line every few ticks -- the brand, then the maker's
+    /// line under it, then the neck -- each a few percent of the screen from the last. The
+    /// object path pins its answer to the tracked box instead, which the tracker re-blends
+    /// every frame; and the moment an object's verdict lands, the chip leaves the line it
+    /// was on for the box's centre. Reported from the camera as "the HUD text box jumps all
+    /// over the place when it pops up" (2026-09-15). So a chip is pinned where it first
+    /// appeared and stays there while the anchor wanders within `anchorDeadZone` of it;
+    /// beyond that -- the camera panned and the bottle is somewhere else -- it follows,
+    /// `anchorFollow` of the way each frame, so a pan is a glide rather than a jump.
+    private var pins: [String: (x: Double, y: Double)] = [:]
+    /// How far (normalised, straight-line) an anchor may wander before the chip moves. A
+    /// label's lines sit within about a tenth of the screen of each other on a bottle
+    /// filling the frame.
+    static let anchorDeadZone = 0.10
+    /// How much of the remaining distance a chip closes per frame once it has to move.
+    static let anchorFollow = 0.35
+
+    /// The identifying words of the camera frame the overlays on screen were earned from.
+    /// What a scene change is measured against, together with the texts of any resolved
+    /// object -- see `isNewScene`.
+    private var sceneWords: [String] = []
+    /// Consecutive ticks whose frame shared nothing with the scene the overlays came from.
+    private var strangeTicks = 0
+    /// Ticks of a frame that shares nothing with the displayed scene before the HUD accepts
+    /// the camera has moved on and clears. One is glare, a hand, or a frame in which OCR
+    /// caught only the fine print; two at the tick rate is most of a second of a different
+    /// shelf. Before this the hold window kept an answer up for ten seconds over whatever
+    /// the camera panned to -- reported as "it lingers too long" (2026-09-15).
+    static let sceneChangeTicks = 2
+    /// How close a word has to read to a word of the displayed scene to count as the same
+    /// shelf still in view. Looser than `guessTokenMatch`'s job: OCR re-reads a stylized
+    /// label differently every tick, and a bottle that is still there must not look like a
+    /// new one because its wordmark garbled another way.
+    nonisolated static let sceneWordMatch = 0.6
+
     /// `sendsFrames` is the one switch in the scan path that decides whether a picture of
     /// what the camera sees leaves the device. Off unless the app passes the user's consent,
     /// so the default build sends text and nothing else.
@@ -214,6 +252,9 @@ public final class ScanCoordinator: ObservableObject {
         visionTask?.cancel(); visionTask = nil
         objectTask?.cancel(); objectTask = nil
         objectStage.reset()
+        pins.removeAll()
+        sceneWords = []
+        strangeTicks = 0
         publishOverlays()
         isLookingAtTheLabel = false
         unreadTicks = 0
@@ -361,6 +402,15 @@ public final class ScanCoordinator: ObservableObject {
     /// on-device model. Always *assigns* overlays, so nothing accumulates.
     private func resolve(frame: [DetectedText], full: [DetectedText],
                          venueId: String?) async {
+        // Has the camera moved on? Judged on the whole frame, before anything below can
+        // keep or extend what is on screen, and before the tracker is asked -- its objects
+        // are the old shelf's too.
+        if isNewScene(full) {
+            strangeTicks += 1
+            if strangeTicks >= Self.sceneChangeTicks { clearScene() }
+        } else {
+            strangeTicks = 0
+        }
         // Objects with enough evidence to ask about. Marked in flight here, before any
         // early return, so an object never sits "ready" across a tick that skipped it.
         let objects = objectStage.pending()
@@ -379,6 +429,7 @@ public final class ScanCoordinator: ObservableObject {
                 lineOverlays = []; candidates = []; currentFrame = []
                 overlaysSetAt = nil
                 displayedCorroborated = false
+                sceneWords = []
             }
             lastResolvedKey = nil; lastInterpretKey = nil
             unreadTicks = 0          // nothing in view is not a label we failed to read
@@ -435,10 +486,12 @@ public final class ScanCoordinator: ObservableObject {
                                        to: frame, cap: maxOverlays, presorted: true)
                 overlaysSetAt = Date()
                 displayedCorroborated = resp.corroborated
+                sceneWords = Self.sceneWords(of: full)
             } else if (resp.candidates.isEmpty || !showable) && !isHoldingRecentOverlays {
                 candidates = []; currentFrame = []; lineOverlays = []
                 overlaysSetAt = nil
                 displayedCorroborated = false
+                sceneWords = []
             }
             lastResolvedKey = key
             lastResolveCorroborated = resp.corroborated
@@ -543,9 +596,61 @@ public final class ScanCoordinator: ObservableObject {
         let fromObjects = objectStage.overlays
         let taken = Set(fromObjects.map(\.id))
         let settled = objectStage.objects.filter { $0.anchored && $0.status.candidate != nil }.map(\.box)
-        overlays = fromObjects + lineOverlays.filter { line in
+        let fresh = fromObjects + lineOverlays.filter { line in
             !taken.contains(line.id) && !settled.contains { $0.contains(x: line.x, y: line.y) }
         }
+        overlays = fresh.map(steadied)
+    }
+
+    /// The overlay drawn where its product's chip already is, unless the anchor has left
+    /// the dead zone -- then a step of the way toward it. See `pins`.
+    private func steadied(_ o: ResolvedOverlay) -> ResolvedOverlay {
+        guard let pin = pins[o.id] else {
+            pins[o.id] = (o.x, o.y)
+            return o
+        }
+        let (dx, dy) = (o.x - pin.x, o.y - pin.y)
+        if (dx * dx + dy * dy).squareRoot() <= Self.anchorDeadZone {
+            return ResolvedOverlay(id: o.id, candidate: o.candidate, x: pin.x, y: pin.y)
+        }
+        let moved = (x: pin.x + dx * Self.anchorFollow, y: pin.y + dy * Self.anchorFollow)
+        pins[o.id] = moved
+        return ResolvedOverlay(id: o.id, candidate: o.candidate, x: moved.x, y: moved.y)
+    }
+
+    /// Whether the frame in view shares nothing with the scene the overlays came from.
+    ///
+    /// The scene is the identifying words of the camera frame that earned the line overlays
+    /// plus everything read off any resolved object. A frame that reads none of them is a
+    /// different shelf -- or one bad frame, which is why the caller counts before acting.
+    /// An empty frame is not a new scene: it is the phone being lowered to tap, and the
+    /// empty-frame path below decides that case. Nor is a frame while nothing is displayed.
+    private func isNewScene(_ frame: [DetectedText]) -> Bool {
+        let now = Self.sceneWords(of: frame)
+        guard !now.isEmpty else { return false }
+        var shown = sceneWords
+        for o in objectStage.objects where o.status.candidate != nil {
+            shown += o.texts.flatMap { Self.identifyingWords($0) }
+        }
+        guard !shown.isEmpty else { return false }
+        return !now.contains { w in shown.contains { Self.similarity(w, $0) >= Self.sceneWordMatch } }
+    }
+
+    /// The camera has moved to another shelf: nothing earned on the last one may stand.
+    private func clearScene() {
+        lineOverlays = []; candidates = []; currentFrame = []
+        overlaysSetAt = nil
+        displayedCorroborated = false
+        objectStage.reset()
+        pins.removeAll()
+        sceneWords = []
+        strangeTicks = 0
+        lastResolvedKey = nil
+        publishOverlays()
+    }
+
+    nonisolated static func sceneWords(of frame: [DetectedText]) -> [String] {
+        frame.flatMap { identifyingWords($0.text) }
     }
 
     /// Stuck-frame fallback: hand the raw (garbled) OCR to the on-device model, resolve the product
@@ -587,6 +692,9 @@ public final class ScanCoordinator: ObservableObject {
         // The model read the label the catalog could not, and the catalog agreed with the
         // name it gave: the next garbled tick must not evict it.
         displayedCorroborated = true
+        // The scene is the camera's frame, not the model's name for it: the OCR of a label
+        // the model had to read never contains the words the model gave back.
+        sceneWords = Self.sceneWords(of: frame)
         lastLatencyMs = resp.latencyMs
         await telemetry?.log("scan_frame_batch", tier: .personalization, [
             "n_detections": .int(frame.count),
@@ -639,6 +747,7 @@ public final class ScanCoordinator: ObservableObject {
                                to: resp.detections, cap: maxOverlays, presorted: true)
         overlaysSetAt = Date()          // starts the hold window, so this one is tappable
         displayedCorroborated = true
+        sceneWords = Self.sceneWords(of: ocr)
     }
 
     // MARK: - persistent natural-language filter (the chat bar)

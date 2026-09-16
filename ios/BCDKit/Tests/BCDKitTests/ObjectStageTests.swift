@@ -188,6 +188,21 @@ private func approx(_ a: BoundingBox?, _ b: BoundingBox, tol: Double = 1e-9) -> 
         for _ in 0..<2 { #expect(tracker.update(with: ScanFrame(texts: [])).count == 1) }
         #expect(tracker.update(with: ScanFrame(texts: [])).isEmpty)
     }
+
+    @Test func aLineTheCameraStoppedReadingLeavesTheObject() {
+        // Across a pan one track gathered CAMPARI, then BLACK SEAL, and stayed settled on the
+        // first over the second (2026-09-16). The bag has to forget what it no longer sees.
+        var cfg = ObjectTracker.Config()
+        cfg.textDecay = 3
+        let tracker = ObjectTracker(config: cfg)
+        for _ in 0..<3 { tracker.update(with: frame([("CAMPARI", 0.30), ("MILANO", 0.36)])) }
+        var t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)]))[0]
+        #expect(t.stableTexts(minCount: 2).contains("CAMPARI"), "one frame without it is a blink")
+        for _ in 0..<3 { t = tracker.update(with: frame([("BLACK SEAL", 0.30), ("MILANO", 0.36)]))[0] }
+        #expect(!t.stableTexts(minCount: 2).contains("CAMPARI"))
+        #expect(t.stableTexts(minCount: 2) == ["MILANO", "BLACK SEAL"], "\(t.stableTexts(minCount: 2))")
+        #expect(tracker.isReady(t), "the evidence changed, so the object is asked about again")
+    }
 }
 
 @Suite struct ConstrainedPick {
