@@ -84,6 +84,18 @@ SUFFIX_MAX_EXPANSIONS = 8
 #: in the top few by token evidence; this is the margin for the cases where a common brand
 #: word spreads its weight over many rows.
 CANDIDATES = 48
+#: ...and rows a query token the dictionary does not hold is guaranteed a say for, whatever
+#: the rest of the line pulls in. A line carries several words, and the ordinary ones each
+#: match dozens of rows at full weight: "CAMPAR Davide Carpet MIL A" -- the wordmark with
+#: its last letter lost, then the house's line, garbled -- filled the 48 with rows named
+#: for a carpet, a Davide and a Mil, and `Campari`, reached from CAMPAR by one edit at 0.7
+#: of the weight, was cut before it was ever scored (2026-09-16). The best few rows by such
+#: a token's own evidence go through as well, so a word the line garbled is still heard.
+#: Only the garbled ones: an exact word is already heard at full weight, and guaranteeing
+#: its group too let one-word rows in on every word of a long label -- `Premium`,
+#: `Champagne` -- each a 1.0 by containment, and Miller High Life's own line lost its top
+#: three to them.
+PER_TOKEN = 8
 EXACT_WEIGHT, FUZZY_WEIGHT, PREFIX_WEIGHT = 1.0, 0.7, 0.6
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
@@ -392,23 +404,50 @@ class LabelIndex:
                         break
         return list(out.items())
 
-    def _token_weights(self, text: str, table: dict[int, array], size: int) -> dict[int, float]:
-        """Every row with identifying-token evidence for `text`, with its IDF-weighted sum."""
+    def _token_evidence(self, text: str, table: dict[int, array], size: int,
+                        ) -> tuple[dict[int, float], list[list[array]]]:
+        """Every row with identifying-token evidence for `text`, with its IDF-weighted sum --
+        and, per query token, the posting lists that token reached."""
         acc: dict[int, float] = {}
+        reached: list[list[array]] = []
         for q in identifying_tokens(text):
+            lists: list[array] = []
+            exact = self.token_id.get(q)
             for tid, w in self._expand(q, table):
                 rows = table[tid]
                 weight = w * math.log(1.0 + size / len(rows))
                 for r in rows:
                     acc[r] = acc.get(r, 0.0) + weight
-        return acc
+                lists.append(rows)
+            if exact is None or exact not in table:      # a garble: see PER_TOKEN
+                reached.append(lists)
+        return acc, reached
+
+    def _token_weights(self, text: str, table: dict[int, array], size: int) -> dict[int, float]:
+        """Every row with identifying-token evidence for `text`, with its IDF-weighted sum."""
+        return self._token_evidence(text, table, size)[0]
 
     def _token_stage(self, text: str, table: dict[int, array], size: int) -> list[int]:
-        """Rows with the most identifying-token evidence for `text`, by IDF-weighted sum."""
-        acc = self._token_weights(text, table, size)
+        """Rows with the most identifying-token evidence for `text`, by IDF-weighted sum --
+        plus the best `PER_TOKEN` rows of each token's own, so no word goes unheard."""
+        acc, reached = self._token_evidence(text, table, size)
         if len(acc) <= CANDIDATES:
             return sorted(acc, key=acc.__getitem__, reverse=True)
-        return [r for r, _ in heapq.nlargest(CANDIDATES, acc.items(), key=lambda kv: kv[1])]
+        chosen = [r for r, _ in heapq.nlargest(CANDIDATES, acc.items(), key=lambda kv: kv[1])]
+        seen = set(chosen)
+        for lists in reached:
+            rows = {r for lst in lists for r in lst}
+            # Ties are the norm inside a token's group -- every row that carries the word
+            # and nothing else the line said scores the same -- and the row that is mostly
+            # this word is the one the trigram stage would pick: `Campari` over `Campari
+            # Cask Tales Patiently Finished In Bourbon Barrels`. Shortest name first.
+            best = heapq.nlargest(PER_TOKEN * 4, rows, key=acc.__getitem__)
+            best.sort(key=lambda r: (-acc[r], len(self.qualified[r])))
+            for r in best[:PER_TOKEN]:
+                if r not in seen:
+                    seen.add(r)
+                    chosen.append(r)
+        return chosen
 
     def _generic_stage(self, text: str) -> list[int]:
         """A line with nothing identifying in it can only name a product whose name is

@@ -22,12 +22,19 @@ public enum DisplayName {
 
     /// Words that name a category rather than a drink. Stripping the brand off "Titos
     /// Vodka" leaves "Vodka", which identifies nothing — so these block the strip.
+    ///
+    /// Styles too: "Bombay Sapphire London Dry Gin" under Bombay Sapphire was shown as
+    /// "London Dry Gin", which is what it is, not what it is called — reported from the
+    /// camera as the detail screen showing "the wrong name" (2026-09-16).
     static let categoryWords: Set<String> = [
         "vodka", "gin", "rum", "whisky", "whiskey", "bourbon", "scotch", "rye", "tequila",
         "mezcal", "ouzo", "brandy", "cognac", "armagnac", "liqueur", "schnapps", "absinthe",
         "aquavit", "grappa", "sake", "mead", "cider", "perry", "beer", "ale", "lager",
         "pilsner", "stout", "porter", "ipa", "wine", "seltzer", "hard", "spirit", "spirits",
         "original", "classic", "reserve", "select",
+        "london", "dry", "extra", "special", "premium", "pale", "india", "indian", "double",
+        "imperial", "hazy", "session", "draught", "draft", "light", "lite", "strong", "blonde",
+        "amber", "dark", "white", "black", "gold", "red", "aperitivo", "bitter", "bitters",
     ]
 
     /// "The Alchemist LLC" -> "The Alchemist". Strips repeatedly, so "Foo Brewing Co Ltd"

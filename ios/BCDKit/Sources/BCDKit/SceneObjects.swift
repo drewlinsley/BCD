@@ -115,8 +115,14 @@ public final class ObjectTracker {
         /// ...or whose centers are within this distance (fraction of the frame), for
         /// small text clusters that jitter frame to frame.
         public var maxCenterDistance = 0.06
-        /// Frames an object may go unseen before it is dropped (pans, hands, glare).
-        public var maxMissing = 12
+        /// How long an object may go unseen before it is dropped (pans, hands, glare).
+        ///
+        /// Seconds, not frames: the recognizer reports a frame on every change it sees, so
+        /// a bottle held roughly still can arrive at thirty frames a second and a bottle
+        /// held perfectly still at none. Twelve frames was under half a second on a live
+        /// shelf, and a chip that blinked whenever the text under it wobbled -- reported
+        /// from the camera as the box "winking in and out" (2026-09-16).
+        public var missingGrace: TimeInterval = 1.5
         /// Frames of support before an object may be queried at all.
         public var minFramesStable = 2
         /// Frames a text line must be seen on an object before it counts as evidence.
@@ -125,15 +131,20 @@ public final class ObjectTracker {
         public var boxSmoothing = 0.5
         /// Frames to wait after a query before new text may trigger another.
         public var requeryCooldown = 6
-        /// Frames a text line may go unseen -- while the object itself is still being seen --
-        /// before it is forgotten. A track follows a region of the screen, and across a pan
-        /// of a shelf one track gathered the wordmark of every bottle that passed through
-        /// it: CAMPARI, then RAMAZZOTTI, then BLACK SEAL, and stayed settled on the first
-        /// over the third (2026-09-16). A line the camera has stopped reading on an object
-        /// it can still see was never this object's; once it is gone the evidence has
-        /// changed and the object is asked about again. Frames arrive on every change the
-        /// recognizer reports, so during a pan this is about a second.
-        public var textDecay = 20
+        /// How long a text line may go unseen -- while the object itself is still being
+        /// seen -- before it is forgotten. A track follows a region of the screen, and
+        /// across a pan of a shelf one track gathered the wordmark of every bottle that
+        /// passed through it: CAMPARI, then RAMAZZOTTI, then BLACK SEAL, and stayed settled
+        /// on the first over the third (2026-09-16). A line the camera has stopped reading
+        /// on an object it can still see was never this object's; once it is gone the
+        /// evidence has changed and the object is asked about again.
+        ///
+        /// Seconds, for the reason `missingGrace` is: the first cut counted twenty frames,
+        /// which on a live shelf was under a second, and an object's bag held only its
+        /// last two or three reads -- a stylized wordmark garbles differently every frame
+        /// -- so nothing accumulated and a can settled on a sibling off the one word it
+        /// had left. Three seconds keeps a few dozen reads of a label held in view.
+        public var textDecay: TimeInterval = 3
         public init() {}
     }
 
@@ -148,7 +159,8 @@ public final class ObjectTracker {
         public internal(set) var confidence: Double?
         public internal(set) var textCounts: [String: Int] = [:]     // normalized -> frames
         public internal(set) var textOriginal: [String: String] = [:] // normalized -> as read
-        public internal(set) var textLastSeen: [String: Int] = [:]    // normalized -> frame no.
+        public internal(set) var textLastSeen: [String: TimeInterval] = [:] // normalized -> when
+        public internal(set) var lastSeenAt: TimeInterval = 0
         public internal(set) var pinnedTexts: Set<String> = []        // fine-reader results
         public internal(set) var barcode: String?
         public internal(set) var symbology: String?
@@ -220,16 +232,16 @@ public final class ObjectTracker {
             matched.append((p.obs, p.track))
         }
 
-        for (oi, ti) in matched { absorb(observations[oi], into: &tracks[ti]) }
+        for (oi, ti) in matched { absorb(observations[oi], into: &tracks[ti], at: frame.timestamp) }
         for ti in tracks.indices where !usedTracks.contains(ti) { tracks[ti].framesMissing += 1 }
         for (oi, o) in observations.enumerated() where !usedObs.contains(oi) {
             var t = Track(id: String(UUID().uuidString.prefix(8)),
                           box: o.box ?? .unit, anchored: o.box != nil,
                           fromRegion: o.fromRegion, label: o.label, confidence: o.confidence)
-            absorb(o, into: &t)
+            absorb(o, into: &t, at: frame.timestamp)
             tracks.append(t)
         }
-        tracks.removeAll { $0.framesMissing > config.maxMissing }
+        tracks.removeAll { $0.framesMissing > 0 && frame.timestamp - $0.lastSeenAt > config.missingGrace }
         return tracks
     }
 
@@ -241,7 +253,7 @@ public final class ObjectTracker {
             guard !key.isEmpty else { continue }
             tracks[i].textCounts[key, default: 0] += 1
             tracks[i].textOriginal[key] = tracks[i].textOriginal[key] ?? raw
-            tracks[i].textLastSeen[key] = frameCount
+            tracks[i].textLastSeen[key] = tracks[i].lastSeenAt
             tracks[i].pinnedTexts.insert(key)
             tracks[i].pinnedSinceQuery = true
         }
@@ -337,9 +349,10 @@ public final class ObjectTracker {
         return 0
     }
 
-    func absorb(_ o: Observation, into t: inout Track) {
+    func absorb(_ o: Observation, into t: inout Track, at now: TimeInterval) {
         t.framesSeen += 1
         t.framesMissing = 0
+        t.lastSeenAt = now
         if let ob = o.box {
             if o.fromRegion || !t.fromRegion {
                 t.box = t.anchored ? t.box.blended(toward: ob, config.boxSmoothing) : ob
@@ -358,13 +371,12 @@ public final class ObjectTracker {
             guard !key.isEmpty else { continue }
             t.textCounts[key, default: 0] += 1
             t.textOriginal[key] = t.textOriginal[key] ?? d.text
-            t.textLastSeen[key] = frameCount
+            t.textLastSeen[key] = now
         }
         // Lines the camera has stopped reading on this object leave its bag (see `textDecay`).
         // Pinned lines are the fine reader's, read once by design, and stay.
         let stale = t.textCounts.keys.filter { key in
-            !t.pinnedTexts.contains(key)
-                && frameCount - (t.textLastSeen[key] ?? frameCount) > config.textDecay
+            !t.pinnedTexts.contains(key) && now - (t.textLastSeen[key] ?? now) > config.textDecay
         }
         for key in stale {
             t.textCounts[key] = nil
