@@ -184,7 +184,7 @@ def _name_words(name: str) -> list[str]:
 _PARAGRAPH_WORDS = 30
 
 
-def _reads_the_name(name: str, line: str) -> bool:
+def _reads_the_name(name: str, line: str, *, loose: bool = False) -> bool:
     """Whether a line prints a multi-word name whole, in order and together, whatever else is
     on it.
 
@@ -193,19 +193,28 @@ def _reads_the_name(name: str, line: str) -> bool:
     thirteen times, the 6 and the OUT being too short to ask for. In order and within one
     stray word of each other: "Miller BREWED HIGH LIFE" is the name with a flourish between;
     "we have worked so / you MUST pour" on the back of a Heady Topper can is not `Must Have`,
-    and a paragraph is where two common words will always end up near each other."""
+    and a paragraph is where two common words will always end up near each other.
+
+    `loose` reads each word the way `_read_as` does -- letters lost at one end allowed --
+    for a phrase the recognizer garbles word by word, like a maker's line in small type."""
     words = _name_words(name)
     if len(words) < _MIN_SELF_PROOF_TOKENS or sum(len(w) for w in words) < _MIN_SELF_PROOF_CHARS:
         return False
     toks = [_norm_token(w) for w in _NAME_WORD_RE.findall((line or "").lower())]
     if len(toks) > _PARAGRAPH_WORDS:
         return False
+
+    def read(w: str, tok: str) -> bool:
+        if loose:
+            return _read_as(w, {tok})
+        return _trigram_sim(w, tok) >= _TOKEN_SUPPORT_MIN
+
     span = len(words) + 1
     for start in range(max(1, len(toks) - span + 1)):
         window = toks[start:start + span]
         at = 0
         for w in words:                      # in the name's order, each after the last
-            while at < len(window) and _trigram_sim(w, window[at]) < _TOKEN_SUPPORT_MIN:
+            while at < len(window) and not read(w, window[at]):
                 at += 1
             if at >= len(window):
                 break
@@ -271,7 +280,15 @@ def _token_supported(query: str, name: str) -> bool:
     IPA and a product named "Life drink", and both outranked the real beer because all three sat
     within 0.012 of each other just above the floor. A name with nothing identifying in it
     ("J&B", "1664", "Hazy Double IPA") has nothing to anchor on and defers to the raised floor
-    the caller applies instead."""
+    the caller applies instead.
+
+    Closely: near-exact, or the word with its first or last letter lost -- the letter a
+    stylized face loses most. CAMPARI arrived as CAMPAR on thirty frames of thirty, a 0.67
+    against its own name, and the row was never so much as a candidate (2026-09-15). One
+    letter, not the five-letter affix `_read_as` allows: BACAR, off "...drive A CAR OR..."
+    in the warning, starts the way BACARDI starts, and this gate exists to refuse it. This
+    gate decides what may be evidence; what it proves is decided downstream, and nothing
+    there loosens with it."""
     name_tokens = [t for t in _tokens(name) if len(t) >= _MIN_NAME_TOKEN_LEN]
     if not name_tokens:
         return True
@@ -284,8 +301,9 @@ def _token_supported(query: str, name: str) -> bool:
         # Ipa", because containment scores it 1.0 and so the raised floor this used to defer
         # to never bit.
         return not _identifying_tokens(query)
-    q_tokens = _tokens(query)
+    q_tokens = set(_tokens(query))
     return any(_trigram_sim(nt, qt) >= _TOKEN_SUPPORT_MIN
+               or (len(qt) >= _MAKER_HYPOTHESIS_WORD and qt in (nt[:-1], nt[1:]))
                for nt in identifying for qt in q_tokens)
 
 
@@ -621,6 +639,38 @@ def _maker_names(resolved: ResolvedProduct) -> list[str]:
             if m is not None and m.id != "unknown" and m.name]
 
 
+def _maker_ids(resolved: ResolvedProduct) -> set[str]:
+    return {m.id for m in (resolved.brand, resolved.producer)
+            if m is not None and m.id != "unknown"}
+
+
+def _house_names_the_label(resolved: ResolvedProduct, detections: list[DetectedText],
+                           read_toks: set[str]) -> bool:
+    """Whether a one-word label is proven by its house's line.
+
+    A single word is not a label (`_MIN_SELF_PROOF_TOKENS`), and a word read twice is one
+    piece of evidence (`_frame_support`) -- and some labels are one word. CAMPARI is the
+    whole of the name on the bottle, and under it, in small type, the house: DAVIDE CAMPARI
+    MILANO. The camera read the wordmark as CAMPAR on every one of thirty frames and the
+    house as "Davide Campan MILAN", "Davide Campani MILANO", and the bottle drew nothing
+    (2026-09-15). The phrase rule is met the way the label meets it: a row whose name is
+    its house's word, read, beside its house's full name -- two or more words of it, read
+    as a phrase on one line. The maker's phrase is the second word the name does not have.
+
+    Only a flagship (`_own_vocabulary`: a name with no word that is not its maker's) and
+    only a house named by two words or more: `Campari` under "Cutty Sark", the importer's
+    other brand that TTB filed it beneath, is proven by no line of a Campari bottle."""
+    words = _identifying_tokens(resolved.product.name or "")
+    if len(words) != 1 or len(words[0]) < _MIN_SELF_PROOF_CHARS:
+        return False
+    _, flagship = _own_vocabulary(resolved)
+    if not flagship or not _read_as(words[0], read_toks):
+        return False
+    return any(len(_identifying_tokens(m)) >= _MIN_SELF_PROOF_TOKENS
+               and any(_reads_the_name(m, d.text, loose=True) for d in detections)
+               for m in _maker_names(resolved))
+
+
 # Two lines that read the same printed phrase are one piece of evidence, not two.
 # Words a label prints that identify nothing: what is in the glass, what it is packaged in,
 # and the suffixes companies carry. `_PRODUCER_SUFFIX` comes from dedup rather than a second
@@ -676,6 +726,29 @@ def _accounts_for_sighting(product: str, producer: str, sighting: str) -> bool:
     return not [t for t in read if t not in known and t not in _SIGHTING_NOISE]
 
 _LINE_REREAD = 0.7
+#: Shortest token a one-letter difference is allowed to reconcile in `_same_read`. Three
+#: letters is where one substitution makes another real word of almost anything.
+_SAME_READ_MIN = 4
+
+
+def _same_read(a: str, b: str) -> bool:
+    """Whether two tokens are one printed word read twice.
+
+    Near-exact by trigram, as everywhere else -- or, for words of any length, one letter
+    apart: substituted, dropped or added. Trigram similarity is harsh on short words, and
+    the recognizer's mistakes are single letters. A can of Long Live Beerworks gave its
+    script wordmark as "Fong files" and "Long fiRes" one tick apart; fong/long and
+    files/fires are each a letter off and a 0.25 and 0.33 by trigram, so the two reads
+    passed as independent lines, and between them they named `Long-fong` -- a Chinese
+    spirit whose two words each happened to be one of the garbles (2026-09-15)."""
+    if a == b or _trigram_sim(a, b) >= _TOKEN_SUPPORT_MIN:
+        return True
+    if len(a) < _SAME_READ_MIN or len(b) < _SAME_READ_MIN or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b, strict=True) if x != y) <= 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
 
 
 def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
@@ -690,7 +763,8 @@ def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
     Longest reading first, so the fullest version of a repeated phrase is the one kept: a line
     whose identifying tokens are nearly all already accounted for is an echo of it. Matching is
     fuzzy because each re-read is garbled differently -- "LITTLE WILLOW BREWING COMPANT" and
-    "LITTLE / KEWING" are the same text off two cans.
+    "LITTLE / KEWING" are the same text off two cans -- and tolerant of a single letter, which
+    is what the garble usually is (`_same_read`).
     """
     def _substance(toks: list[str]) -> int:
         return sum(len(t) for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN)
@@ -704,13 +778,18 @@ def _independent_lines(line_tokens: list[list[str]]) -> list[list[str]]:
         sig = [t for t in toks if len(t) >= _MIN_NAME_TOKEN_LEN]
         if not sig:
             continue
-        echo = any(
-            sum(any(_trigram_sim(t, k) >= _TOKEN_SUPPORT_MIN for k in seen) for t in sig)
-            / len(sig) >= _LINE_REREAD
-            for seen in kept
-        )
-        if not echo:
+        echo = next((seen for seen in kept
+                     if sum(any(_same_read(t, k) for k in seen) for t in sig) / len(sig)
+                     >= _LINE_REREAD), None)
+        if echo is None:
             kept.append(sig)
+        else:
+            # The echo's words join the line it re-reads, so the line keeps its best read of
+            # each word. The fullest reading is not the cleanest: "WORMTOWNT" outranks
+            # "WORMTOWN" on substance, and a kept line that only had the garble no longer
+            # agreed with the beer at all; "DINO BREAN" was kept over "DINO BREAK" the
+            # same way and lost the word that names it (2026-09-15).
+            echo.extend(t for t in sig if t not in echo)
     return kept
 
 
@@ -977,6 +1056,16 @@ def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
         return False
     if not any(t in in_name for t in read):
         return False
+    # And the reading has to account for the row: every word of the name that is the
+    # drink's own read somewhere in it. The rule was written against a row that wins by
+    # saying less than the label; a row that says *more* than the label won the same way --
+    # "Long five", two words of a script wordmark, was explained in full by `Long Distance
+    # High Five`, with DISTANCE and HIGH read nowhere (2026-09-15). A two-word reading and a
+    # four-word name is not the label; it is a name the reading happens to fit inside. The
+    # maker's words are not asked for: "Little Sip IPA" is the whole of what a Lawson's can
+    # says about itself, and the row is filed as `Lawson's Finest Liquids Little Sip IPA`.
+    if _unread(_own_vocabulary(c.resolved)[0], set(_tokens(reading))):
+        return False
     return not [t for t in read if t not in known]
 
 
@@ -1008,6 +1097,13 @@ def _explains_enough(c: ScoredCandidate, reading: str) -> bool:
         return False
     explained = [t for t in read if seen(t, known)]
     if len(explained) / len(read) <= _OBJECT_EXPLAINED:
+        return False
+    # And the label has to have shown most of the row's own name. The model chooses among
+    # rows the label could be, and a name with two words the camera never saw is not one of
+    # them: "Long five" shortlisted `Long Distance High Five` alone, and a model asked to
+    # pick among one picks it (2026-09-15). One unread word is the garble the shortlist
+    # exists for -- "FADY TOPPE" reads TOPPER and loses HEADY -- so one is allowed.
+    if len(_unread(_own_vocabulary(c.resolved)[0], set(_tokens(reading)))) > 1:
         return False
     substantial = [t for t in _identifying_tokens(product)]
     return any(seen(t, substantial) for t in explained if len(t) >= _MIN_NAME_TOKEN_LEN)
@@ -1319,9 +1415,25 @@ class Resolver:
             # names on one bottle (2026-09-15). The object judged those lines together and
             # chose; a line the object owns has been answered, and a second reading of it is
             # not a second product.
-            resolved_ids = {r.object_id for r in objects if r.status == "resolved"}
-            owned = {_flatten(_latin(t)) for o in req.objects if o.id in resolved_ids
-                     for t in o.texts} - {""}
+            #
+            # Owns: the lines that carry a word of the verdict's label. The tracker follows
+            # a screen region, and across a pan of the shelf one object gathered CAMPARI,
+            # then RAMAZZOTTI, then BLACK SEAL BERMUDA BLACK RUM, and settled on Campari --
+            # which was right for its lines and wrong for the Gosling's it then owned: the
+            # rum's line was in the bag, so the frame's own proof of the rum was dropped
+            # (2026-09-16). A verdict speaks for the lines that are its label's; a line that
+            # shares no word with it is another bottle's, whatever box it was read in.
+            by_id = {r.object_id: r for r in objects if r.status == "resolved"}
+            owned: set[str] = set()
+            for o in req.objects:
+                res = by_id.get(o.id)
+                if res is None:
+                    continue
+                vocab = _candidate_vocabulary(res.candidates[0].resolved)
+                for t in o.texts:
+                    if _agreeing_lines(vocab, [_tokens(_latin(t))]):
+                        owned.add(_flatten(_latin(t)))
+            owned -= {""}
             candidates = [c for c in candidates
                           if not (0 <= c.detection_index < len(detections)
                                   and _flatten(detections[c.detection_index].text) in owned)]
@@ -1518,6 +1630,7 @@ class Resolver:
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
         whole_label: dict[str, bool] = {}
+        by_house: set[str] = set()                        # one-word labels their house proved
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
             if (resolved is None or _is_business_name(resolved)
@@ -1553,6 +1666,10 @@ class Resolver:
                 whole = not flagship or _reads_every_word(resolved.product.name or "", read_toks)
                 if not whole or not _frame_support(own, independent):
                     named = 1
+            if named <= 1 and _house_names_the_label(resolved, detections, read_toks):
+                # The one-word label's second word is its house's line (see the rule).
+                named = _MIN_FRAME_FOR_PENALTY
+                by_house.add(resolved.product.id)
             named_by_id[resolved.product.id] = named
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
@@ -1707,6 +1824,14 @@ class Resolver:
             and any(a.resolved.product.id != c.resolved.product.id
                     and lines_of[c.resolved.product.id] <= lines_of[a.resolved.product.id]
                     for a in whole)
+        }
+        # And a label proven by its house's line yields to a proven product of the same
+        # house: a bottle that reads BOMBAY SAPPHIRE proves the brand row `Bombay` that way
+        # and the gin by its own two words, and the gin is the bottle.
+        shadowed |= {
+            c.resolved.product.id for _, c in ranked if c.resolved.product.id in by_house
+            and any(_is_proven(a) and a.resolved.product.id != c.resolved.product.id
+                    and _maker_ids(a.resolved) & _maker_ids(c.resolved) for _, a in ranked)
         }
         ranked = [entry for entry in ranked if entry[1].resolved.product.id not in shadowed]
         proven = [c for _, c in ranked if _is_proven(c)]

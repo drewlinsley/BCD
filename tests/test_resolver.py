@@ -15,6 +15,7 @@ from bcd_api.resolver import (
     _is_business_name,
     _latin,
     _reads_the_name,
+    _same_read,
     _token_supported,
     _tokens,
     _unread,
@@ -125,6 +126,8 @@ def test_unresolved_text_reported(store):
     ("GUINNESS DRAUGHT 440ML EXTRA STOUT", "Bière Brune Draught 4,2% GUINNESS"),
     ("HEADY TOPPER 16oz", "Heady Topper"),
     ("KROMBACHER", "Krombacher Pils"),
+    ("CAMPAR\nDavide Campani\nMILANO", "Campari"),           # the wordmark's last letter, lost
+    ("LCHEMIST VERMONT", "The Alchemist"),                   # ...or its first
 ])
 def test_token_support_keeps_real_hits(query, name):
     assert _token_supported(query, name) is True
@@ -134,6 +137,8 @@ def test_token_support_keeps_real_hits(query, name):
     ("BACAR OR", "Bacardi"),                          # OCR of "...drive a car or..." warning
     ("DRIVE A CAR OR OPERATE MACHINERY", "Malibu"),   # clean warning line
     ("ACCORDING TO THE SURGEON GENERAL", "Gentiane"),
+    ("HARI CAMPA", "Campari"),                        # two letters gone is a fragment
+    ("CAMP", "Campari"),
 ])
 def test_token_support_rejects_coincidental_windows(query, name):
     assert _token_supported(query, name) is False
@@ -1010,6 +1015,149 @@ def test_objects_and_lines_share_one_response(shelf):
     assert by_kind[(0, None)] == "Heady Topper" or by_kind.get((1, None)) == "Heady Topper"
     assert by_kind[(-1, "o2")] == "Focal Banger"
     assert resp.objects[0].status == "resolved"
+
+
+def _put_beer(store, pid, name, producer_id, producer_name):
+    store.put_gold(producer_id, "producer",
+                   Producer(id=producer_id, name=producer_name).model_dump(mode="json"))
+    bid = f"brand:{pid}"
+    store.put_gold(bid, "brand", Brand(id=bid, producer_id=producer_id, name=name
+                                       ).model_dump(mode="json"))
+    store.put_gold(pid, "product", Product(id=pid, name=name, producer_id=producer_id,
+                                           brand_id=bid, category=Category.BEER
+                                           ).model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("a, b, same", [
+    ("fong", "long", True),          # one letter substituted
+    ("files", "fires", True),
+    ("topplng", "toppling", True),   # one letter dropped
+    ("five", "files", False),        # two edits is another word
+    ("dud", "dude", False),          # too short to reconcile
+    ("heady", "hazy", False),
+])
+def test_same_read_is_one_letter_of_garble(a, b, same):
+    assert _same_read(a, b) is same
+
+
+def test_two_garbles_of_one_wordmark_are_one_line(shelf):
+    """A tracked can accumulates every read of its wordmark, and a script wordmark reads
+    differently every tick. Long Live's arrived as "Fong files" and "Long fiRes" -- each a
+    letter off the other -- and, as two independent lines, they agreed on `Long-fong`, a
+    spirit whose two words each happened to be one of the garbles (2026-09-15)."""
+    _put_beer(shelf, "ttb:fong", "Long-fong", "prod:mkl", "Mei Kuei Lu Chiew")
+    _, res = _verdict(shelf, ["DUDE", "Fong files", "Long fiRes", "WIDESCREEN"])
+    assert res.status == "unresolved", _names(res)
+    assert "Long-fong" not in _names(res)
+
+
+def test_a_name_longer_than_the_reading_does_not_account_for_it(shelf):
+    """The leftover-word rule asks whether the row explains everything read. A row that
+    says more than the label passes it for free: "Long five" was accounted for in full by
+    `Long Distance High Five`, DISTANCE and HIGH read nowhere (2026-09-15). Nor may such a
+    row be shortlisted alone -- a model asked to pick among one picks it."""
+    _put_beer(shelf, "ttb:ldhf", "Long Distance High Five", "prod:bench", "Benchtop Brewing")
+    _, res = _verdict(shelf, ["Long five"])
+    assert res.status == "unresolved", (res.status, _names(res))
+
+
+def test_one_unread_word_still_earns_the_shortlist(shelf):
+    # "FADY TOPPE" reads TOPPER and loses HEADY: the garble the shortlist exists for.
+    _, res = _verdict(shelf, ["FADY TOPPE", "THE ALCHEMIST"])
+    assert res.status in ("ambiguous", "resolved") and "Heady Topper" in _names(res)
+
+
+# The Campari frame as the camera gave it, and the store's numbers for it: `Campari` is a
+# 0.67 against CAMPAR (the wordmark's last letter is never read), which is the one hit the
+# per-line match has for the line.
+CAMPARI_LINES = ["CAMPAR\nDavide Campani\nMILANO", "Aperiti\nRasalo", "RAMAZIO"]
+
+
+def _campari_store(house_id, house_name, extra=()):
+    campari = Product(id="off:campari", brand_id="b:campari", producer_id=house_id,
+                      category=Category.SPIRIT, name="Campari").model_dump(mode="json")
+    gold = {house_id: _producer(house_id, house_name),
+            "b:campari": Brand(id="b:campari", producer_id=house_id, name="Campari"
+                               ).model_dump(mode="json")}
+    by_text = {CAMPARI_LINES[0]: [(campari, 0.67)]}
+    for rec, score, line in extra:
+        gold[rec["id"]] = rec
+        by_text.setdefault(line, []).append((rec, score))
+    return _FrameStore(by_text=by_text, gold=gold)
+
+
+def test_a_one_word_label_is_proven_by_its_houses_line():
+    """CAMPARI is the whole of the name on the bottle, and under it the house: DAVIDE
+    CAMPARI MILANO. The camera read the wordmark as CAMPAR on thirty frames of thirty, the
+    house as "Davide Campani MILANO", and the bottle drew nothing (2026-09-15): one word is
+    not a label, and a word read twice is one piece of evidence. The house's phrase is the
+    second word the name does not have."""
+    store = _campari_store("pr:dcm", "Davide Campari-Milano")
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text=t) for t in CAMPARI_LINES]))
+    assert resp.corroborated
+    assert [c.resolved.product.name for c in resp.candidates] == ["Campari"]
+    assert resp.candidates[0].match_score == 0.67, "corroborated, so not marked down"
+    _, res = _verdict(store, CAMPARI_LINES)
+    assert res.status == "resolved" and _names(res) == ["Campari"]
+
+
+def test_the_house_has_to_be_the_labels_own():
+    # The same bottle, the row filed under the importer's other brand -- what TTB actually
+    # holds. "Cutty Sark" is on no line of a Campari bottle, and one word stays one word.
+    store = _campari_store("pr:cutty", "Cutty Sark")
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text=t) for t in CAMPARI_LINES]))
+    assert not resp.corroborated
+    _, res = _verdict(store, CAMPARI_LINES)
+    assert res.status != "resolved"
+
+
+def test_a_house_of_one_word_proves_nothing(shelf):
+    # `Lagunitas` under "Lagunitas Brewing Company": the suffix stripped, the house is the
+    # same one word as the label, and reading it is still reading one word.
+    _put_beer(shelf, "ttb:lag", "Lagunitas", "prod:lag", "Lagunitas Brewing Company")
+    _, res = _verdict(shelf, ["LAGUNITAS", "LAGUNITAS BREWING COMPANY", "PETALUMA CALIFORNIA"])
+    assert res.status != "resolved"
+
+
+def test_the_house_proven_brand_row_yields_to_the_proven_bottle():
+    # BOMBAY SAPPHIRE read whole proves the brand row `Bombay` by its house's line, and the
+    # gin by its own words; one bottle, one name, and the gin is the bottle.
+    house = _producer("pr:bs", "Bombay Sapphire")
+    bombay = Product(id="ttb:bombay", brand_id="b", producer_id="pr:bs",
+                     category=Category.SPIRIT, name="Bombay").model_dump(mode="json")
+    gin = Product(id="off:gin", brand_id="b", producer_id="pr:bs", category=Category.SPIRIT,
+                  name="Bombay Sapphire London Dry Gin").model_dump(mode="json")
+    store = _FrameStore(
+        by_text={"BOMBAY SAPPHIRE": [(gin, 0.6), (bombay, 1.0)],
+                 "LONDON DRY GIN": [(gin, 0.55)],
+                 "BOMBAY SAPPHIRE LONDON DRY GIN": [(gin, 1.0), (bombay, 0.3)]},
+        gold={"pr:bs": house})
+    resp = Resolver(store).resolve(ScanResolveRequest(detections=[
+        DetectedText(text="BOMBAY SAPPHIRE"), DetectedText(text="LONDON DRY GIN"),
+        DetectedText(text="BOMBAY SAPPHIRE LONDON DRY GIN")]))
+    names = [c.resolved.product.name for c in resp.candidates]
+    assert "Bombay Sapphire London Dry Gin" in names and "Bombay" not in names, names
+
+
+def test_a_verdict_owns_only_the_lines_that_are_its_labels():
+    """The tracker follows a screen region: across a pan one object gathered CAMPARI, then
+    BLACK SEAL BERMUDA BLACK RUM, settled on Campari, and owned the rum's line -- so the
+    frame's own proof of the Gosling's was dropped (2026-09-16)."""
+    rum = Product(id="ttb:seal", brand_id="b:seal", producer_id="pr:gos", category=Category.SPIRIT,
+                  name="Goslings Black Seal").model_dump(mode="json")
+    store = _campari_store("pr:dcm", "Davide Campari-Milano", extra=[
+        (rum, 0.9, "BLACK SEAL BERMUDA BLACK RUM"), (rum, 0.7, "Goslings")])
+    store._gold["pr:gos"] = _producer("pr:gos", "Goslings")
+    store._gold["b:seal"] = Brand(id="b:seal", producer_id="pr:gos", name="Goslings Black Seal"
+                                  ).model_dump(mode="json")
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text="BLACK SEAL BERMUDA BLACK RUM"), DetectedText(text="Goslings")],
+        objects=[DetectedObject(id="drift", texts=[CAMPARI_LINES[0], "BLACK SEAL BERMUDA BLACK RUM"])]))
+    assert resp.objects[0].status == "resolved" and _names(resp.objects[0]) == ["Campari"]
+    names = [c.resolved.product.name for c in resp.candidates]
+    assert "Goslings Black Seal" in names, names
 
 
 def test_lexicon_carries_names_not_generic_words(shelf):

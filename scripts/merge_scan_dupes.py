@@ -15,10 +15,11 @@ abandoned (see the catalog-merge notes): a shorter row wins a similarity contest
 less, and the category list holds the very words that tell products apart. `Black Seal` from
 1984 is a London dry gin, not the rum, and stays.
 
-Two producers are put right on the way, the same way `relink_alchemist.py` did it: the permit
-naming pass called Miller's Milwaukee brewery "Redd's" after one of its 512 labels, and no
-row at all existed for the Bermuda house that blends Gosling's, whose rum sat under seven
-different importers.
+Three producers are put right on the way, the same way `relink_alchemist.py` did it: the
+permit naming pass called Miller's Milwaukee brewery "Redd's" after one of its 512 labels,
+no row at all existed for the Bermuda house that blends Gosling's, whose rum sat under seven
+different importers, and Campari sat under Cutty Sark -- which matters to the resolver: a
+one-word label is proven by its house's line, and only its own house's.
 
 Idempotent: a second run finds the aliases already redirects, the renames done, the producer
 present, and changes nothing. `--dry-run` prints the plan and writes nothing. Writes a backup
@@ -28,8 +29,10 @@ with the API's environment (.env is read):
     .venv/bin/python scripts/merge_scan_dupes.py --dry-run
     .venv/bin/python scripts/merge_scan_dupes.py
 
-Then restart the API. The merges change the product count, so the label index rebuilds on
-start (~80 s); delete data/label_index.pkl first if in doubt.
+Then delete data/label_index.pkl and restart the API. The index is keyed on row COUNTS, and
+a merge keeps the gold total constant (a product becomes a redirect under the same id), so
+the API would load the old index and go on matching the folded rows by their old names; a
+fresh build takes ~80 s on start.
 
 Measured before it was handed over, by running it against a `createdb -T bcd` copy and
 replaying the 1204 logged frames (scripts/replay_scans.py) on both catalogs. The first
@@ -68,6 +71,9 @@ class Cluster:
     rename: str | None = None          # the survivor's name, where the filing's is wrong
     producer: str | None = None        # repoint the survivor (and its brand) to this producer
     brand: str | None = None           # ...and this is that brand
+    rebrand: str | None = None         # the survivor's brand row, where the filing's is wrong
+    aliases: list[str] | None = None   # the survivor's aliases, set outright after the merge:
+                                       # a fold's misspellings are not names a label prints
 
 
 CLUSTERS = [
@@ -101,6 +107,39 @@ CLUSTERS = [
         fold=["ttb:17038001000740", "ttb:14274001000379"],
     ),
     Cluster(
+        what="Lawson's Finest Liquids Little Sip -- the same pair: Waitsfield's 2023 filing and "
+             "the 2021 contract filing that says IPA; the can alternated between them",
+        canon="ttb:23339001000111",
+        fold=["ttb:21039001000961"],
+    ),
+    Cluster(
+        what="Ramazzotti Aperitivo Rosato -- filed again in 2026 as `Ramazzotti Rosato`, under "
+             "another importer",
+        canon="ttb:21335001000307",                # what the label prints
+        fold=["ttb:26029001000744"],
+    ),
+    Cluster(
+        what="Campari -- eight filings: `Campari`, `Bitter Campari`, `Campari Bitter Bitter`, "
+             "`Campari Aperitivo`, `Campari Aperitico` (sic), `Italy Campari`, `Litter Campari` "
+             "(sic), and the OFF row that carries the barcode and the ABV; the bottle drew "
+             "nothing, and the row that should have answered was filed under Cutty Sark",
+        canon="off:8000040000802",                 # the barcode's row
+        fold=[
+            "ttb:99140000000165",                  # "Campari", 1999, under Cutty Sark
+            "ttb:99153000000210",                  # "Bitter Campari"
+            "ttb:88070859",                        # "Campari Bitter Bitter"
+            "ttb:90043196",                        # "Campari Aperitivo"
+            "ttb:94101955",                        # "Campari Aperitico"
+            "ttb:79114305",                        # "Italy Campari"
+            "ttb:89031166",                        # "Litter Campari"
+        ],
+        rename="Campari",                          # the whole of the name on the bottle
+        rebrand="brand:ttb-cola-registry:campari",
+        producer="prod:bcd:campari",
+        brand="brand:ttb-cola-registry:campari",
+        aliases=["Campari Bitter", "Bitter Campari", "Campari Aperitivo"],
+    ),
+    Cluster(
         what="Modelo Negra -- filed as Negra Modelo, Negra Modelo Ale, Negra Modelo Draft (Dark "
              "Ale), and twice as Modelo Negra",
         canon="ttb:26131001000584",                # 2026, Crown Imports, the current label order
@@ -132,6 +171,16 @@ GOSLINGS = Producer(
     city="Hamilton", aliases=["Gosling's", "Gosling Brothers Ltd."],
     website="https://www.goslingsrum.com",
 ).model_dump(mode="json")
+
+# The Milanese house, as its label prints it under the wordmark: DAVIDE CAMPARI MILANO. OFF
+# holds it three ways ("Campari", "Davide campari", "DCM S.p.A."), none with a product.
+CAMPARI_HOUSE = Producer(
+    id="prod:bcd:campari", name="Davide Campari-Milano", kind="distillery", country="Italy",
+    city="Milan", aliases=["Davide Campari Milano", "Campari Group", "DCM S.p.A."],
+    website="https://www.campari.com",
+).model_dump(mode="json")
+
+NEW_PRODUCERS = [GOSLINGS, CAMPARI_HOUSE]
 
 # Miller's Milwaukee brewery, permit BR-WI-MIL-1, named "Redd's" by the permit-naming pass
 # after one of its labels. OpenBreweryDB knows the building; folding that row in gives the
@@ -195,24 +244,34 @@ def plan(store) -> Plan:
             out.say(f"   producer -> {c.producer} "
                     f"({'exists' if store.get_gold(c.producer) else 'to be created'})"
                     f"{', brand ' + c.brand + ' repointed too' if c.brand else ''}")
-        out.touched.update([c.canon, *c.fold, *(x for x in (c.brand,) if x)])
+        if c.rebrand and canon.get("brand_id") != c.rebrand:
+            out.say(f"   brand {canon.get('brand_id')} -> {c.rebrand} "
+                    f"({_name(store, c.rebrand)!r})")
+        if c.aliases is not None:
+            out.say(f"   aliases -> {c.aliases}")
+        out.touched.update([c.canon, *c.fold, *(x for x in (c.brand, c.rebrand) if x)])
     miller = store.get_gold(MILLER)
     out.say(f"\n== producer {MILLER}: {(miller or {}).get('name')!r} -> {MILLER_NAME!r}; fold "
             + ", ".join(f"{_name(store, f)!r}" for f in MILLER_FOLD))
-    out.touched.update([MILLER, *MILLER_FOLD, GOSLINGS["id"]])
+    out.touched.update([MILLER, *MILLER_FOLD, *(p["id"] for p in NEW_PRODUCERS)])
     return out
 
 
 def apply(store, touched: set[str]) -> None:
-    if not BACKUP.exists():                         # the first run's picture is the one to keep
-        backup = {i: store.get_gold(i) for i in sorted(touched)}
+    # The first picture of every row is the one to keep: a row already in the backup stays
+    # as it was before anything touched it, and a row a later cluster brings in is added.
+    backup = json.loads(BACKUP.read_text()) if BACKUP.exists() else {}
+    fresh = {i: store.get_gold(i) for i in sorted(touched) if i not in backup}
+    if fresh:
+        backup.update(fresh)
         BACKUP.write_text(json.dumps(backup, indent=1, ensure_ascii=False))
-        print(f"\nbackup -> {BACKUP}")
+        print(f"\nbackup ({len(fresh)} rows added) -> {BACKUP}")
 
     # Producers first, so the products land under the right names.
-    if store.get_gold(GOSLINGS["id"]) is None:
-        store.put_gold(GOSLINGS["id"], "producer", dict(GOSLINGS))
-        print(f"created producer {GOSLINGS['id']} {GOSLINGS['name']!r}")
+    for house in NEW_PRODUCERS:
+        if store.get_gold(house["id"]) is None:
+            store.put_gold(house["id"], "producer", dict(house))
+            print(f"created producer {house['id']} {house['name']!r}")
     miller = store.get_gold(MILLER)
     if miller is not None and miller.get("name") != MILLER_NAME:
         miller["aliases"] = _with_alias(miller, miller.get("name"))
@@ -240,6 +299,11 @@ def apply(store, touched: set[str]) -> None:
             canon["producer_id"] = c.producer
             store.put_gold(c.canon, "product", canon)
             print(f"repointed {c.canon} -> producer {c.producer}")
+        if c.rebrand and canon.get("brand_id") != c.rebrand and store.get_gold(c.rebrand):
+            canon["brand_id"] = c.rebrand
+            store.put_gold(c.canon, "product", canon)
+            renamed.append(c.canon)                 # the qualified name changes with the brand
+            print(f"rebranded {c.canon} -> {c.rebrand}")
         if c.producer and c.brand:
             brand = store.get_gold(c.brand)
             if brand is not None and brand.get("producer_id") != c.producer:
@@ -252,10 +316,16 @@ def apply(store, touched: set[str]) -> None:
             t = time.time()
             print(f"merge_products ({c.what.split(' -- ')[0]}):",
                   merge_products(store, pairs), f"({time.time() - t:.0f}s)")
+        if c.aliases is not None:
+            canon = store.get_gold(c.canon)
+            if canon is not None and sorted(canon.get("aliases") or []) != sorted(c.aliases):
+                canon["aliases"] = sorted(c.aliases)
+                store.put_gold(c.canon, "product", canon)
+                print(f"aliases {c.canon} -> {canon['aliases']}")
     if renamed:
         # `put_gold` leaves the match column alone; a renamed row would go on matching under
         # its old name.
-        print("search names refreshed:", store.refresh_search_names(ids=renamed))
+        print("search names refreshed:", store.refresh_search_names(ids=sorted(set(renamed))))
 
 
 def report(store) -> None:
