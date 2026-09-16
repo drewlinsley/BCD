@@ -207,3 +207,71 @@ def test_index_is_cached_and_invalidated_by_the_catalog(store, index):
     rebuilt = LabelIndex.for_store(store, path)
     assert "p:new" in rebuilt.ids
     assert LabelIndex.load(path, LabelIndex.signature_of(store)) is not None
+
+
+# --- what the lines name between them ------------------------------------------------
+
+
+def _goslings_shelf() -> MedallionStore:
+    """The catalog as it stood around a bottle of Gosling's Black Seal on 2026-09-15: the
+    rum filed once under its own brand, beside a 1984 gin called `Black Seal`, two other
+    Bermuda rums, a stout, the brand row, a row named `1806`, and every shorter Goslings."""
+    s = MedallionStore(root=tempfile.mkdtemp())
+
+    def producer(pid: str, name: str) -> None:
+        s.put_gold(pid, "producer", Producer(id=pid, name=name).model_dump(mode="json"))
+
+    def product(pid: str, name: str, producer_id: str, brand: str, category=Category.SPIRIT) -> None:
+        bid = f"brand:{pid}"
+        s.put_gold(bid, "brand", Brand(id=bid, producer_id=producer_id, name=brand).model_dump(mode="json"))
+        s.put_gold(pid, "product", Product(id=pid, name=name, producer_id=producer_id, brand_id=bid,
+                                           category=category).model_dump(mode="json"))
+
+    producer("prod:gos", "Goslings")
+    producer("prod:winters", "Winters")
+    producer("prod:other", "Bermuda Brand")
+    producer("prod:abbey", "Abbey Ale")
+    product("p:black", "Goslings Black Seal", "prod:gos", "Goslings Black Seal")
+    product("p:gin", "Black Seal", "prod:winters", "Black Seal")
+    product("p:brand", "Bermuda Brand Black Rum", "prod:other", "Bermuda Brand")
+    product("p:stout", "Black Seal Stout", "prod:abbey", "Black Seal Stout", Category.BEER)
+    product("p:bgold", "Bermuda Gold", "prod:other", "Bermuda Gold")
+    product("p:gos", "Goslings", "prod:gos", "Goslings")
+    product("p:1806", "1806", "prod:other", "1806")
+    product("p:gold", "Goslings Gold Seal", "prod:gos", "Goslings Gold Seal")
+    product("p:papa", "Goslings Papa Seal", "prod:gos", "Goslings Papa Seal")
+    product("p:light", "Goslings Light Rum", "prod:gos", "Goslings Light Rum")
+    return s
+
+
+GOSLINGS_LINES = ["BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM", "Goslings\nSince 1806"]
+
+
+def test_a_name_printed_across_two_lines_is_found_by_the_frame():
+    """Per line, `Goslings Black Seal` is behind a gin, a stout and two other Bermuda rums on
+    the first line and behind the brand row, `1806` and every shorter Goslings on the second;
+    a top three per line never holds it. Against the frame's tokens together it is first,
+    reported with the line it reads best on and that line's score."""
+    index = LabelIndex.build(_goslings_shelf())
+    per_line = [[pid for pid, _ in index.match_products(t, limit=3)] for t in GOSLINGS_LINES]
+    assert all("p:black" not in ids for ids in per_line), per_line
+    (pid, at, sim), *_ = index.match_frame(GOSLINGS_LINES, limit=8)
+    assert pid == "p:black" and at == 0 and 0.5 <= sim < 1.0
+
+
+def test_the_frame_names_the_rum_and_only_the_rum():
+    """End to end on the index: the frame path finds the rum between its two lines, `Goslings
+    Gold Seal` (GOLD read nowhere) is shadowed by it, and the gin called `Black Seal`, which
+    the first line prints whole, gives way to the row that also explains GOSLINGS."""
+    store = _goslings_shelf()
+    resp = Resolver(IndexedStore(store, LabelIndex.build(store))).resolve(
+        ScanResolveRequest(detections=[DetectedText(text=t) for t in GOSLINGS_LINES]))
+    assert resp.corroborated
+    assert [c.resolved.product.id for c in resp.candidates] == ["p:black"], (
+        [c.resolved.product.name for c in resp.candidates])
+    # ...and a frame-level candidate is held to every word: the two lines alone do not
+    # surface `Goslings Gold Seal` or `Bermuda Brand Black Rum` as proven.
+    obj = DetectedObject(id="o", texts=GOSLINGS_LINES)
+    verdict = Resolver(IndexedStore(store, LabelIndex.build(store))).resolve(
+        ScanResolveRequest(objects=[obj])).objects[0]
+    assert verdict.status == "resolved" and verdict.candidates[0].resolved.product.id == "p:black"

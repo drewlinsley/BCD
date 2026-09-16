@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -276,7 +276,7 @@ class MedallionStore:
         local file."""
         return [self.match_products(t, limit) for t in texts]
 
-    def refresh_search_names(self) -> int:
+    def refresh_search_names(self, ids: Iterable[str] | None = None) -> int:
         """No-op: this store builds the brand-qualified name per query rather than storing
         it, so there is nothing to backfill. Present so callers need not know which store
         they hold."""
@@ -322,7 +322,7 @@ class Store(Protocol):
                             limit: int = 3) -> list[list[tuple[dict, float]]]: ...
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
     def products_of(self, producer_id: str, limit: int = 8) -> list[dict]: ...
-    def refresh_search_names(self) -> int: ...
+    def refresh_search_names(self, ids: Iterable[str] | None = None) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 

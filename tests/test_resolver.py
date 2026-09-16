@@ -17,6 +17,7 @@ from bcd_api.resolver import (
     _reads_the_name,
     _token_supported,
     _tokens,
+    _unread,
     _upc_variants,
 )
 from bcd_ingest.store import MedallionStore
@@ -1754,3 +1755,109 @@ def test_the_ingredient_line_identifies_nothing():
     assert "titanium" in ident
     assert _frame_support(ident, [["colors", "flavors", "from", "artificia", "our"],
                                   ["ho", "color", "ca", "hung", "hom"]]) == 0
+
+
+def test_a_row_whose_brand_is_its_whole_label_needs_every_word_read():
+    """164,000 rows are filed with no fanciful name, so their brand is their whole label and
+    nothing sets the beer's words apart from the brewery's. LONG on one line and LIVE on
+    another proved `Long Live Local Honey Brown Lager`, a Pennsylvania beer, off a Long Live
+    Beerworks can -- and GOSLINGS beside BLACK SEAL proved `Goslings Gold Seal`. Two lines
+    make such a row's case only when every word of it was read."""
+    gold = {"pr:hbc": _producer("pr:hbc", "Hit By Car"),
+            "b:honey": _brand("b:honey", "Long Live Local Honey Brown Lager", "pr:hbc"),
+            "pr:gos": _producer("pr:gos", "Goslings"),
+            "b:gold": _brand("b:gold", "Goslings Gold Seal", "pr:gos"),
+            "b:black": _brand("b:black", "Goslings Black Seal", "pr:gos")}
+    honey = _prod_branded("Long Live Local Honey Brown Lager", "p:honey", "pr:hbc", "b:honey")
+    gold_seal = _prod_branded("Goslings Gold Seal", "p:gold", "pr:gos", "b:gold")
+    black_seal = _prod_branded("Goslings Black Seal", "p:black", "pr:gos", "b:black")
+    frame = {"JONG LIVE": [(honey, 0.58)], "Goslings\nSince 1806": [(gold_seal, 0.6), (black_seal, 0.6)]}
+    r = Resolver(_FrameStore(frame, gold))
+    resp = r.resolve(_frame("LIVE", "Long fires", "JONG LIVE", "WIDESCREEN"))
+    assert not resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+    resp = r.resolve(_frame("BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM", "Goslings\nSince 1806"))
+    assert resp.corroborated
+    assert [c.resolved.product.id for c in resp.candidates] == ["p:black"], (
+        f"drew {[c.resolved.product.name for c in resp.candidates]}")
+    # ...and the case it must not touch: the flagship whose every word the can prints.
+    miller = _prod_branded("Miller High Life", "p:mhl", "pr:mhl", "b:mhl")
+    gold.update({"pr:mhl": _producer("pr:mhl", "Miller High Life"),
+                 "b:mhl": _brand("b:mhl", "Miller High Life", "pr:mhl")})
+    resp = Resolver(_FrameStore({"Miller": [(miller, 0.5)], "HIGH LIFE": [(miller, 0.6)]}, gold)).resolve(
+        _frame("Miller", "HIGH LIFE", "RIDGE FARM\n1937"))
+    assert resp.corroborated and resp.candidates[0].resolved.product.id == "p:mhl"
+
+
+class _FrameMatchStore(_FrameStore):
+    """A store that also answers `match_frame`: what the lines name between them."""
+
+    def __init__(self, by_text, gold=None, by_frame=None):
+        super().__init__(by_text, gold)
+        self._by_frame = by_frame or []       # [(product_rec, line index, that line's score)]
+
+    def match_frame(self, lines, limit=8):
+        return self._by_frame[:limit]
+
+
+def test_a_candidate_the_frame_names_between_its_lines_is_held_to_every_word():
+    """`Goslings Black Seal` reaches the frame through `match_frame` on the BLACK SEAL line
+    at 0.55 and is proven by GOSLINGS on the other; a frame-level hit with a word the frame
+    never read -- `Taft's Paint The Town Hoppy` off TOWN and HOPPY -- is not a candidate at
+    all, whatever the two lines agree on."""
+    gos = _producer("pr:gos", "Goslings")
+    rum = _prod_of("Goslings Black Seal", "p:black", "pr:gos")
+    taft = _prod_of("Taft's Paint The Town Hoppy Double IPA", "p:taft", "pr:taft")
+    gold = {"pr:gos": gos, "pr:taft": _producer("pr:taft", "Taft's Brewing Company")}
+    lines = ["BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM", "Goslings\nSince 1806"]
+    store = _FrameMatchStore({}, gold, by_frame=[(rum, 0, 0.55)])
+    resp = Resolver(store).resolve(_frame(*lines))
+    assert resp.corroborated and [c.resolved.product.id for c in resp.candidates] == ["p:black"]
+    lines = ["HOPPY\nIPA\n6.5%", "• BE HOPPY", "TOWN"]
+    store = _FrameMatchStore({}, gold, by_frame=[(taft, 2, 0.6)])
+    resp = Resolver(store).resolve(_frame(*lines))
+    assert not resp.corroborated, f"drew {[c.resolved.product.name for c in resp.candidates]}"
+
+
+_PROV = Provenance(source_id="ttb", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
+
+
+def test_a_row_of_another_kind_than_the_label_names_is_not_a_candidate():
+    """"BLACK SEAL / 80 PROOF / BERMUDA BLACK RUM" prints the whole name of a 1984 London dry
+    gin called `Black Seal`, and that proved it on every frame of a bottle of Gosling's. The
+    label said RUM. A can that says nothing about its kind, and a row with no class, are
+    unknown, not wrong."""
+    gin = Product(id="p:gin", brand_id="b", producer_id="pr:w", category=Category.SPIRIT,
+                  name="Black Seal", style=Sourced[str](value="London Dry Gin", provenance=_PROV)
+                  ).model_dump(mode="json")
+    rum = Product(id="p:rum", brand_id="b", producer_id="pr:g", category=Category.SPIRIT,
+                  name="Goslings Black Seal",
+                  style=Sourced[str](value="Other Rum Gold Usb", provenance=_PROV)).model_dump(mode="json")
+    gold = {"pr:w": _producer("pr:w", "Winters"), "pr:g": _producer("pr:g", "Goslings")}
+    line = "BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM"
+    r = Resolver(_FrameStore({line: [(gin, 1.0), (rum, 0.55)]}, gold))
+    resp = r.resolve(_frame(line, "Goslings\nSince 1806"))
+    assert [c.resolved.product.id for c in resp.candidates] == ["p:rum"], (
+        [c.resolved.product.name for c in resp.candidates])
+    # The same gin off a label that names no kind is still the whole label.
+    resp = Resolver(_FrameStore({"BLACK SEAL": [(gin, 1.0)]}, gold)).resolve(_frame("BLACK SEAL", "80 PROOF"))
+    assert resp.corroborated and resp.candidates[0].resolved.product.id == "p:gin"
+    # ...and across categories the label's word is a slogan or a garble as often as a fact:
+    # "The Champagne of Beers" does not make a Miller can a wine.
+    miller = Product(id="p:mhl", brand_id="b", producer_id="pr:m", category=Category.BEER,
+                     name="Miller High Life", style=Sourced[str](value="Lager", provenance=_PROV)
+                     ).model_dump(mode="json")
+    gold["pr:m"] = _producer("pr:m", "Miller Brewing Company")
+    line = "BREWING COMPANY MIL\nPREMIUM\nMiller.\nBREWED\nHIGH LIFE\nEST 1903\nThe Champagne of Bett"
+    resp = Resolver(_FrameStore({line: [(miller, 0.5)]}, gold)).resolve(_frame(line, "RIDGE FARM\n1937"))
+    assert resp.corroborated and resp.candidates[0].resolved.product.id == "p:mhl"
+
+
+def test_a_name_word_with_its_first_letters_lost_is_still_read():
+    """TOPPLING arrives as PLING and PPLING off the brewery line of a Dino Break can. A
+    candidate the frame names between its lines is held to every word, and the tolerance
+    for that is the recognizer's own failure: letters lost at one end of a word long enough
+    to survive it. GOLD is four letters and unread when the frame read BLACK."""
+    assert _unread(["toppling", "goliath", "dino", "break"], {"ppling", "goliath", "dino", "break"}) == []
+    assert _unread(["toppling"], {"pling"}) == []
+    assert _unread(["goslings", "gold", "seal"], {"goslings", "black", "seal"}) == ["gold"]
+    assert _unread(["taft", "paint", "town", "hoppy"], {"town", "hoppy"}) == ["taft", "paint"]

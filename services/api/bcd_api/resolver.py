@@ -43,6 +43,9 @@ _SHORT_MIN_MATCH = 0.8
 _SHORT_NAME_LEN = 5
 # Cap overlays per frame so a busy shelf can't bury the HUD (the client caps + anchors too).
 _MAX_CANDIDATES = 8
+# Rows the frame's lines name between them (`LabelIndex.match_frame`), on top of each line's
+# own matches.
+_FRAME_CANDIDATES = 8
 
 # Score bands for the overlay's one-line 'why'. Above _STRONG_MATCH we claim a match;
 # below _MILD_MATCH we say so plainly rather than dressing up a miss.
@@ -453,6 +456,48 @@ _CATEGORY_WORDS = {
 }
 
 
+# Finer than the category: what kind of spirit. A label that says RUM has said which of the
+# catalog's spirits it can be, and a row whose registered class is a gin is not one of
+# them -- however whole the line prints that row's name. A 1984 filing for a London dry gin
+# called `Black Seal` was proven by "BLACK SEAL / 80 PROOF / BERMUDA BLACK RUM" on every
+# frame of a bottle of Gosling's, and once the rum's own rows were merged into one it was
+# the only name the object had (2026-09-15). Synonyms are grouped so RHUM and RON are rum.
+#
+# Within the row's own category only. Across categories the label's word is as likely a
+# slogan or a garble as a fact -- "The Champagne of Beers" names a wine on every Miller
+# can, and BEERS arrives as BETT -- and that judgement stays the category rule's, which
+# marks the score down rather than closing the door. A label that says RUM has read the
+# word that matters cleanly, in the fine print, where the recognizer is at its best.
+_KIND_FAMILIES = (
+    ("spirit", {"rum", "rhum", "ron"}), ("spirit", {"gin"}), ("spirit", {"vodka"}),
+    ("spirit", {"whiskey", "whisky", "bourbon", "scotch", "rye"}),
+    ("spirit", {"tequila", "mezcal"}),
+    ("spirit", {"brandy", "cognac", "armagnac", "calvados", "grappa"}),
+    ("spirit", {"liqueur", "liquore", "schnapps", "amaro", "aperitivo", "aperitif", "vermouth",
+                "vermut", "sambuca", "limoncello"}),
+    ("spirit", {"absinthe"}),
+)
+_KIND_OF = {w: i for i, (_, fam) in enumerate(_KIND_FAMILIES) for w in fam}
+
+
+def _kinds(text: str) -> set[int]:
+    """The kinds of drink a piece of text names."""
+    return {_KIND_OF[t] for t in _tokens(text) if t in _KIND_OF}
+
+
+def _kind_contradicts(resolved: ResolvedProduct, frame_kinds: set[int]) -> bool:
+    """Whether the label named what is in the bottle, in the row's own category, and the
+    row is something else. Silence on either side is not a contradiction: a filing with no
+    class, or a can that prints no kind word, is unknown, not wrong."""
+    p = resolved.product
+    cat = p.category.value if p.category else None
+    said = {k for k in frame_kinds if _KIND_FAMILIES[k][0] == cat}
+    if not said:
+        return False
+    own = _kinds(p.name or "") | _kinds(p.style.value if p.style else "")
+    return bool(own) and not (own & said)
+
+
 def _category_hint(detections) -> str | None:
     """The category the label's own fine print names, or None if it says nothing or disagrees.
 
@@ -492,22 +537,62 @@ def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
     return list(seen)
 
 
-def _own_vocabulary(resolved: ResolvedProduct) -> list[str]:
+def _own_vocabulary(resolved: ResolvedProduct) -> tuple[list[str], bool]:
     """The identifying words of a product's name that are not its maker's -- what tells it
-    from its siblings. A name that is nothing but the maker's (`Miller High Life`, by Miller
-    High Life) is its own: the flagship is named for the house, and its words are the words
-    that name it."""
+    from its siblings -- and whether it has any.
+
+    A name that is nothing but the maker's (`Miller High Life`, by Miller High Life) is its
+    own: the flagship is named for the house, and its words are the words that name it. The
+    catalog also holds 164,000 rows whose brand is their whole label -- a filing with no
+    fanciful name -- and for those the same fallback says every word is the beer's own, when
+    most are the brewery's. Callers get the flag so they can hold that case to the whole
+    name (`_reads_every_word`) rather than to any word of it."""
     makers = set()
     for part in _maker_names(resolved):
         makers.update(_identifying_tokens(part))
     named = _identifying_tokens(resolved.product.name or "")
-    own = [t for t in named if t not in makers] or named
+    own = [t for t in named if t not in makers]
+    flagship = not own
+    if flagship:
+        own = list(named)
     # The other names a merge left on the row are the label's words too ("Bombay Sapphire
     # Vapour Infused London Dry Gin" beside a row named without them) -- more of the
     # bottle's own vocabulary, never a substitute for it.
     for alias in resolved.product.aliases or []:
         own += [t for t in _identifying_tokens(alias) if t not in makers and t not in own]
-    return own
+    return own, flagship
+
+
+def _read_as(word: str, read_toks: set[str]) -> bool:
+    """Whether the frame read this word: exactly or nearly, or -- for a word long enough to
+    survive it -- with letters lost at one end, the recognizer's failure on stylized type
+    that `_affix_read` allows a maker's name. TOPPLING arrives as PLING and PPLING off the
+    brewery line of a Dino Break can, and a name held to every word must not lose the beer
+    to the way the can's typeface loses its first letters."""
+    k = _MAKER_HYPOTHESIS_WORD
+    for r in read_toks:
+        if _trigram_sim(word, r) >= _TOKEN_SUPPORT_MIN:
+            return True
+        if len(word) >= k and len(r) >= k and (word[:k] == r[:k] or word[-k:] == r[-k:]):
+            return True
+    return False
+
+
+def _unread(words: list[str], read_toks: set[str]) -> list[str]:
+    """The words the frame did not read."""
+    return [w for w in words if not _read_as(w, read_toks)]
+
+
+def _reads_every_word(name: str, read_toks: set[str]) -> bool:
+    """Whether every identifying word of the name was read somewhere in the frame."""
+    return not _unread(_identifying_tokens(name), read_toks)
+
+
+def _agreeing_lines(vocab: list[str], line_tokens: list[list[str]]) -> frozenset[int]:
+    """Which lines of the frame carry a word of this vocabulary -- the evidence a candidate
+    rests on, by line rather than by count."""
+    return frozenset(i for i, toks in enumerate(line_tokens)
+                     if any(_trigram_sim(v, t) >= _TOKEN_SUPPORT_MIN for v in vocab for t in toks))
 
 
 def _is_business_name(resolved: ResolvedProduct) -> bool:
@@ -1269,6 +1354,7 @@ class Resolver:
         independent = _independent_lines(line_tokens)
         identity_lines = sum(1 for d in detections if _is_identity_text(d.text))
         hint = _category_hint(detections)
+        frame_kinds = {k for d in detections for k in _kinds(d.text)}
 
         # ---- pass 1: every candidate any line supports, not just that line's best ----
         # Keeping only the top hit per line is what let chrome crowd out the beer: the real
@@ -1313,6 +1399,39 @@ class Resolver:
                     continue
                 # A very short name additionally has to have been read, not just contained.
                 if too_short and not _short_name_supported(det.text, name):
+                    continue
+                hits.append((i, rec, sc))
+                resolved_lines.add(i)
+        # ...and for what the lines name between them. A name printed across two lines is
+        # on neither: `Goslings Black Seal` was fifth against BLACK SEAL 80 PROOF BERMUDA
+        # BLACK RUM and sixth against "Goslings / Since 1806", and never a candidate; the
+        # two-word filing of the same rum was, and once it was merged away the bottle drew
+        # a gin called `Black Seal` (2026-09-15). The index ranks rows by the frame's
+        # tokens together and hands each back with the line it reads best on, and that hit
+        # is held to the same guards as any other.
+        #
+        # And to one more: every identifying word of the name read, somewhere in the frame.
+        # A line's own match may carry an unread word, because one garbled line can still
+        # prove a name; a candidate that exists only because the frame's words *together*
+        # name it has no such excuse. Without this the wider net drew `Taft's Paint The Town
+        # Hoppy` off a Wormtown can (TOWN and HOPPY read, TAFT'S nowhere), `Aslin Beer Co
+        # This Shake Is Bananas` off two fragments, and a milkshake IPA off the words MILK
+        # and VANILLA on a Miller can.
+        match_frame = getattr(self.store, "match_frame", None)
+        if match_frame is not None and to_match:
+            read = {t for i in to_match for t in line_tokens[i]}
+            for rec, j, sc in match_frame([detections[i].text for i in to_match],
+                                          limit=_FRAME_CANDIDATES):
+                i = to_match[j]
+                name = self._qualified_name(rec)
+                too_short = len(name) < _SHORT_NAME_LEN
+                low_info = too_short or not _identifying_tokens(name)
+                floor = _SHORT_MIN_MATCH if low_info else _MIN_MATCH
+                if sc < floor or not _token_supported(detections[i].text, name):
+                    continue
+                if too_short and not _short_name_supported(detections[i].text, name):
+                    continue
+                if _unread(_identifying_tokens(name), read):
                     continue
                 hits.append((i, rec, sc))
                 resolved_lines.add(i)
@@ -1395,12 +1514,14 @@ class Resolver:
             # `Black Sea` once "sea" is too short to count) is not helped by it.
             return _reads_the_name(qualified, detections[line_i].text)
 
+        read_toks = {t for toks in line_tokens for t in toks}
         scored: list[tuple[int, ScoredCandidate]] = []
         named_by_id: dict[str, int] = {}
         whole_label: dict[str, bool] = {}
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
-            if resolved is None or _is_business_name(resolved):
+            if (resolved is None or _is_business_name(resolved)
+                    or _kind_contradicts(resolved, frame_kinds)):
                 continue
             cat = resolved.product.category.value if resolved.product.category else None
             vocab = _candidate_vocabulary(resolved)
@@ -1419,8 +1540,19 @@ class Resolver:
             # FANTASMA read nowhere (2026-09-15). Evidence every sibling shares equally is
             # evidence for the maker, and one piece of it: the second line has to read a word
             # that is this beer's and not its siblings'.
-            if named > 1 and not _frame_support(_own_vocabulary(resolved), independent):
-                named = 1
+            if named > 1:
+                own, flagship = _own_vocabulary(resolved)
+                # A row whose brand is its whole label has no maker to set its words apart
+                # from, so any two of them agreeing would do -- and LONG and LIVE, the
+                # brewery's name read on two lines, proved `Long Live Local Honey Brown
+                # Lager`, a Pennsylvania beer that happens to start with the same two words,
+                # LOCAL and HONEY read nowhere. Two lines make such a row's case only when,
+                # between them and the rest of the frame, every word of it was read: that is
+                # what MILLER beside HIGH LIFE has, and what GOSLINGS beside BLACK SEAL has
+                # for `Goslings Black Seal` and not for `Goslings Gold Seal`.
+                whole = not flagship or _reads_every_word(resolved.product.name or "", read_toks)
+                if not whole or not _frame_support(own, independent):
+                    named = 1
             named_by_id[resolved.product.id] = named
             # Report a score the frame actually justifies. One line naming a candidate while
             # several others sit there disagreeing is weaker evidence than the same number in
@@ -1467,7 +1599,6 @@ class Resolver:
         # comparison a tie at 1.00 cannot make. On a tie the richer record (has ABV / sensory)
         # represents it, so the surviving overlay carries the most complete data — and that
         # also picks the better-linked of two duplicate rows.
-        read_toks = {t for toks in line_tokens for t in toks}
 
         def _is_proven(c: ScoredCandidate) -> bool:
             # A barcode is an identifier, not a reading of one. Nothing in the frame needs to
@@ -1556,6 +1687,28 @@ class Resolver:
         for entry in ranked:
             per_line.setdefault(entry[1].detection_index, entry)
         ranked = sorted(per_line.values(), key=_rank, reverse=True)[:_MAX_CANDIDATES]
+        # One label, one product. Two proven candidates resting on the same lines are two
+        # readings of one label, and a sibling whose name has a word the frame never read is
+        # the worse one: GOSLINGS beside BLACK SEAL proved `Goslings Gold Seal` as surely as
+        # it proved the Black Seal (2026-09-15), and INFUSED beside BOMBAY proved `East
+        # Vapour Infused` on a bottle that printed EAST nowhere. The candidate whose every
+        # identifying word was read speaks for those lines; one that needs a word the frame
+        # did not read -- any word, GOLD is a colour to the category list and still the word
+        # that tells the two seals apart -- is shadowed by it. On a shelf holding both
+        # bottles the word is read, and nothing is shadowed.
+        lines_of = {c.resolved.product.id: _agreeing_lines(_candidate_vocabulary(c.resolved),
+                                                           line_tokens) for _, c in ranked}
+        whole = [c for _, c in ranked if _is_proven(c) and lines_of[c.resolved.product.id]
+                 and not _unread(_identifying_tokens(c.resolved.product.name or ""), read_toks)]
+        shadowed = {
+            c.resolved.product.id for _, c in ranked if _is_proven(c)
+            and _unread([w for w in _name_words(c.resolved.product.name or "")
+                         if len(w) >= _MIN_SIGHTING_TOKEN], read_toks)
+            and any(a.resolved.product.id != c.resolved.product.id
+                    and lines_of[c.resolved.product.id] <= lines_of[a.resolved.product.id]
+                    for a in whole)
+        }
+        ranked = [entry for entry in ranked if entry[1].resolved.product.id not in shadowed]
         proven = [c for _, c in ranked if _is_proven(c)]
         return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved)
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -359,16 +359,24 @@ class PostgresStore:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def refresh_search_names(self) -> int:
+    def refresh_search_names(self, ids: Iterable[str] | None = None) -> int:
         """Denormalise the brand-qualified name onto every product, for matching only.
 
         The rule lives in `dedup.search_name` so this store and the dev store agree; see
         it for why a brand is sometimes withheld. Idempotent — run after any promote.
+
+        `ids` limits the pass to those products: `put_gold` does not touch `search_name`,
+        so a row renamed by hand keeps matching under its old name until this runs, and a
+        rename of two rows should not cost a walk of 534k.
         """
-        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")}
+        products = ([p for p in (self.get_gold(i) for i in ids) if p]
+                    if ids is not None else list(self.iter_gold("product")))
+        wanted = {p.get("brand_id") for p in products} if ids is not None else None
+        brands = {b["id"]: b.get("name") or "" for b in self.iter_gold("brand")
+                  if wanted is None or b["id"] in wanted}
         rows = [
             (search_name(p.get("name") or "", brands.get(p.get("brand_id") or "")), p["id"])
-            for p in self.iter_gold("product")
+            for p in products
         ]
         with self._lock, self._conn.cursor() as cur:
             cur.executemany("UPDATE gold SET search_name=%s WHERE id=%s", rows)
