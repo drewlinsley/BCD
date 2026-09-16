@@ -1007,6 +1007,141 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
     }
 }
 
+@Suite struct AChipStaysWhereItAppeared {
+    /// Reported from the camera as "the HUD text box jumps all over the place when it pops
+    /// up" (2026-09-15): the overlay re-anchors to whichever line named the product this
+    /// tick, and a label's lines are a few percent of the screen apart.
+    @MainActor
+    @Test func theSameProductNamedOffANearbyLineDoesNotMove() async throws {
+        let engine = ManualScanEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        let first = coord.overlays.first
+        #expect(first?.candidate.resolved.product.name == "Heady Topper")
+        #expect(first?.x == 0.45 && first?.y == 0.35)
+
+        // the next tick reads the same label a little lower, with the maker's line under it
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.37, w: 0.5, h: 0.1),
+                     DetectedText(text: "THE ALCHEMIST", kind: "text",
+                                  x: 0.2, y: 0.5, w: 0.5, h: 0.06)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(api.resolveCallCount == 2, "a different frame, so the catalog was asked again")
+        let second = coord.overlays.first
+        #expect(second?.candidate.resolved.product.name == "Heady Topper")
+        #expect(second?.x == 0.45 && second?.y == 0.35, "the chip stays where it first appeared")
+    }
+
+    @MainActor
+    @Test func aChipFollowsTheBottleWhenTheCameraPans() async throws {
+        let engine = ManualScanEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.y == 0.35)
+
+        // the can is now at the bottom of the screen, well past the dead zone
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.7, w: 0.5, h: 0.1),
+                     DetectedText(text: "ALE", kind: "text", x: 0.2, y: 0.85, w: 0.2, h: 0.05)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        let y = coord.overlays.first?.y ?? 0
+        #expect(y > 0.4 && y <= 0.75, "it moves toward the bottle rather than jumping onto it")
+    }
+}
+
+@Suite struct TheHUDClearsWhenTheCameraMovesOn {
+    /// The hold window keeps an earned answer up through garbled ticks so it can be tapped,
+    /// and through empty frames so lowering the phone does not wipe it. It was also keeping
+    /// it up for ten seconds over the *next* shelf -- reported as "it lingers too long"
+    /// (2026-09-15). A frame that shares nothing with the scene the answer came from, twice
+    /// running, is the camera having moved on.
+    @MainActor
+    @Test func aShelfThatSharesNoWordsWithTheAnswerClearsIt() async throws {
+        let engine = ManualScanEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1)
+
+        // panned to a shelf of gin the catalog does not know; one such frame is not enough
+        engine.push([DetectedText(text: "BOMBAY SAPPHIRE", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1, "one strange frame is glare or a hand; the answer holds")
+
+        engine.push([DetectedText(text: "BOMBAY SAPPHIRE", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1),
+                     DetectedText(text: "LONDON DRY GIN", kind: "text",
+                                  x: 0.2, y: 0.45, w: 0.5, h: 0.08)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.isEmpty, "two frames of another shelf, and the old answer is gone")
+    }
+
+    @MainActor
+    @Test func theSameLabelReadWorseIsNotANewShelf() async throws {
+        // A stylized can garbles differently every tick; while any word of it still reads
+        // like the scene the answer came from, the answer stays.
+        let engine = ManualScanEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1)
+
+        for garble in ["HEADY TOPPE", "FADY TOPPER", "HEAOY TOPPR"] {
+            engine.push([DetectedText(text: garble, kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+            try await Task.sleep(nanoseconds: 60_000_000)
+            await coord.resolveLatest()
+            #expect(coord.overlays.count == 1, "\(garble) is the same can, read worse")
+        }
+    }
+
+    @MainActor
+    @Test func anEmptyFrameStillHoldsTheAnswer() async throws {
+        // Lowering the phone to tap empties the frame; that is not a new shelf.
+        let engine = ManualScanEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        coord.start()
+
+        engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                  x: 0.2, y: 0.3, w: 0.5, h: 0.1)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        for _ in 0..<3 {
+            engine.push([])
+            try await Task.sleep(nanoseconds: 60_000_000)
+            await coord.resolveLatest()
+        }
+        #expect(coord.overlays.count == 1)
+    }
+}
+
 @Suite struct ABarcodeFrameIsResolvedOnTheBarcodeAlone {
     @MainActor
     @Test func theFinePrintBesideACodeIsNotSent() {

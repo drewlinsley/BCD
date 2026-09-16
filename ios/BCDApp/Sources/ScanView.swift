@@ -30,6 +30,10 @@ struct ScanView: View {
                                     .reaction(for: overlay.candidate.resolved.product.id))
                         .position(x: anchor.x * geo.size.width,
                                   y: anchor.y * geo.size.height)
+                        // A chip stays put while its label jitters (the coordinator pins it)
+                        // and glides when the camera pans; the glide is animated so the
+                        // rare move reads as following the bottle, not as a new chip.
+                        .animation(.easeOut(duration: 0.25), value: anchor)
                         // Overlays arrive best-first and SwiftUI draws later views on top, so
                         // the best match was landing *underneath* every weaker one anchored
                         // near it. Reported from the camera as a green box briefly visible but
