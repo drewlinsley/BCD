@@ -125,6 +125,15 @@ public final class ObjectTracker {
         public var boxSmoothing = 0.5
         /// Frames to wait after a query before new text may trigger another.
         public var requeryCooldown = 6
+        /// Frames a text line may go unseen -- while the object itself is still being seen --
+        /// before it is forgotten. A track follows a region of the screen, and across a pan
+        /// of a shelf one track gathered the wordmark of every bottle that passed through
+        /// it: CAMPARI, then RAMAZZOTTI, then BLACK SEAL, and stayed settled on the first
+        /// over the third (2026-09-16). A line the camera has stopped reading on an object
+        /// it can still see was never this object's; once it is gone the evidence has
+        /// changed and the object is asked about again. Frames arrive on every change the
+        /// recognizer reports, so during a pan this is about a second.
+        public var textDecay = 20
         public init() {}
     }
 
@@ -139,6 +148,7 @@ public final class ObjectTracker {
         public internal(set) var confidence: Double?
         public internal(set) var textCounts: [String: Int] = [:]     // normalized -> frames
         public internal(set) var textOriginal: [String: String] = [:] // normalized -> as read
+        public internal(set) var textLastSeen: [String: Int] = [:]    // normalized -> frame no.
         public internal(set) var pinnedTexts: Set<String> = []        // fine-reader results
         public internal(set) var barcode: String?
         public internal(set) var symbology: String?
@@ -231,6 +241,7 @@ public final class ObjectTracker {
             guard !key.isEmpty else { continue }
             tracks[i].textCounts[key, default: 0] += 1
             tracks[i].textOriginal[key] = tracks[i].textOriginal[key] ?? raw
+            tracks[i].textLastSeen[key] = frameCount
             tracks[i].pinnedTexts.insert(key)
             tracks[i].pinnedSinceQuery = true
         }
@@ -347,6 +358,18 @@ public final class ObjectTracker {
             guard !key.isEmpty else { continue }
             t.textCounts[key, default: 0] += 1
             t.textOriginal[key] = t.textOriginal[key] ?? d.text
+            t.textLastSeen[key] = frameCount
+        }
+        // Lines the camera has stopped reading on this object leave its bag (see `textDecay`).
+        // Pinned lines are the fine reader's, read once by design, and stay.
+        let stale = t.textCounts.keys.filter { key in
+            !t.pinnedTexts.contains(key)
+                && frameCount - (t.textLastSeen[key] ?? frameCount) > config.textDecay
+        }
+        for key in stale {
+            t.textCounts[key] = nil
+            t.textOriginal[key] = nil
+            t.textLastSeen[key] = nil
         }
     }
 }
