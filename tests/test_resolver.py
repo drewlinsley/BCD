@@ -2140,6 +2140,20 @@ def test_an_object_holding_a_proven_line_inherits_the_frames_proof():
     assert {c.resolved.product.name for c in resp.candidates} == {"Goslings Black Seal"}
 
 
+def test_a_possessive_is_one_word_however_the_label_reads_it():
+    """The catalog says "Tito's", the label prints TITO'S, and the recognizer reads TITOS as
+    often as TITO'S. Split at the apostrophe, the catalog's word was "tito", which TITOS is
+    not a read of; the bottle stopped proving itself the moment its rows were merged into
+    one spelt with the apostrophe (2026-09-17)."""
+    assert _tokens("Tito's Handmade Vodka") == ["titos", "handmade", "vodka"]
+    assert _tokens("TITOS") == _tokens("Títo's.") == _tokens("Tito’s") == ["titos"]
+    gold = {"pr:fg": _producer("pr:fg", "Fifth Generation"), "b:t": _brand("b:t", "Tito's", "pr:fg")}
+    titos = _prod_branded("Tito's Handmade Vodka", "p:titos", "pr:fg", "b:t")
+    frame = {"Handmade\nVODKA": [(titos, 0.6)], "Titos": [(titos, 0.5)]}
+    _, res = _verdict(_FrameStore(frame, gold), ["Titos", "Handmade\nVODKA"])
+    assert res.status == "resolved" and _names(res) == ["Tito's Handmade Vodka"], (res.status, _names(res))
+
+
 def test_an_objects_lines_are_kept_by_what_they_add():
     """The client sends a tracked object's lines most-seen first, and most-seen are the short
     words the recognizer reads the same way every tick: the first twelve lines of a can of

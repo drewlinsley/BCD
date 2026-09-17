@@ -100,9 +100,14 @@ EXACT_WEIGHT, FUZZY_WEIGHT, PREFIX_WEIGHT = 1.0, 0.7, 0.6
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
+_APOSTROPHES = str.maketrans("", "", "'\u2019\u2018`")
+
+
 def _fold(s: str) -> str:
-    """Casefold and strip diacritics, the way dedup and the resolver compare words."""
-    d = unicodedata.normalize("NFKD", s or "")
+    """Casefold, strip diacritics and drop apostrophes, the way the resolver compares
+    words: "Tito's" is the one word TITOS, which is how the label is read as often as not
+    (see `resolver._unapostrophed`)."""
+    d = unicodedata.normalize("NFKD", (s or "").translate(_APOSTROPHES))
     return "".join(c for c in d if not unicodedata.combining(c)).casefold()
 
 
@@ -233,7 +238,7 @@ class LabelIndex:
     """Identifying-token postings over products and producers, plus what a match needs to
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
-    FORMAT = 3      # 2: suffix lookups (`sorted_reversed`); 3: aliases indexed and scored
+    FORMAT = 4      # 2: suffix lookups; 3: aliases indexed and scored; 4: possessives one word
 
     def __init__(self) -> None:
         self.signature: str = ""

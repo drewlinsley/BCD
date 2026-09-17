@@ -91,8 +91,21 @@ def _norm_token(s: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+# A possessive is one word. The catalog says "Tito's", the label prints TITO'S, and the
+# recognizer reads it TITOS as often as TITO'S -- and split at the apostrophe, "tito's" was
+# the token "tito", which TITOS is not a read of (a letter gained). The three OFF rows for
+# the bottle, one of them spelt "Titos", had covered for it; merged into one row spelt with
+# the apostrophe, the bottle stopped proving itself (2026-09-17). Gosling's, Lawson's and
+# every other possessive brand read the same way. Stripped before tokenizing, on both sides.
+_APOSTROPHES = str.maketrans("", "", "'\u2019\u2018`")
+
+
+def _unapostrophed(s: str) -> str:
+    return (s or "").translate(_APOSTROPHES)
+
+
 def _tokens(s: str) -> list[str]:
-    return [_norm_token(t) for t in _TOKEN_RE.findall(s or "")]
+    return [_norm_token(t) for t in _TOKEN_RE.findall(_unapostrophed(s))]
 
 
 # The recognizer picks a script per line by what the letterforms most resemble, and a stylized
@@ -154,7 +167,7 @@ _ACCOUNTS_FOR_LINE = 0.7
 
 
 def _flatten(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+    return re.sub(r"[^a-z0-9]+", " ", _unapostrophed(s).lower()).strip()
 
 
 #: Words and numbers of a name, for asking whether a line prints the name whole. Not `_tokens`:
@@ -173,7 +186,7 @@ def _name_words(name: str) -> list[str]:
     picks it off a shelf, but they are part of the name, and a line that prints the name
     prints them."""
     out = []
-    for w in _NAME_WORD_RE.findall((name or "").lower()):
+    for w in _NAME_WORD_RE.findall(_unapostrophed(name).lower()):
         w = _norm_token(w)
         if w not in _PRODUCER_SUFFIX and w not in out:
             out.append(w)
@@ -204,7 +217,7 @@ def _reads_the_name(name: str, line: str, *, loose: bool = False) -> bool:
     words = _name_words(name)
     if len(words) < _MIN_SELF_PROOF_TOKENS or sum(len(w) for w in words) < _MIN_SELF_PROOF_CHARS:
         return False
-    toks = [_norm_token(w) for w in _NAME_WORD_RE.findall((line or "").lower())]
+    toks = [_norm_token(w) for w in _NAME_WORD_RE.findall(_unapostrophed(line).lower())]
     if len(toks) > _PARAGRAPH_WORDS:
         return False
 
@@ -2097,9 +2110,10 @@ class Resolver:
             # Minute", WHISKEY the two Stranahan's rows, and a brand row from the product
             # beside it. Only a producer's trade suffix is left out -- BREWING COMPANY is on
             # every can and is nobody's.
-            words = {_norm_token(w) for w in _NAME_WORD_RE.findall(" ".join(filter(None, (
-                p.name, c.resolved.brand.name, c.resolved.producer.name,
-                *(p.aliases or [])))).lower())} - _PRODUCER_SUFFIX
+            printed = " ".join(filter(None, (p.name, c.resolved.brand.name,
+                                             c.resolved.producer.name, *(p.aliases or []))))
+            words = {_norm_token(w) for w in _NAME_WORD_RE.findall(_unapostrophed(printed).lower())
+                     } - _PRODUCER_SUFFIX
             explained = sum(1 for r in read_toks if len(r) >= 3
                             and any(_trigram_sim(v, r) >= _TOKEN_SUPPORT_MIN for v in words))
             # Proof first. The one-candidate-per-line collapse below hands each line to its
