@@ -319,3 +319,30 @@ def test_an_exact_word_earns_no_extra_seats():
     index = LabelIndex.build(_campari_shelf())
     acc, reached = index._token_evidence("CAMPAR Davide Carpet", index.product_post, len(index.ids))
     assert len(reached) == 1, "only CAMPAR, the garbled one, gets a group"
+
+
+def test_word_similarity_searches_extents_the_length_of_the_name_plus_slack():
+    """A name of k words is matched by k words of the line plus the stray word or two
+    grouped between them; a longer extent only adds trigrams the name lacks and scores
+    lower. Capping the search there is what makes a forty-word sticker affordable."""
+    line = "BREWING COMPANY MILWAUKEE PREMIUM Miller BREWED HIGH LIFE ESTD 1903 The Champagne of Beers"
+    # the capped search finds the same best extent an exhaustive one does
+    ta = _trigrams_of("Miller High Life")
+    exhaustive = max(_jaccard_of(ta, w) for w in _all_windows(line))
+    assert abs(word_similarity("Miller High Life", line) - exhaustive) < 1e-9
+    assert word_similarity("Miller High Life", line) > 0.5
+
+
+def _trigrams_of(s):
+    from bcd_api.index import _trigrams
+    return _trigrams(s)
+
+
+def _jaccard_of(a, b):
+    from bcd_api.index import _jaccard
+    return _jaccard(a, b)
+
+
+def _all_windows(s):
+    from bcd_api.index import _windows
+    return _windows(s, 0)

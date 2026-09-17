@@ -60,6 +60,7 @@ from bcd_api.app import _load_dotenv  # noqa: E402
 from bcd_ingest.merge import merge_producers, merge_products  # noqa: E402
 from bcd_ingest.store import open_store  # noqa: E402
 from bcd_schema import Producer  # noqa: E402
+from bcd_schema.provenance import ExtractionMethod, Provenance, Sourced  # noqa: E402
 
 
 @dataclass
@@ -74,6 +75,10 @@ class Cluster:
     rebrand: str | None = None         # the survivor's brand row, where the filing's is wrong
     aliases: list[str] | None = None   # the survivor's aliases, set outright after the merge:
                                        # a fold's misspellings are not names a label prints
+    style: str | None = None           # what it is, in words a person would use: TTB files
+                                       # a class code ("Other Rum Gold Usb") and the detail
+                                       # screen printed it. Reported from the camera as
+                                       # "Gosling's should be ID'd as rum" (2026-09-16)
 
 
 CLUSTERS = [
@@ -91,6 +96,7 @@ CLUSTERS = [
         ],
         producer="prod:bcd:goslings",
         brand="brand:ttb-cola-registry:goslings-black-seal",
+        style="Black Rum",
     ),
     Cluster(
         what="Miller High Life -- `High Life` (an importer, 1983), `Miller High Life High Life` "
@@ -114,9 +120,13 @@ CLUSTERS = [
     ),
     Cluster(
         what="Ramazzotti Aperitivo Rosato -- filed again in 2026 as `Ramazzotti Rosato`, under "
-             "another importer",
+             "another importer; both under importers (Knappogue Castle, Absolut) rather than "
+             "the Milanese house the label names",
         canon="ttb:21335001000307",                # what the label prints
         fold=["ttb:26029001000744"],
+        producer="prod:bcd:ramazzotti",
+        brand="brand:ttb-cola-registry:ramazzotti",
+        style="Aperitivo",
     ),
     Cluster(
         what="Campari -- eight filings: `Campari`, `Bitter Campari`, `Campari Bitter Bitter`, "
@@ -138,6 +148,7 @@ CLUSTERS = [
         producer="prod:bcd:campari",
         brand="brand:ttb-cola-registry:campari",
         aliases=["Campari Bitter", "Bitter Campari", "Campari Aperitivo"],
+        style="Bitter Aperitivo",
     ),
     Cluster(
         what="Modelo Negra -- filed as Negra Modelo, Negra Modelo Ale, Negra Modelo Draft (Dark "
@@ -180,7 +191,22 @@ CAMPARI_HOUSE = Producer(
     website="https://www.campari.com",
 ).model_dump(mode="json")
 
-NEW_PRODUCERS = [GOSLINGS, CAMPARI_HOUSE]
+# The other Milanese house, "CASA FONDATA NEL 1815" on its label. TTB filed its aperitivo
+# under Knappogue Castle and Absolut -- the importer's other brands.
+RAMAZZOTTI_HOUSE = Producer(
+    id="prod:bcd:ramazzotti", name="Fratelli Ramazzotti", kind="distillery", country="Italy",
+    city="Milan", aliases=["Ramazzotti", "Casa Fondata nel 1815"],
+    website="https://www.ramazzotti.com",
+).model_dump(mode="json")
+
+NEW_PRODUCERS = [GOSLINGS, CAMPARI_HOUSE, RAMAZZOTTI_HOUSE]
+
+# The style a curated row carries: a person's word for what is in the bottle, with the
+# curation on record as its provenance.
+def _curated_style(value: str) -> dict:
+    return Sourced[str](value=value, provenance=Provenance(
+        source_id="bcd-curation", method=ExtractionMethod.USER_CONTRIBUTED, confidence=1.0,
+        quote="scripts/merge_scan_dupes.py")).model_dump(mode="json")
 
 # Miller's Milwaukee brewery, permit BR-WI-MIL-1, named "Redd's" by the permit-naming pass
 # after one of its labels. OpenBreweryDB knows the building; folding that row in gives the
@@ -249,6 +275,8 @@ def plan(store) -> Plan:
                     f"({_name(store, c.rebrand)!r})")
         if c.aliases is not None:
             out.say(f"   aliases -> {c.aliases}")
+        if c.style and ((canon.get("style") or {}).get("value")) != c.style:
+            out.say(f"   style {((canon.get('style') or {}).get('value'))!r} -> {c.style!r}")
         out.touched.update([c.canon, *c.fold, *(x for x in (c.brand, c.rebrand) if x)])
     miller = store.get_gold(MILLER)
     out.say(f"\n== producer {MILLER}: {(miller or {}).get('name')!r} -> {MILLER_NAME!r}; fold "
@@ -322,6 +350,12 @@ def apply(store, touched: set[str]) -> None:
                 canon["aliases"] = sorted(c.aliases)
                 store.put_gold(c.canon, "product", canon)
                 print(f"aliases {c.canon} -> {canon['aliases']}")
+        if c.style:
+            canon = store.get_gold(c.canon)
+            if canon is not None and (canon.get("style") or {}).get("value") != c.style:
+                canon["style"] = _curated_style(c.style)
+                store.put_gold(c.canon, "product", canon)
+                print(f"style {c.canon} -> {c.style!r}")
     if renamed:
         # `put_gold` leaves the match column alone; a renamed row would go on matching under
         # its old name.
@@ -335,6 +369,7 @@ def report(store) -> None:
         if canon is None:
             continue
         print(f"{canon.get('name')!r} ({_producer_of(store, canon)})"
+              f"  style={(canon.get('style') or {}).get('value')!r}"
               f"  aliases={canon.get('aliases')}"
               f"  abv={((canon.get('spec') or {}).get('abv_pct') or {}).get('value')}")
         gone = [a for a in c.fold if (store.get_gold(a) or {}).get("redirects_to") == c.canon]

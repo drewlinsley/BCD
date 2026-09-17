@@ -173,16 +173,17 @@ def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
 
 
 @lru_cache(maxsize=50_000)
-def _windows(s: str) -> tuple[frozenset[str], ...]:
+def _windows(s: str, up_to: int = 0) -> tuple[frozenset[str], ...]:
     """Trigram sets of every contiguous run of words in `s` — the "continuous extents"
-    `word_similarity` searches. A word's trigrams are independent of its neighbours under
-    pg_trgm's per-word padding, so an extent's set is the union of its words' sets."""
+    `word_similarity` searches — of up to `up_to` words (all of them when 0). A word's
+    trigrams are independent of its neighbours under pg_trgm's per-word padding, so an
+    extent's set is the union of its words' sets."""
     words = _flat(s).split()
     per_word = [_trigrams(w) for w in words]
     out: list[frozenset[str]] = []
     for i in range(len(words)):
         acc: frozenset[str] = frozenset()
-        for j in range(i, len(words)):
+        for j in range(i, len(words) if up_to <= 0 else min(len(words), i + up_to)):
             acc = acc | per_word[j]
             out.append(acc)
     return tuple(out)
@@ -192,10 +193,21 @@ def similarity(a: str, b: str) -> float:
     return _jaccard(_trigrams(a), _trigrams(b))
 
 
+#: Extents longer than the name by more than this many words are not searched. A name of
+#: k words is matched by k words of the line, plus the stray word or two the recognizer
+#: groups between them ("Miller BREWED HIGH LIFE"); an extent longer than that only adds
+#: trigrams the name does not have, and can only score lower than one that stops sooner.
+#: Searching every extent of a forty-word appliance sticker for every candidate row was
+#: most of a 2.4 s frame (2026-09-16).
+WINDOW_SLACK = 2
+
+
 def word_similarity(a: str, b: str) -> float:
-    """Greatest similarity between `a`'s trigrams and any continuous extent of `b`."""
+    """Greatest similarity between `a`'s trigrams and any continuous extent of `b`, the
+    extents held to the length of `a` plus `WINDOW_SLACK` words."""
     ta = _trigrams(a)
-    return max((_jaccard(ta, w) for w in _windows(b)), default=0.0)
+    up_to = len(_flat(a).split()) + WINDOW_SLACK
+    return max((_jaccard(ta, w) for w in _windows(b, up_to)), default=0.0)
 
 
 def match_score(name: str, qualified: str, text: str) -> float:
