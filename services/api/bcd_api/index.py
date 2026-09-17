@@ -230,7 +230,7 @@ class LabelIndex:
     """Identifying-token postings over products and producers, plus what a match needs to
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
-    FORMAT = 2      # 2: suffix lookups (`sorted_reversed`)
+    FORMAT = 3      # 2: suffix lookups (`sorted_reversed`); 3: aliases indexed and scored
 
     def __init__(self) -> None:
         self.signature: str = ""
@@ -238,6 +238,13 @@ class LabelIndex:
         self.ids: list[str] = []
         self.names: list[str] = []
         self.qualified: list[str] = []
+        # The other names a row answers to -- (alias, brand-qualified alias) -- for the rows
+        # that have any. A merge leaves the canon the absorbed rows' names, and one of them
+        # is what the label prints: "Bombay Sapphire Vapour Infused London Dry Gin" beside a
+        # row named without VAPOUR INFUSED. Indexed under its name alone, the canon never
+        # surfaced for the line that read those words, and the same house's `East Vapour
+        # Infused` -- whose name they are -- had that line to itself (2026-09-17).
+        self.aliases: dict[int, tuple[tuple[str, str], ...]] = {}
         self.producer_of: array = array("i")
         # producers, by dense index
         self.producer_ids: list[str] = []
@@ -288,16 +295,26 @@ class LabelIndex:
                 continue
             i = len(ix.ids)
             name = rec.get("name") or ""
-            qualified = search_name(name, brand_names.get(rec.get("brand_id") or ""))
+            brand = brand_names.get(rec.get("brand_id") or "")
+            qualified = search_name(name, brand)
             ix.ids.append(pid)
             ix.names.append(name)
             ix.qualified.append(qualified)
+            aliases = tuple((a, search_name(a, brand)) for a in (rec.get("aliases") or ())
+                            if isinstance(a, str) and a.strip() and a != name)
+            if aliases:
+                ix.aliases[i] = aliases
             owner = ix.producer_index.get(rec.get("producer_id") or "", -1)
             ix.producer_of.append(owner)
             if owner >= 0:
                 ix.products_by_producer.setdefault(owner, array("i")).append(i)
             toks = identifying_tokens(qualified)
-            for tok in toks:
+            # Each token once, however many of the row's names carry it: a posting list
+            # holding a row twice would count its evidence twice.
+            posted = set(toks)
+            for _, q in aliases:
+                posted.update(identifying_tokens(q))
+            for tok in sorted(posted):
                 ix._post(ix.product_post, tok, i)
             if not toks:
                 flat = _flat(qualified)
@@ -487,7 +504,7 @@ class LabelIndex:
             rows = self._generic_stage(text)
         scored = []
         for r in rows:
-            sim = match_score(self.names[r], self.qualified[r], text)
+            sim = self._score(r, text)
             if sim <= 0.0:
                 continue
             # Ties at the top are the norm: `word_similarity` is 1.0 for ANY name wholly
@@ -519,11 +536,18 @@ class LabelIndex:
         weights = self._token_weights(" ".join(lines), self.product_post, len(self.ids))
         out = []
         for r, _w in heapq.nlargest(limit, weights.items(), key=lambda kv: kv[1]):
-            sim, at = max((match_score(self.names[r], self.qualified[r], t), i)
-                          for i, t in enumerate(lines))
+            sim, at = max((self._score(r, t), i) for i, t in enumerate(lines))
             if sim > 0.0:
                 out.append((self.ids[r], at, round(sim, 3)))
         return out
+
+    def _score(self, r: int, text: str) -> float:
+        """The store's number for a row against a line: its name, or the best of the other
+        names it answers to (see `aliases`)."""
+        best = match_score(self.names[r], self.qualified[r], text)
+        for alias, qualified in self.aliases.get(r, ()):
+            best = max(best, match_score(alias, qualified, text))
+        return best
 
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[str, float]]:
         text = (text or "").strip()
