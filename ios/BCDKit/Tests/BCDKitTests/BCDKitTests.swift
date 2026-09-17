@@ -585,6 +585,21 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
                                     producer: "The Alchemist LLC") == "Heady Topper")
     }
 
+    @Test func aLabelPrintsTheBrandTheNameLeftOut() {
+        // Open Food Facts files the brand apart from the name: a bottle of Tito's came up
+        // as "Handmade Vodka" (2026-09-17).
+        #expect(DisplayName.label("Handmade Vodka", brand: "Tito’s") == "Tito’s Handmade Vodka")
+        #expect(DisplayName.label("Tito's Vodka", brand: "Tito’s") == "Tito's Vodka")
+        #expect(DisplayName.label("Titos Vodka", brand: "Tito's") == "Titos Vodka")
+        #expect(DisplayName.label("Bitter Campari", brand: "Campari") == "Bitter Campari")
+        #expect(DisplayName.label("The Alchemist Heady Topper", brand: "The Alchemist") == "The Alchemist Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "Heady Topper") == "Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "unknown") == "Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "") == "Heady Topper")
+        #expect(DisplayName.label("East Vapour Infused London Dry Gin", brand: "Bombay Sapphire")
+                == "Bombay Sapphire East Vapour Infused London Dry Gin")
+    }
+
     @Test func keepsTheBrandWhenAllThatIsLeftIsACategory() {
         // "Ouzo" and "Vodka" under a brand line identify nothing — the repetition is worth
         // less than the loss.
@@ -767,6 +782,85 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
     func start() async {}
     func stop() { continuation?.finish() }
     func push(_ frame: [DetectedText]) { continuation?.yield(frame) }
+}
+
+/// An engine whose stream is finished by `stop()` and reopened by `start()`, the way the
+/// camera engines' are (see `VisionKitScanEngine.frames`).
+private final class RestartableEngine: ScanEngine, @unchecked Sendable {
+    private var continuation: AsyncStream<[DetectedText]>.Continuation?
+    private var stream: AsyncStream<[DetectedText]>
+    private let lock = NSLock()
+    var starts = 0
+    var frames: AsyncStream<[DetectedText]> { lock.withLock { stream } }
+    init() {
+        var cont: AsyncStream<[DetectedText]>.Continuation!
+        stream = AsyncStream { cont = $0 }
+        continuation = cont
+    }
+    func start() async {
+        lock.withLock {
+            starts += 1
+            if continuation == nil {
+                var cont: AsyncStream<[DetectedText]>.Continuation!
+                stream = AsyncStream { cont = $0 }
+                continuation = cont
+            }
+        }
+    }
+    func stop() { lock.withLock { continuation?.finish(); continuation = nil } }
+    func push(_ frame: [DetectedText]) { lock.withLock { continuation }?.yield(frame) }
+}
+
+@Suite struct TheScanComesBack {
+    /// The Scan tab left and returned: `stop()` finished the engine's stream and the next
+    /// `start()` read the finished one, so the camera ran and nothing reached the HUD until
+    /// the app was relaunched. Reported as "it wasn't doing anything" (2026-09-17).
+    @MainActor
+    @Test func aStoppedScanStartedAgainSeesFrames() async throws {
+        let engine = RestartableEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        let can = [DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)]
+        coord.start()
+        engine.push(can)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1)
+        coord.stop()
+        #expect(coord.overlays.isEmpty)
+
+        coord.start()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        engine.push(can)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1, "the second run's frames reach the HUD")
+        coord.stop()
+    }
+
+    /// Back from the background, a scanning coordinator wakes the engine and keeps its
+    /// stream; a stopped one starts over.
+    @MainActor
+    @Test func resumingWakesTheEngineWithoutLosingTheStream() async throws {
+        let engine = RestartableEngine()
+        let api = CatalogStubAPI(known: ["Heady Topper"])
+        let coord = ScanCoordinator(engine: engine, api: api)
+        let can = [DetectedText(text: "Heady Topper", kind: "text", x: 0.2, y: 0.3, w: 0.5, h: 0.1)]
+        coord.startLive(intervalMs: 10_000)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        coord.resume(intervalMs: 10_000)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        #expect(engine.starts == 2, "the engine is started again")
+        engine.push(can)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.count == 1, "and the frames still arrive")
+        coord.stop()
+        coord.resume(intervalMs: 10_000)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        #expect(coord.isScanning, "a stopped coordinator resumes by starting over")
+        coord.stop()
+    }
 }
 
 @Suite struct FallbackSurvivesTheTick {
@@ -1050,10 +1144,17 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
     }
 
     @MainActor
-    @Test func aChipFollowsTheBottleWhenTheCameraPans() async throws {
+    @Test func aChipFollowsTheBottleOnceTheCameraHasPanned() async throws {
+        // The first cut moved the chip a third of the way toward its anchor on every frame
+        // once the anchor left the dead zone -- thirty frames a second on a live shelf,
+        // toward a target the tracker re-blends each frame. Reported as "the boxes are
+        // still jumpy and kind of swimming across the screen" (2026-09-17). Now the chip
+        // stays put until the anchor has been away for `HUDLayout.settle`, then moves once.
         let engine = ManualScanEngine()
         let api = CatalogStubAPI(known: ["Heady Topper"])
         let coord = ScanCoordinator(engine: engine, api: api)
+        var clock = Date(timeIntervalSince1970: 1_000)
+        coord.now = { clock }
         coord.start()
 
         engine.push([DetectedText(text: "Heady Topper", kind: "text",
@@ -1063,13 +1164,77 @@ private final class ManualScanEngine: ScanEngine, @unchecked Sendable {
         #expect(coord.overlays.first?.y == 0.35)
 
         // the can is now at the bottom of the screen, well past the dead zone
-        engine.push([DetectedText(text: "Heady Topper", kind: "text",
-                                  x: 0.2, y: 0.7, w: 0.5, h: 0.1),
-                     DetectedText(text: "ALE", kind: "text", x: 0.2, y: 0.85, w: 0.2, h: 0.05)])
+        let panned = [DetectedText(text: "Heady Topper", kind: "text",
+                                   x: 0.2, y: 0.7, w: 0.5, h: 0.1),
+                      DetectedText(text: "ALE", kind: "text", x: 0.2, y: 0.85, w: 0.2, h: 0.05)]
+        engine.push(panned)
         try await Task.sleep(nanoseconds: 60_000_000)
         await coord.resolveLatest()
-        let y = coord.overlays.first?.y ?? 0
-        #expect(y > 0.4 && y <= 0.75, "it moves toward the bottle rather than jumping onto it")
+        #expect(coord.overlays.first?.y == 0.35, "a moment away is jitter: the chip stays")
+
+        clock = clock.addingTimeInterval(HUDLayout.settle + 0.1)
+        engine.push(panned)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        await coord.resolveLatest()
+        #expect(coord.overlays.first?.y == 0.75, "away for good: the chip moves, once, to the bottle")
+        #expect(coord.overlays.first?.isDisplaced == false)
+    }
+}
+
+@Suite struct TheChipsKeepTheirDistance {
+    private func chip(_ id: String, _ name: String, x: Double, y: Double,
+                      box: BoundingBox? = nil) -> ResolvedOverlay {
+        let c = makeCandidate(id: id, name: name, abv: 5, personal: 0.6)
+        return ResolvedOverlay(id: id, candidate: c, x: x, y: y, box: box)
+    }
+
+    @Test func twoChipsOnOneSpotAreSpreadApartAndTiedToTheirBottles() {
+        // Two bottles side by side, chips wanting the same place: the second drops below
+        // the first, keeps its anchor on its own bottle, and the layout is a function of
+        // the input alone.
+        let a = chip("a", "Ramazzotti Aperitivo Rosato", x: 0.5, y: 0.3)
+        let b = chip("b", "Campari", x: 0.52, y: 0.31)
+        let laid = HUDLayout.spread([a, b])
+        #expect(laid[0].y == 0.3)
+        #expect(laid[1].y > laid[0].y + HUDLayout.chipHeight)
+        let ra = HUDLayout.footprint(x: laid[0].x, y: laid[0].y, name: HUDLayout.title(of: a.candidate), hasReason: false)
+        let rb = HUDLayout.footprint(x: laid[1].x, y: laid[1].y, name: HUDLayout.title(of: b.candidate), hasReason: false)
+        #expect(ra.intersection(rb) == nil)
+        #expect(laid[1].anchorX == 0.52 && laid[1].anchorY == 0.31 && laid[1].isDisplaced)
+        #expect(HUDLayout.spread([a, b]).map(\.y) == laid.map(\.y), "deterministic")
+        // Chips that already sit apart are left exactly where they are.
+        let apart = HUDLayout.spread([a, chip("c", "Aperol", x: 0.5, y: 0.7)])
+        #expect(apart.map(\.y) == [0.3, 0.7])
+    }
+
+    @Test func anObjectsChipPerchesAboveItsBoxAndTiesToItsTop() {
+        let box = BoundingBox(x: 0.3, y: 0.4, w: 0.4, h: 0.3)
+        let p = HUDLayout.perch(for: box, name: "Goslings Black Seal", hasReason: false)
+        #expect(p.x == 0.5 && p.anchorX == 0.5 && p.anchorY == 0.4)
+        #expect(p.y < box.minY && p.y + HUDLayout.chipHeight / 2 <= box.minY)
+        // A box up against the top of the screen puts its chip below instead.
+        let high = BoundingBox(x: 0.3, y: 0.02, w: 0.4, h: 0.1)
+        let q = HUDLayout.perch(for: high, name: "Goslings Black Seal", hasReason: false)
+        #expect(q.y > high.maxY && q.anchorY == high.maxY)
+        // ...and one at the edge keeps the chip on screen.
+        let edge = BoundingBox(x: 0.9, y: 0.5, w: 0.1, h: 0.2)
+        let r = HUDLayout.perch(for: edge, name: "Goslings Black Seal", hasReason: false)
+        #expect(r.x + HUDLayout.chipMaxWidth / 2 <= 1 && abs(r.anchorX - 0.95) < 1e-9)
+    }
+
+    @Test func aPinHoldsThroughJitterAndMovesOnceAfterSettling() {
+        let t0 = Date(timeIntervalSince1970: 0)
+        var pin = HUDLayout.steadied(nil, anchorX: 0.5, anchorY: 0.5, now: t0)
+        #expect(pin.x == 0.5 && pin.y == 0.5)
+        pin = HUDLayout.steadied(pin, anchorX: 0.55, anchorY: 0.53, now: t0.addingTimeInterval(0.1))
+        #expect(pin.x == 0.5 && pin.y == 0.5 && pin.driftingSince == nil, "inside the dead zone")
+        pin = HUDLayout.steadied(pin, anchorX: 0.8, anchorY: 0.5, now: t0.addingTimeInterval(0.2))
+        #expect(pin.x == 0.5 && pin.driftingSince != nil, "out, but only just")
+        pin = HUDLayout.steadied(pin, anchorX: 0.52, anchorY: 0.5, now: t0.addingTimeInterval(0.3))
+        #expect(pin.x == 0.5 && pin.driftingSince == nil, "back inside: the clock resets")
+        pin = HUDLayout.steadied(pin, anchorX: 0.8, anchorY: 0.5, now: t0.addingTimeInterval(0.4))
+        pin = HUDLayout.steadied(pin, anchorX: 0.8, anchorY: 0.5, now: t0.addingTimeInterval(0.4 + HUDLayout.settle))
+        #expect(pin.x == 0.8 && pin.driftingSince == nil, "away for `settle`: moved, in one step")
     }
 }
 

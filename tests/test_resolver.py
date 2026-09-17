@@ -2049,6 +2049,111 @@ def test_a_whole_labels_line_lends_no_word_to_another_row():
     assert [c.resolved.product.name for c in resp.candidates] == ["Goslings Black Seal"]
 
 
+def test_every_line_that_prints_the_label_is_the_labels():
+    """A tracked can of Modelo Negra held five reads of its label, and `Ruta Maya Negra` --
+    MAYA off the fine print, NEGRA off the label -- kept four of them when only the proving
+    line was taken away, and was the verdict (2026-09-17)."""
+    gold = {"pr:modelo": _producer("pr:modelo", "Cerveceria Modelo"),
+            "b:modelo": _brand("b:modelo", "Modelo", "pr:modelo"),
+            "pr:ruta": _producer("pr:ruta", "Ruta Maya"), "b:ruta": _brand("b:ruta", "Ruta Maya", "pr:ruta")}
+    modelo = _prod_branded("Modelo Negra", "p:negra", "pr:modelo", "b:modelo")
+    ruta = _prod_branded("Ruta Maya Negra", "p:ruta", "pr:ruta", "b:ruta")
+    labels = ["CERVEZA\nHandcrasted di\nNET WE 32 FLO\nModelo\n=1925\nNegra-",
+              "CERVEZA\ndelayed d\nET WT 32 FL\n«Modelo\n025\nNegra.",
+              "CERVEZA\nindetaped d\nNET WT32 FLO\nModelo\n1025\nNegro.",
+              "CERVEZA\nMandesaded d\nModelo\n1925°\nNegra-"]
+    fine = "CA CRY\n28H 0DRO MAYA MEXICD"
+    frame = {t: [(modelo, 0.72), (ruta, 0.4)] for t in labels}
+    frame[fine] = [(ruta, 1.0)]
+    _, res = _verdict(_FrameStore(frame, gold), ["DIETZ&\nWATSON", "HAMB", fine, *labels, "MEXICO"])
+    assert res.status == "resolved" and _names(res) == ["Modelo Negra"], _names(res)
+
+
+def test_a_sibling_claiming_an_unread_word_yields_to_the_one_that_does_not():
+    """A bottle of Bombay Sapphire prints VAPOUR INFUSED, and those words on two lines proved
+    `East Vapour Infused London Dry Gin` -- the same house's other gin, EAST read nowhere --
+    on every tick the wordmark came in as SOMBAA (2026-09-17). The plain gin, BOMBAY
+    garbled, could not be proven whole, so nothing shadowed East."""
+    gold = {"pr:bs": _producer("pr:bs", "Bombay Sapphire"), "b:bs": _brand("b:bs", "Bombay Sapphire", "pr:bs")}
+    plain = Product(id="p:plain", brand_id="b:bs", producer_id="pr:bs", category=Category.SPIRIT,
+                    name="Bombay Sapphire London Dry Gin",
+                    aliases=["Bombay Sapphire Vapour Infused London Dry Gin"]).model_dump(mode="json")
+    east = _prod_branded("East Vapour Infused London Dry Gin", "p:east", "pr:bs", "b:bs")
+    label = "SAPPHIRE\nDistilled Distile\nLONDON\nDRY GIN\nVapour\nINFUSED INFUSE\nà la vapour"
+    frame = {label: [(east, 0.55), (plain, 0.5)], "INFUSED\nINFUSE\nà la vapeur": [(east, 0.6)]}
+    store = _FrameStore(frame, gold)
+    resp = Resolver(store).resolve(_frame(label, "SOMBAA", "INFUSED\nINFUSE\nà la vapeur"))
+    assert not resp.corroborated, [c.resolved.product.name for c in resp.candidates]
+    assert "East Vapour Infused London Dry Gin" not in [c.resolved.product.name for c in resp.candidates]
+    _, res = _verdict(store, [label, "SOMBAA", "INFUSED\nINFUSE\nà la vapeur"])
+    assert res.status != "resolved"
+    assert "East Vapour Infused London Dry Gin" not in _names(res)
+    # BOMBAY read, the plain gin is the bottle, as before.
+    frame["BOMBAY"] = [(plain, 0.6)]
+    _, res = _verdict(_FrameStore(frame, gold), [label, "BOMBAY", "INFUSED\nINFUSE\nà la vapeur"])
+    assert res.status == "resolved" and _names(res) == ["Bombay Sapphire London Dry Gin"], _names(res)
+
+
+def test_two_siblings_each_claiming_an_unread_word_yield_to_neither():
+    """LAWSON'S FINEST and SIP alone: `Little Sip` and `Sip of Sunshine` each claim a word
+    the frame did not read, so neither is the plainer row, neither yields, and neither is
+    the verdict."""
+    gold = {"pr:law": _producer("pr:law", "Lawson's Finest Liquids"),
+            "b:law": _brand("b:law", "Lawson's Finest Liquids", "pr:law")}
+    little = _prod_branded("Lawson's Finest Liquids Little Sip", "p:little", "pr:law", "b:law")
+    sunshine = _prod_branded("Lawson's Finest Liquids Sip of Sunshine", "p:sun", "pr:law", "b:law")
+    frame = {"SIP\nIPA": [(little, 0.5), (sunshine, 0.5)],
+             "LAWSON'S FINEST": [(little, 0.6), (sunshine, 0.6)]}
+    _, res = _verdict(_FrameStore(frame, gold), ["SIP\nIPA", "LAWSON'S FINEST"])
+    assert res.status != "resolved", (res.status, _names(res))
+    # A colour is a category word to the list, and still the word that tells two seals
+    # apart: `Goslings Black Seal` does not yield to `Goslings Gold Seal` -- GOLD is a claim
+    # too, unread -- and read beside GOSLINGS it is the bottle, the gold seal shadowed.
+    gold = {"pr:gos": _producer("pr:gos", "Goslings"), "b:gos": _brand("b:gos", "Goslings", "pr:gos")}
+    black = _prod_branded("Goslings Black Seal", "p:black", "pr:gos", "b:gos")
+    goldseal = _prod_branded("Goslings Gold Seal", "p:gold", "pr:gos", "b:gos")
+    frame = {"BLACK SEAL\n80 PROOF": [(black, 0.5), (goldseal, 0.5)],
+             "Goslings\nSince 1806": [(black, 0.6), (goldseal, 0.6)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame("BLACK SEAL\n80 PROOF", "Goslings\nSince 1806"))
+    assert [c.resolved.product.name for c in resp.candidates] == ["Goslings Black Seal"]
+
+
+def test_an_object_holding_a_proven_line_inherits_the_frames_proof():
+    """A bottle of Gosling's tracked as two objects -- BLACK SEAL 80 PROOF BERMUDA BLACK RUM
+    on one, GOSLINGS on the other. The frame proves the rum between them; the first object
+    alone was handed a shortlist of one, `Bermuda Brand Black Rum`, and the fine stage took
+    it: two names on one bottle (2026-09-17)."""
+    gold = {"pr:gos": _producer("pr:gos", "Goslings"), "b:gos": _brand("b:gos", "Goslings", "pr:gos"),
+            "pr:bb": _producer("pr:bb", "Bermuda Brand"), "b:bb": _brand("b:bb", "Bermuda Brand", "pr:bb")}
+    rum = _prod_branded("Goslings Black Seal", "p:rum", "pr:gos", "b:gos")
+    other = _prod_branded("Bermuda Brand Black Rum", "p:bb", "pr:bb", "b:bb")
+    seal, house = "BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM", "Goslings\nSince 1806"
+    frame = {seal: [(other, 0.8), (rum, 0.7)], house: [(rum, 0.6)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(ScanResolveRequest(
+        detections=[DetectedText(text=seal), DetectedText(text=house), DetectedText(text="ERD")],
+        objects=[DetectedObject(id="a", texts=[seal]), DetectedObject(id="b", texts=[house, "RUM"])]))
+    assert resp.corroborated
+    by_id = {o.object_id: o for o in resp.objects}
+    assert by_id["a"].status == "resolved" and _names(by_id["a"]) == ["Goslings Black Seal"], _names(by_id["a"])
+    assert by_id["b"].status == "resolved" and _names(by_id["b"]) == ["Goslings Black Seal"]
+    # One name on the bottle: the frame's own line overlay stands down for the verdicts.
+    assert {c.resolved.product.name for c in resp.candidates} == {"Goslings Black Seal"}
+
+
+def test_a_possessive_is_one_word_however_the_label_reads_it():
+    """The catalog says "Tito's", the label prints TITO'S, and the recognizer reads TITOS as
+    often as TITO'S. Split at the apostrophe, the catalog's word was "tito", which TITOS is
+    not a read of; the bottle stopped proving itself the moment its rows were merged into
+    one spelt with the apostrophe (2026-09-17)."""
+    assert _tokens("Tito's Handmade Vodka") == ["titos", "handmade", "vodka"]
+    assert _tokens("TITOS") == _tokens("Títo's.") == _tokens("Tito’s") == ["titos"]
+    gold = {"pr:fg": _producer("pr:fg", "Fifth Generation"), "b:t": _brand("b:t", "Tito's", "pr:fg")}
+    titos = _prod_branded("Tito's Handmade Vodka", "p:titos", "pr:fg", "b:t")
+    frame = {"Handmade\nVODKA": [(titos, 0.6)], "Titos": [(titos, 0.5)]}
+    _, res = _verdict(_FrameStore(frame, gold), ["Titos", "Handmade\nVODKA"])
+    assert res.status == "resolved" and _names(res) == ["Tito's Handmade Vodka"], (res.status, _names(res))
+
+
 def test_an_objects_lines_are_kept_by_what_they_add():
     """The client sends a tracked object's lines most-seen first, and most-seen are the short
     words the recognizer reads the same way every tick: the first twelve lines of a can of

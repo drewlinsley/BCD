@@ -197,9 +197,13 @@ public final class ObjectStage {
                     return true
                 }
             }
-            // Fine stage 2: constrained pick among the server's shortlist, once.
-            if res.status == .ambiguous, policy.adjudicateAmbiguous, let llm,
-               !adjudicated.contains(id) {
+            // Fine stage 2: constrained pick among the server's shortlist, once. A pick
+            // needs a choice: offered one name, the model took it -- `Bermuda Brand Black
+            // Rum` for the BLACK SEAL line of a Gosling's bottle, three times in one scan
+            // (2026-09-17). A shortlist of one is the server saying "not this, not quite",
+            // and the object waits for more text instead.
+            if res.status == .ambiguous, res.candidates.count > 1, policy.adjudicateAmbiguous,
+               let llm, !adjudicated.contains(id) {
                 adjudicated.insert(id)
                 if let pick = try? await llm.pickProduct(ocr: obj.texts, candidates: res.candidates),
                    let cand = res.candidates.first(where: { $0.resolved.product.id == pick.productId }),
@@ -247,13 +251,30 @@ public final class ObjectStage {
 
     // MARK: - out
 
-    /// Overlays for the resolved objects, pinned to the centre of each object's box.
-    /// Box-less objects (mock detections) have no place on screen and draw nothing here.
+    /// Overlays for the resolved objects, one per product, at the centre of each object's
+    /// box and carrying the box. Box-less objects (mock detections) have no place on screen
+    /// and draw nothing here.
+    ///
+    /// One per product: the tracker follows regions, and a can whose rim and wordmark are
+    /// far enough apart is two objects, both of which the server names -- two chips saying
+    /// "Miller High Life" on one can, reported as "a couple of times two guesses displayed"
+    /// (2026-09-17). The object seen longest speaks for the product.
     public var overlays: [ResolvedOverlay] {
-        objects.compactMap { o in
-            guard o.anchored, let c = o.status.candidate else { return nil }
-            return ResolvedOverlay(id: c.resolved.product.id, candidate: c,
-                                   x: o.box.midX, y: o.box.midY)
+        var best: [String: SceneObject] = [:]
+        var order: [String] = []
+        for o in objects {
+            guard o.anchored, let c = o.status.candidate else { continue }
+            let pid = c.resolved.product.id
+            if let have = best[pid] {
+                if (o.framesSeen, o.box.area) > (have.framesSeen, have.box.area) { best[pid] = o }
+            } else {
+                best[pid] = o
+                order.append(pid)
+            }
+        }
+        return order.compactMap { pid in
+            guard let o = best[pid], let c = o.status.candidate else { return nil }
+            return ResolvedOverlay(id: pid, candidate: c, x: o.box.midX, y: o.box.midY, box: o.box)
         }
     }
 

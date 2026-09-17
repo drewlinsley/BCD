@@ -100,9 +100,14 @@ EXACT_WEIGHT, FUZZY_WEIGHT, PREFIX_WEIGHT = 1.0, 0.7, 0.6
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
+_APOSTROPHES = str.maketrans("", "", "'\u2019\u2018`")
+
+
 def _fold(s: str) -> str:
-    """Casefold and strip diacritics, the way dedup and the resolver compare words."""
-    d = unicodedata.normalize("NFKD", s or "")
+    """Casefold, strip diacritics and drop apostrophes, the way the resolver compares
+    words: "Tito's" is the one word TITOS, which is how the label is read as often as not
+    (see `resolver._unapostrophed`)."""
+    d = unicodedata.normalize("NFKD", (s or "").translate(_APOSTROPHES))
     return "".join(c for c in d if not unicodedata.combining(c)).casefold()
 
 
@@ -210,9 +215,12 @@ def word_similarity(a: str, b: str) -> float:
     return max((_jaccard(ta, w) for w in _windows(b, up_to)), default=0.0)
 
 
+@lru_cache(maxsize=200_000)
 def match_score(name: str, qualified: str, text: str) -> float:
     """The store's number: greatest of the six terms `PostgresStore.match_products` ranks
-    by, so a threshold calibrated on Postgres holds here."""
+    by, so a threshold calibrated on Postgres holds here. Remembered: the same rows meet
+    the same lines on every object over a frame and on every tick a tracked line stays in
+    view, and the window scan is most of a slow tick (2026-09-17)."""
     return max(
         similarity(name, text),
         word_similarity(name, text),
@@ -230,7 +238,7 @@ class LabelIndex:
     """Identifying-token postings over products and producers, plus what a match needs to
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
-    FORMAT = 2      # 2: suffix lookups (`sorted_reversed`)
+    FORMAT = 4      # 2: suffix lookups; 3: aliases indexed and scored; 4: possessives one word
 
     def __init__(self) -> None:
         self.signature: str = ""
@@ -238,6 +246,13 @@ class LabelIndex:
         self.ids: list[str] = []
         self.names: list[str] = []
         self.qualified: list[str] = []
+        # The other names a row answers to -- (alias, brand-qualified alias) -- for the rows
+        # that have any. A merge leaves the canon the absorbed rows' names, and one of them
+        # is what the label prints: "Bombay Sapphire Vapour Infused London Dry Gin" beside a
+        # row named without VAPOUR INFUSED. Indexed under its name alone, the canon never
+        # surfaced for the line that read those words, and the same house's `East Vapour
+        # Infused` -- whose name they are -- had that line to itself (2026-09-17).
+        self.aliases: dict[int, tuple[tuple[str, str], ...]] = {}
         self.producer_of: array = array("i")
         # producers, by dense index
         self.producer_ids: list[str] = []
@@ -288,16 +303,26 @@ class LabelIndex:
                 continue
             i = len(ix.ids)
             name = rec.get("name") or ""
-            qualified = search_name(name, brand_names.get(rec.get("brand_id") or ""))
+            brand = brand_names.get(rec.get("brand_id") or "")
+            qualified = search_name(name, brand)
             ix.ids.append(pid)
             ix.names.append(name)
             ix.qualified.append(qualified)
+            aliases = tuple((a, search_name(a, brand)) for a in (rec.get("aliases") or ())
+                            if isinstance(a, str) and a.strip() and a != name)
+            if aliases:
+                ix.aliases[i] = aliases
             owner = ix.producer_index.get(rec.get("producer_id") or "", -1)
             ix.producer_of.append(owner)
             if owner >= 0:
                 ix.products_by_producer.setdefault(owner, array("i")).append(i)
             toks = identifying_tokens(qualified)
-            for tok in toks:
+            # Each token once, however many of the row's names carry it: a posting list
+            # holding a row twice would count its evidence twice.
+            posted = set(toks)
+            for _, q in aliases:
+                posted.update(identifying_tokens(q))
+            for tok in sorted(posted):
                 ix._post(ix.product_post, tok, i)
             if not toks:
                 flat = _flat(qualified)
@@ -328,6 +353,8 @@ class LabelIndex:
     # ---- persistence ----
 
     def save(self, path: str) -> None:
+        self.__dict__.pop("_line_memo", None)
+        self.__dict__.pop("_producer_memo", None)
         tmp = f"{path}.tmp"
         with open(tmp, "wb") as f:
             pickle.dump(self.__dict__, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -476,18 +503,37 @@ class LabelIndex:
                 rows[r] = rows.get(r, 0) + 1
         return sorted(rows, key=rows.__getitem__, reverse=True)[:CANDIDATES]
 
+    #: Lines answered and remembered. A tracked object carries the same lines tick after
+    #: tick, and every object over a frame carries the frame's lines; a shelf of five
+    #: objects asked fifty-four line queries a tick, thirty of them the same line twice, and
+    #: the tick took 1.3 s (2026-09-17). The index does not change while the process runs,
+    #: so an answer is good for as long as it is.
+    MEMO_LINES = 4096
+
     def match_products(self, text: str, limit: int = 3) -> list[tuple[str, float]]:
         """Best-first (product id, similarity) for one OCR line — the store's answer, from
         memory. The similarity is pg_trgm's, computed on the rows the tokens surface."""
         text = (text or "").strip()
         if not text:
             return []
+        memo = self.__dict__.setdefault("_line_memo", {})
+        key = (text, limit)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        out = self._match_products(text, limit)
+        if len(memo) >= self.MEMO_LINES:
+            memo.clear()
+        memo[key] = out
+        return out
+
+    def _match_products(self, text: str, limit: int) -> list[tuple[str, float]]:
         rows = self._token_stage(text, self.product_post, len(self.ids))
         if not rows:
             rows = self._generic_stage(text)
         scored = []
         for r in rows:
-            sim = match_score(self.names[r], self.qualified[r], text)
+            sim = self._score(r, text)
             if sim <= 0.0:
                 continue
             # Ties at the top are the norm: `word_similarity` is 1.0 for ANY name wholly
@@ -519,16 +565,35 @@ class LabelIndex:
         weights = self._token_weights(" ".join(lines), self.product_post, len(self.ids))
         out = []
         for r, _w in heapq.nlargest(limit, weights.items(), key=lambda kv: kv[1]):
-            sim, at = max((match_score(self.names[r], self.qualified[r], t), i)
-                          for i, t in enumerate(lines))
+            sim, at = max((self._score(r, t), i) for i, t in enumerate(lines))
             if sim > 0.0:
                 out.append((self.ids[r], at, round(sim, 3)))
         return out
+
+    def _score(self, r: int, text: str) -> float:
+        """The store's number for a row against a line: its name, or the best of the other
+        names it answers to (see `aliases`)."""
+        best = match_score(self.names[r], self.qualified[r], text)
+        for alias, qualified in self.aliases.get(r, ()):
+            best = max(best, match_score(alias, qualified, text))
+        return best
 
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[str, float]]:
         text = (text or "").strip()
         if not text:
             return []
+        memo = self.__dict__.setdefault("_producer_memo", {})
+        key = (text, limit)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        out = self._match_producers(text, limit)
+        if len(memo) >= self.MEMO_LINES:
+            memo.clear()
+        memo[key] = out
+        return out
+
+    def _match_producers(self, text: str, limit: int) -> list[tuple[str, float]]:
         rows = self._token_stage(text, self.producer_post, len(self.producer_ids))
         scored = []
         for r in rows:
@@ -566,17 +631,38 @@ class IndexedStore:
     lookups, barcodes, iteration, writes — passes straight through to the wrapped store,
     so `Resolver` and the API see one object with the same surface they had."""
 
+    #: Catalog rows remembered by id. A tick over a shelf of five objects fetched 3,400
+    #: rows one by one from Postgres -- the same few hundred rows, hydrated for every object
+    #: and every tick -- for a second of its time (2026-09-17). Only the catalog's own ids
+    #: are kept: it does not change while the process runs (a merge is followed by a
+    #: restart), where a taste profile written by the API a moment ago must read back.
+    CATALOG_PREFIXES = ("off:", "ttb:", "prod:", "brand:", "sku:")
+    MEMO_RECORDS = 50_000
+
     def __init__(self, store: Store, index: LabelIndex) -> None:
         self._store = store
         self.index = index
+        self._records_memo: dict[str, dict | None] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
 
+    def get_gold(self, gid: str) -> dict | None:
+        if not gid.startswith(self.CATALOG_PREFIXES):
+            return self._store.get_gold(gid)
+        memo = self._records_memo
+        if gid in memo:
+            return memo[gid]
+        rec = self._store.get_gold(gid)
+        if len(memo) >= self.MEMO_RECORDS:
+            memo.clear()
+        memo[gid] = rec
+        return rec
+
     def _records(self, ids: Iterable[str]) -> list[dict]:
         out = []
         for pid in ids:
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append(rec)
         return out
@@ -584,7 +670,7 @@ class IndexedStore:
     def match_products(self, text: str, limit: int = 3, **_: Any) -> list[tuple[dict, float]]:
         out = []
         for pid, sim in self.index.match_products(text, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, sim))
         return out
@@ -596,7 +682,7 @@ class IndexedStore:
     def match_frame(self, lines: Sequence[str], limit: int = 8) -> list[tuple[dict, int, float]]:
         out = []
         for pid, at, sim in self.index.match_frame(lines, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, at, sim))
         return out
@@ -604,7 +690,7 @@ class IndexedStore:
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
         out = []
         for pid, sim in self.index.match_producers(text, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, sim))
         return out

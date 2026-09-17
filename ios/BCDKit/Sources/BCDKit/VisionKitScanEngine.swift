@@ -19,7 +19,13 @@ import UIKit
 /// builds for `swift test`.
 @available(iOS 18.0, *)
 public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendable {
-    public let frames: AsyncStream<[DetectedText]>
+    /// The frames of the current run. `stop()` finishes the stream so the coordinator's loop
+    /// ends; the next `start()` opens a fresh one. The first cut kept one stream for the
+    /// engine's life, and a stopped engine started again -- the Scan tab left and returned
+    /// -- handed back the finished stream: the camera ran, and no frame reached the HUD
+    /// until the app was relaunched. Reported as "it wasn't doing anything" (2026-09-17).
+    public var frames: AsyncStream<[DetectedText]> { lock.withLock { _frames } }
+    private var _frames: AsyncStream<[DetectedText]>
     private var continuation: AsyncStream<[DetectedText]>.Continuation?
     private var scanner: DataScannerViewController?
     private let lock = NSLock()
@@ -27,10 +33,24 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
     private var viewSize: CGSize = .zero
 
     public override init() {
-        var cont: AsyncStream<[DetectedText]>.Continuation!
-        self.frames = AsyncStream { cont = $0 }
-        self.continuation = cont
+        (_frames, continuation) = Self.openStream()
         super.init()
+    }
+
+    private static func openStream() -> (AsyncStream<[DetectedText]>,
+                                         AsyncStream<[DetectedText]>.Continuation) {
+        var cont: AsyncStream<[DetectedText]>.Continuation!
+        let stream = AsyncStream { cont = $0 }
+        return (stream, cont)
+    }
+
+    /// A stream for this run, when the last one was finished by `stop()`. A running
+    /// stream is kept: `start()` is also how the scanner is woken after the app comes back
+    /// from the background, and the coordinator is still reading.
+    private func reopenIfFinished() {
+        lock.withLock {
+            if continuation == nil { (_frames, continuation) = Self.openStream() }
+        }
     }
 
     public var viewController: UIViewController? { scanner }
@@ -69,14 +89,21 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
     }
 
     public func start() async {
+        reopenIfFinished()
         // Hop to the main actor: DataScannerViewController is @MainActor-isolated, but
         // ScanEngine.start() is a non-isolated protocol requirement. Capture self (which is
         // @unchecked Sendable), not the non-Sendable scanner, to stay race-clean.
-        await MainActor.run { try? self.scanner?.startScanning() }
+        await MainActor.run {
+            guard let scanner = self.scanner, !scanner.isScanning else { return }
+            try? scanner.startScanning()
+        }
     }
 
     public func stop() {
-        continuation?.finish()
+        lock.withLock {
+            continuation?.finish()
+            continuation = nil
+        }
         Task { @MainActor in self.scanner?.stopScanning() }
     }
 
@@ -132,7 +159,7 @@ public final class VisionKitScanEngine: NSObject, ScanEngine, @unchecked Sendabl
                 return nil
             }
         }
-        continuation?.yield(detections)
+        lock.withLock { continuation }?.yield(detections)
     }
 
     private static func detected(_ text: String, kind: String, symbology: String? = nil,

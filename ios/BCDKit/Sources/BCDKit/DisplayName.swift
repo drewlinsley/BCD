@@ -65,6 +65,29 @@ public enum DisplayName {
         return joined.isEmpty ? raw : joined
     }
 
+    /// The name a label prints: the product's, with its brand in front when the name does
+    /// not carry it. Open Food Facts files the brand apart from the name, so a bottle of
+    /// Tito's came up as "Handmade Vodka" -- reported from the camera as "too generic"
+    /// (2026-09-17) -- and the same rows would show "London Dry Gin" or "Vodka" alone.
+    /// A name that already holds the brand's first word anywhere ("Bitter Campari" under
+    /// Campari, "The Alchemist Heady Topper") is left as it is; a placeholder brand (the
+    /// resolver names it after the product when the catalog has none) adds nothing.
+    public static func label(_ raw: String, brand: String) -> String {
+        let brandTokens = tokens(brand).map(comparable).filter { !$0.isEmpty }
+        guard let first = brandTokens.first, brand.lowercased() != "unknown" else { return raw }
+        let nameTokens = tokens(raw).map(comparable)
+        if nameTokens.contains(first) { return raw }
+        let joined = (brand.trimmingCharacters(in: .whitespacesAndNewlines) + " " + raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? raw : joined
+    }
+
+    /// `normalize`, with the apostrophes gone too: "Tito's", "Tito’s" and "Titos" are one
+    /// word to a label.
+    static func comparable(_ token: String) -> String {
+        normalize(token).filter { $0 != "'" && $0 != "’" && $0 != "`" }
+    }
+
     // MARK: -
 
     static let punctuationAndSpace = CharacterSet.punctuationCharacters

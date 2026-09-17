@@ -91,8 +91,21 @@ def _norm_token(s: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+# A possessive is one word. The catalog says "Tito's", the label prints TITO'S, and the
+# recognizer reads it TITOS as often as TITO'S -- and split at the apostrophe, "tito's" was
+# the token "tito", which TITOS is not a read of (a letter gained). The three OFF rows for
+# the bottle, one of them spelt "Titos", had covered for it; merged into one row spelt with
+# the apostrophe, the bottle stopped proving itself (2026-09-17). Gosling's, Lawson's and
+# every other possessive brand read the same way. Stripped before tokenizing, on both sides.
+_APOSTROPHES = str.maketrans("", "", "'\u2019\u2018`")
+
+
+def _unapostrophed(s: str) -> str:
+    return (s or "").translate(_APOSTROPHES)
+
+
 def _tokens(s: str) -> list[str]:
-    return [_norm_token(t) for t in _TOKEN_RE.findall(s or "")]
+    return [_norm_token(t) for t in _TOKEN_RE.findall(_unapostrophed(s))]
 
 
 # The recognizer picks a script per line by what the letterforms most resemble, and a stylized
@@ -154,7 +167,7 @@ _ACCOUNTS_FOR_LINE = 0.7
 
 
 def _flatten(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+    return re.sub(r"[^a-z0-9]+", " ", _unapostrophed(s).lower()).strip()
 
 
 #: Words and numbers of a name, for asking whether a line prints the name whole. Not `_tokens`:
@@ -173,7 +186,7 @@ def _name_words(name: str) -> list[str]:
     picks it off a shelf, but they are part of the name, and a line that prints the name
     prints them."""
     out = []
-    for w in _NAME_WORD_RE.findall((name or "").lower()):
+    for w in _NAME_WORD_RE.findall(_unapostrophed(name).lower()):
         w = _norm_token(w)
         if w not in _PRODUCER_SUFFIX and w not in out:
             out.append(w)
@@ -204,7 +217,7 @@ def _reads_the_name(name: str, line: str, *, loose: bool = False) -> bool:
     words = _name_words(name)
     if len(words) < _MIN_SELF_PROOF_TOKENS or sum(len(w) for w in words) < _MIN_SELF_PROOF_CHARS:
         return False
-    toks = [_norm_token(w) for w in _NAME_WORD_RE.findall((line or "").lower())]
+    toks = [_norm_token(w) for w in _NAME_WORD_RE.findall(_unapostrophed(line).lower())]
     if len(toks) > _PARAGRAPH_WORDS:
         return False
 
@@ -1573,6 +1586,9 @@ class Resolver:
             scene = self._resolve_scene(req.objects, profile, req.include_score)
             if scene is not None:
                 objects = [scene if r.object_id == scene.object_id else r for r in objects]
+        if frame.proven:
+            objects = [r if r.status == "resolved" else self._inherited(o, r, frame.proven)
+                       for o, r in zip(req.objects, objects, strict=True)]
         settled = [res.candidates[0] for res in objects if res.status == "resolved"]
         if settled:
             # An object's verdict makes the response corroborated, and the client draws a
@@ -1935,25 +1951,107 @@ class Resolver:
         # line, and so does `Goslings Black Seal` over the gin called `Black Seal` on BLACK
         # SEAL 80 PROOF BERMUDA BLACK RUM: a row that reads every word the label reads there
         # explains the line as well as the label does, and GOSLINGS beside it decides.
-        label_line_of = {rid: i for rid, (i, _, _) in best_hit.items()
-                         if whole_label.get(rid) and rid in evidence}
+        def _reads_in(vocab: list[str], toks: list[str]) -> set[str]:
+            read = set(toks)
+            return {w for w in vocab if _read_as(w, read)}
 
-        def _reads_on(vocab: list[str], line_i: int) -> set[str]:
-            toks = set(line_tokens[line_i])
-            return {w for w in vocab if _read_as(w, toks)}
+        def _label_lines(rid: str) -> set[int]:
+            """Every line that prints the whole label, not only the one that proved it: a
+            tracked can of Modelo Negra held five reads of its label, and `Ruta Maya Negra`
+            -- MAYA off the fine print, NEGRA off the label -- kept four of them when only
+            the proving line was taken away (2026-09-17)."""
+            words = _identifying_tokens(evidence[rid][0].product.name or "")
+            lines = {best_hit[rid][0]}
+            if words:
+                lines |= {i for i, toks in enumerate(line_tokens)
+                          if all(_read_as(w, set(toks)) for w in words)}
+            return lines
+
+        # By reading, not by line: the reading is the unit corroboration counts, and a can
+        # of Wormtown Be Hoppy beside a Miller can gave HOPPY IPA six times as a line of
+        # its own and once on the tail of the Miller block -- all one reading, echoes of
+        # the block. Judged line by line, the block's own line (HOPP, not read) was owned
+        # against Wormtown and took the whole reading with it (2026-09-17).
+        label_readings = {rid: {reading_of[i] for i in _label_lines(rid) if i in reading_of}
+                          for rid in evidence if whole_label.get(rid)}
+
+        def _owned_against(pid: str, vocab: list[str]) -> set[int]:
+            """The readings other whole labels own against this row: their readings, where
+            this row reads a proper subset of the label's words."""
+            return {g for rid, groups in label_readings.items() if rid != pid
+                    for g in groups
+                    if _reads_in(vocab, independent[g])
+                    < _reads_in(evidence[rid][1], independent[g])}
 
         for pid, (resolved, vocab) in evidence.items():
             if (named_by_id.get(pid, 0) < _MIN_FRAME_FOR_PENALTY or whole_label.get(pid)
                     or pid in by_house):
                 continue
-            owned = {reading_of[i] for rid, i in label_line_of.items()
-                     if rid != pid and i in reading_of
-                     and _reads_on(vocab, i) < _reads_on(evidence[rid][1], i)}
+            owned = _owned_against(pid, vocab)
             if not owned:
                 continue
             readings = [toks for g, toks in enumerate(independent) if g not in owned]
             if _corroboration(resolved, vocab, readings) < _MIN_FRAME_FOR_PENALTY:
                 named_by_id[pid] = 1
+        # The wordmark contest is held to the same: a maker hypothesised off one word of the
+        # fine print (MAYA, off "NAVA, MEXICO" misread) picked `Ruta Maya Negra` by the word
+        # NEGRA -- the one word of its own -- read off the Modelo Negra label beside it
+        # (2026-09-17). A window on a line another label owns, reading less of it than the
+        # label does, is that label's word, not a wordmark.
+        for pid in list(by_maker):
+            if (pid in evidence and reading_of.get(best_hit[pid][0], -1)
+                    in _owned_against(pid, evidence[pid][1])):
+                by_maker.discard(pid)
+
+        # A sibling that claims a word the frame never read yields to one that claims no more
+        # than the frame read. A bottle of Bombay Sapphire prints VAPOUR INFUSED, and those
+        # two words on two lines proved `East Vapour Infused London Dry Gin` -- the same
+        # house's other gin, EAST read nowhere -- on every tick the wordmark came in as SOMBAA
+        # (2026-09-17); the plain gin, its BOMBAY garbled, could not be proven whole, so
+        # nothing shadowed East. The sibling rule needs no proof of the other row: `East`
+        # has a word of its own name the plain gin's vocabulary lacks, EAST, and it was not
+        # read, while every word the frame did read is a word the plain gin has too. The
+        # frame is consistent with the plain gin and says nothing for East; East goes, and
+        # the plain gin waits for BOMBAY. By the row's own name words, not its aliases: a
+        # merge leaves a canon rows of alias vocabulary nobody printed, and the canon must
+        # not yield to a variant over an alias's unread word. Only rows of one house: a
+        # stranger's row that explains the same words is another product, and the shadow
+        # rule below judges it on whether it was read whole. A claim is an identifying word:
+        # the canon of Bombay Sapphire claims LONDON DRY GIN too, and on a frame that read
+        # only BOMBAY and SAPPHIRE the first cut yielded those three to a junk sibling named
+        # `Ginebra Bombay 0,70 CL.`, which yielded its one word back, and the bottle went
+        # undrawn on seven frames it had been drawn on (2026-09-17).
+        def _all_words(resolved: ResolvedProduct) -> set[str]:
+            parts = [resolved.product.name, *(resolved.product.aliases or []),
+                     *_maker_names(resolved)]
+            return {w for part in parts for w in _name_words(part or "")}
+
+        all_words = {pid: _all_words(resolved) for pid, (resolved, _) in evidence.items()}
+        maker_ids = {pid: _maker_ids(resolved) for pid, (resolved, _) in evidence.items()}
+        yields_to: dict[str, set[str]] = {}
+        for pid, (resolved, _) in evidence.items():
+            if pid in by_upc or pid in by_maker or pid in by_house:
+                continue
+            words = _identifying_tokens(resolved.product.name or "")
+            mine = all_words[pid]
+            makers = maker_ids[pid]
+            for other in evidence:
+                if other == pid or not (makers & maker_ids[other]):
+                    continue
+                theirs = all_words[other]
+                extra = [w for w in words if w not in theirs]
+                if not extra or any(_read_as(w, read_toks) for w in extra):
+                    continue
+                # ...and the row yielded to claims nothing unread of its own, of any kind:
+                # `Goslings Gold Seal` is not the plainer row beside `Goslings Black Seal`
+                # because GOLD is a colour to the category list, and BLACK unread does not
+                # hand the bottle to the seal whose colour was not read either.
+                unread_theirs = [w for w in theirs - mine
+                                 if len(w) >= _MIN_SIGHTING_TOKEN and not _read_as(w, read_toks)]
+                if not unread_theirs:
+                    yields_to.setdefault(pid, set()).add(other)
+        # The other row says everything this one's evidence says.
+        scored = [entry for entry in scored if entry[1].resolved.product.id not in yields_to]
 
         # Collapse to one overlay per *real* product and cap the frame — the server-side
         # backstop against the crowding (and the duplicate-catalog-record double overlays) the
@@ -2012,9 +2110,10 @@ class Resolver:
             # Minute", WHISKEY the two Stranahan's rows, and a brand row from the product
             # beside it. Only a producer's trade suffix is left out -- BREWING COMPANY is on
             # every can and is nobody's.
-            words = {_norm_token(w) for w in _NAME_WORD_RE.findall(" ".join(filter(None, (
-                p.name, c.resolved.brand.name, c.resolved.producer.name,
-                *(p.aliases or [])))).lower())} - _PRODUCER_SUFFIX
+            printed = " ".join(filter(None, (p.name, c.resolved.brand.name,
+                                             c.resolved.producer.name, *(p.aliases or []))))
+            words = {_norm_token(w) for w in _NAME_WORD_RE.findall(_unapostrophed(printed).lower())
+                     } - _PRODUCER_SUFFIX
             explained = sum(1 for r in read_toks if len(r) >= 3
                             and any(_trigram_sim(v, r) >= _TOKEN_SUPPORT_MIN for v in words))
             # Proof first. The one-candidate-per-line collapse below hands each line to its
@@ -2084,6 +2183,29 @@ class Resolver:
         proven = [c for _, c in ranked if _is_proven(c)]
         return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved,
                       by_maker=by_maker)
+
+    # ---- the frame's proof, handed to the object that holds the line ----
+
+    @staticmethod
+    def _inherited(obj: DetectedObject, res: ObjectResolution,
+                   proven: list[ScoredCandidate]) -> ObjectResolution:
+        """An object holding a line the frame proved a product on is that product.
+
+        The tracker follows regions of the screen, and a bottle of Gosling's was two: BLACK
+        SEAL 80 PROOF BERMUDA BLACK RUM on one, GOSLINGS on the other. The frame, holding
+        both lines, proved `Goslings Black Seal`; the first object, holding one, could not,
+        and was handed a shortlist of one -- `Bermuda Brand Black Rum`, the row that reads
+        most of its line -- which the fine stage, offered one name, took. Two names on one
+        bottle (2026-09-17). A frame's proof covers the lines it rests on -- the ones that
+        carry a word of the label, the same lines a verdict owns -- and the object holding
+        one of them has been answered."""
+        held = [_tokens(_latin(t)) for t in obj.texts if t and t.strip()]
+        for c in proven:
+            if _agreeing_lines(_candidate_vocabulary(c.resolved), held):
+                return ObjectResolution(
+                    object_id=obj.id, status="resolved", query=res.query,
+                    candidates=[c.model_copy(update={"object_id": obj.id, "detection_index": -1})])
+        return res
 
     # ---- the scene: the objects together, when none answered alone ----
 

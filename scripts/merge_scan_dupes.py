@@ -101,9 +101,11 @@ CLUSTERS = [
     Cluster(
         what="Miller High Life -- `High Life` (an importer, 1983), `Miller High Life High Life` "
              "(brand plus label, 2008), and the 1995 filing; `High Life` and `Miller High Life` "
-             "alternated on the can",
+             "alternated on the can. Plus `Miller Life`, a 2005 filing with the HIGH left out, "
+             "which a can read as MILLER HICH LIFE proved whole (2026-09-17)",
         canon="ttb:24248001000650",                # 2024, brand Miller, the brewery's own permit
-        fold=["ttb:953550061", "ttb:83070219", "ttb:08175001000231"],
+        fold=["ttb:953550061", "ttb:83070219", "ttb:08175001000231",
+              "ttb:05045000000005"],               # 2005 "Miller Life"
     ),
     Cluster(
         what="Lawson's Finest Liquids Sip of Sunshine -- the 2017 filing says IPA, the 2022 one "
@@ -149,6 +151,28 @@ CLUSTERS = [
         brand="brand:ttb-cola-registry:campari",
         aliases=["Campari Bitter", "Bitter Campari", "Campari Aperitivo"],
         style="Bitter Aperitivo",
+    ),
+    Cluster(
+        what="Tito's Handmade Vodka -- three OFF barcode rows (750 ml, 1 L, 1.75 L) named "
+             "`Tito's Vodka`, `Titos Vodka` and `Handmade Vodka`, and TTB filings `Tito's "
+             "Handmade`, `Tito's`, `titos texas`, `tito's texas` under a permit named after "
+             "another label. The bottle came up as `Handmade Vodka`, and flickered to `Tito's "
+             "Handmade` (2026-09-17)",
+        canon="off:0619947000037",                 # the 750 ml barcode row, "Tito's Vodka"
+        fold=[
+            "off:0619947000013",                   # 1 L, "Titos Vodka"
+            "off:0619947000020",                   # 1.75 L, "Handmade Vodka"
+            "ttb:25169001000935",                  # 2025 "Tito's Handmade"
+            "ttb:98054002000039",                  # 1998 "Tito's"
+            "ttb:98016003000038",                  # 1998 "titos texas"
+            "ttb:98016003000039",                  # 1998 "tito's texas"
+        ],
+        rename="Tito's Handmade Vodka",            # the whole of the name on the bottle
+        producer="prod:bcd:titos",
+        brand="brand:ttb-cola-registry:tito-s",
+        aliases=["Tito's Vodka", "Tito's Handmade", "Handmade Vodka",
+                 "Tito's Texas Handmade Vodka"],
+        style="Vodka",
     ),
     Cluster(
         what="Modelo Negra -- filed as Negra Modelo, Negra Modelo Ale, Negra Modelo Draft (Dark "
@@ -199,7 +223,17 @@ RAMAZZOTTI_HOUSE = Producer(
     website="https://www.ramazzotti.com",
 ).model_dump(mode="json")
 
-NEW_PRODUCERS = [GOSLINGS, CAMPARI_HOUSE, RAMAZZOTTI_HOUSE]
+# Tito's, of Austin. TTB's permit DSP-TX-57 is the distillery, named "Kind" by the
+# permit-naming pass after one of its labels; OFF's three barcode rows (750 ml, 1 L, 1.75 L)
+# sit under a producer named "Titos" with no city. The bottle prints TITO'S HANDMADE VODKA.
+TITOS_HOUSE = Producer(
+    id="prod:bcd:titos", name="Fifth Generation", kind="distillery", country="United States",
+    region="Texas", city="Austin",
+    aliases=["Tito's Handmade Vodka", "Tito's", "Mockingbird Distillery"],
+    website="https://www.titosvodka.com",
+).model_dump(mode="json")
+
+NEW_PRODUCERS = [GOSLINGS, CAMPARI_HOUSE, RAMAZZOTTI_HOUSE, TITOS_HOUSE]
 
 # The style a curated row carries: a person's word for what is in the bottle, with the
 # curation on record as its provenance.

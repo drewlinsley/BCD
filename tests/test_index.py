@@ -346,3 +346,64 @@ def _jaccard_of(a, b):
 def _all_windows(s):
     from bcd_api.index import _windows
     return _windows(s, 0)
+
+
+def _bombay_shelf() -> MedallionStore:
+    """The catalog around a bottle of Bombay Sapphire on 2026-09-17: the canon, merged by
+    hand and carrying the label's own words as an alias; `East`, the same house's other gin,
+    named for those words; and the decoys the lines otherwise reach."""
+    s = MedallionStore(root=tempfile.mkdtemp())
+
+    def producer(pid: str, name: str) -> None:
+        s.put_gold(pid, "producer", Producer(id=pid, name=name).model_dump(mode="json"))
+
+    def product(pid: str, name: str, producer_id: str, brand: str, aliases=()) -> None:
+        bid = f"brand:{pid}"
+        s.put_gold(bid, "brand", Brand(id=bid, producer_id=producer_id, name=brand).model_dump(mode="json"))
+        s.put_gold(pid, "product", Product(id=pid, name=name, producer_id=producer_id, brand_id=bid,
+                                           category=Category.SPIRIT,
+                                           aliases=list(aliases)).model_dump(mode="json"))
+
+    producer("prod:bs", "Bombay Sapphire")
+    producer("prod:whims", "Whims Brewing")
+    producer("prod:bombay", "Bombay")
+    product("p:plain", "Bombay Sapphire London Dry Gin", "prod:bs", "Bombay Sapphire",
+            aliases=["Bombay Sapphire Vapour Infused London Dry Gin", "Bombay Sapphire Dry Gin"])
+    product("p:east", "East Vapour Infused London Dry Gin", "prod:bs", "Bombay Sapphire")
+    product("p:whims", "Sapphire", "prod:whims", "Whims Brewing")
+    product("p:bombay", "Bombay", "prod:bombay", "Bombay")
+    product("p:bomber", "Bombay Bomber", "prod:bombay", "Bombay")
+    # `East`'s brand row is the house's own, as in the catalog
+    s.put_gold("brand:p:east", "brand",
+               Brand(id="brand:p:east", producer_id="prod:bs", name="Bombay Sapphire").model_dump(mode="json"))
+    return s
+
+
+BOMBAY_LABEL = "SAPPHIRE\nDistilled Distile\nLONDON\nDRY GIN\nVapour\nINFUSED INFUSE\nà la vapour"
+
+
+def test_a_rows_aliases_are_names_it_answers_to():
+    """The canon carries "Bombay Sapphire Vapour Infused London Dry Gin" as an alias, and
+    that is what the label prints. Indexed under its name alone it never surfaced for the
+    line that read VAPOUR INFUSED, and `East Vapour Infused` had the line to itself."""
+    index = LabelIndex.build(_bombay_shelf())
+    hits = dict(index.match_products(BOMBAY_LABEL, limit=3))
+    assert "p:plain" in hits, hits
+    assert hits["p:plain"] >= 0.5
+
+
+def test_the_plain_gin_is_not_east_until_bombay_is_read():
+    """On every tick the wordmark came in as SOMBAA, VAPOUR INFUSED on two lines proved
+    `East` and the bottle was drawn as the other gin (2026-09-17). East claims a word the
+    frame never read that the plain gin does not; it yields, and the plain gin waits for
+    BOMBAY -- read, it is the bottle."""
+    store = _bombay_shelf()
+    resolver = Resolver(IndexedStore(store, LabelIndex.build(store)))
+    lines = [BOMBAY_LABEL, "SOMBAA", "INFUSED\nINFUSE\nà la vapeur", "750 ml e\n40% alc./vol"]
+    resp = resolver.resolve(ScanResolveRequest(objects=[DetectedObject(id="o1", texts=lines)]))
+    names = [c.resolved.product.id for c in resp.objects[0].candidates]
+    assert resp.objects[0].status != "resolved", names
+    assert "p:east" not in names, names
+    resp = resolver.resolve(ScanResolveRequest(objects=[DetectedObject(id="o1", texts=[*lines, "BOMBAY"])]))
+    assert resp.objects[0].status == "resolved"
+    assert [c.resolved.product.id for c in resp.objects[0].candidates] == ["p:plain"]

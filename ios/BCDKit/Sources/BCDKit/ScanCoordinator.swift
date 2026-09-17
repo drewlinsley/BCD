@@ -6,10 +6,33 @@ import Combine
 public struct ResolvedOverlay: Identifiable, Sendable {
     public let id: String            // product id — also the per-product dedup key
     public let candidate: ScoredCandidate
-    public let x: Double             // normalized box center, 0-1
+    public let x: Double             // where the chip is drawn (its centre), 0-1
     public let y: Double
-    public init(id: String, candidate: ScoredCandidate, x: Double, y: Double) {
+    /// The point on the bottle the chip names -- the same as (x, y) unless the chip was
+    /// perched above its object's box or moved clear of another chip, in which case the
+    /// HUD draws a leader from the chip to here.
+    public let anchorX: Double
+    public let anchorY: Double
+    /// The tracked object's box, for an object's verdict: outlined by the HUD so two cans'
+    /// chips can be told apart. Nil for a line's answer.
+    public let box: BoundingBox?
+    public init(id: String, candidate: ScoredCandidate, x: Double, y: Double,
+                anchorX: Double? = nil, anchorY: Double? = nil, box: BoundingBox? = nil) {
         self.id = id; self.candidate = candidate; self.x = x; self.y = y
+        self.anchorX = anchorX ?? x; self.anchorY = anchorY ?? y
+        self.box = box
+    }
+
+    /// The same overlay drawn somewhere else; the anchor and box stay where the bottle is.
+    public func moved(toX nx: Double, y ny: Double) -> ResolvedOverlay {
+        ResolvedOverlay(id: id, candidate: candidate, x: nx, y: ny,
+                        anchorX: anchorX, anchorY: anchorY, box: box)
+    }
+
+    /// Whether the chip sits away from what it names -- when a leader is worth drawing.
+    public var isDisplaced: Bool {
+        let (dx, dy) = (x - anchorX, y - anchorY)
+        return (dx * dx + dy * dy).squareRoot() > 0.02
     }
 }
 
@@ -163,18 +186,15 @@ public final class ScanCoordinator: ObservableObject {
     /// line under it, then the neck -- each a few percent of the screen from the last. The
     /// object path pins its answer to the tracked box instead, which the tracker re-blends
     /// every frame; and the moment an object's verdict lands, the chip leaves the line it
-    /// was on for the box's centre. Reported from the camera as "the HUD text box jumps all
-    /// over the place when it pops up" (2026-09-15). So a chip is pinned where it first
-    /// appeared and stays there while the anchor wanders within `anchorDeadZone` of it;
-    /// beyond that -- the camera panned and the bottle is somewhere else -- it follows,
-    /// `anchorFollow` of the way each frame, so a pan is a glide rather than a jump.
-    private var pins: [String: (x: Double, y: Double)] = [:]
-    /// How far (normalised, straight-line) an anchor may wander before the chip moves. A
-    /// label's lines sit within about a tenth of the screen of each other on a bottle
-    /// filling the frame.
-    static let anchorDeadZone = 0.10
-    /// How much of the remaining distance a chip closes per frame once it has to move.
-    static let anchorFollow = 0.35
+    /// was on for the box. Reported from the camera as "the HUD text box jumps all over the
+    /// place when it pops up" (2026-09-15). So a chip is pinned where it first appeared and
+    /// stays there while the anchor wanders within the dead zone; an anchor that has stayed
+    /// outside it long enough -- the camera panned and the bottle is somewhere else -- moves
+    /// the chip once, to where the anchor is now. See `HUDLayout.steadied` for the rule and
+    /// the swim it replaced.
+    private var pins: [String: HUDLayout.Pin] = [:]
+    /// The clock the pins settle by; injectable so the rule is testable without waiting.
+    var now: () -> Date = Date.init
 
     /// The identifying words of the camera frame the overlays on screen were earned from.
     /// What a scene change is measured against, together with the texts of any resolved
@@ -244,6 +264,19 @@ public final class ScanCoordinator: ObservableObject {
         }
     }
 
+    /// The app is back in front. iOS stops the camera when the app leaves the foreground
+    /// and VisionKit does not start it again on its own; the loop here was still waiting
+    /// on frames that were never going to come. Reported as "it wasn't doing anything"
+    /// until a relaunch (2026-09-17). A scanning coordinator wakes the engine and keeps its
+    /// stream; a stopped one starts over.
+    public func resume(intervalMs: UInt64 = 350, venueId: String? = nil) {
+        guard isScanning else {
+            startLive(intervalMs: intervalMs, venueId: venueId)
+            return
+        }
+        Task { [engine] in await engine.start() }
+    }
+
     public func stop() {
         engine.stop()
         task?.cancel(); task = nil
@@ -251,11 +284,9 @@ public final class ScanCoordinator: ObservableObject {
         interpretation?.cancel(); interpretation = nil
         visionTask?.cancel(); visionTask = nil
         objectTask?.cancel(); objectTask = nil
-        objectStage.reset()
-        pins.removeAll()
-        sceneWords = []
-        strangeTicks = 0
-        publishOverlays()
+        // Nothing earned on this run stands on the next: the tab left and returned with
+        // the last scan's chips still up until the first tick replaced them.
+        clearScene()
         isLookingAtTheLabel = false
         unreadTicks = 0
         // The flag is raised before the task starts, so a task cancelled before its body ran
@@ -593,29 +624,32 @@ public final class ScanCoordinator: ObservableObject {
     /// `citron pressé` beside it (2026-09-15). The server drops those when the object rides
     /// along with the tick; this is the same rule for the ticks it does not.
     private func publishOverlays() {
-        let fromObjects = objectStage.overlays
+        let fromObjects = objectStage.overlays.map(perched)
         let taken = Set(fromObjects.map(\.id))
         let settled = objectStage.objects.filter { $0.anchored && $0.status.candidate != nil }.map(\.box)
         let fresh = fromObjects + lineOverlays.filter { line in
             !taken.contains(line.id) && !settled.contains { $0.contains(x: line.x, y: line.y) }
         }
-        overlays = fresh.map(steadied)
+        let live = Set(fresh.map(\.id))
+        pins = pins.filter { live.contains($0.key) }     // a chip that left starts afresh
+        overlays = HUDLayout.spread(fresh.map(steadied))
     }
 
-    /// The overlay drawn where its product's chip already is, unless the anchor has left
-    /// the dead zone -- then a step of the way toward it. See `pins`.
+    /// An object's chip perched above its box, off the label, tied to the box's top.
+    private func perched(_ o: ResolvedOverlay) -> ResolvedOverlay {
+        guard let box = o.box else { return o }
+        let p = HUDLayout.perch(for: box, name: HUDLayout.title(of: o.candidate),
+                                hasReason: o.candidate.reason != nil)
+        return ResolvedOverlay(id: o.id, candidate: o.candidate, x: p.x, y: p.y,
+                               anchorX: p.anchorX, anchorY: p.anchorY, box: box)
+    }
+
+    /// The overlay drawn where its product's chip already is, unless the anchor has stayed
+    /// away long enough to move it. See `pins`.
     private func steadied(_ o: ResolvedOverlay) -> ResolvedOverlay {
-        guard let pin = pins[o.id] else {
-            pins[o.id] = (o.x, o.y)
-            return o
-        }
-        let (dx, dy) = (o.x - pin.x, o.y - pin.y)
-        if (dx * dx + dy * dy).squareRoot() <= Self.anchorDeadZone {
-            return ResolvedOverlay(id: o.id, candidate: o.candidate, x: pin.x, y: pin.y)
-        }
-        let moved = (x: pin.x + dx * Self.anchorFollow, y: pin.y + dy * Self.anchorFollow)
-        pins[o.id] = moved
-        return ResolvedOverlay(id: o.id, candidate: o.candidate, x: moved.x, y: moved.y)
+        let pin = HUDLayout.steadied(pins[o.id], anchorX: o.x, anchorY: o.y, now: now())
+        pins[o.id] = pin
+        return o.moved(toX: pin.x, y: pin.y)
     }
 
     /// Whether the frame in view shares nothing with the scene the overlays came from.
