@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from bcd_ingest.dedup import _PRODUCER_SUFFIX, is_generic_token, search_name
 from bcd_ingest.store import Store, _cosine
@@ -128,11 +129,14 @@ def _latin(text: str) -> str:
     return (text or "").translate(_CONFUSABLE)
 
 
-def _trigrams(token: str) -> set[str]:
+@lru_cache(maxsize=200_000)
+def _trigrams(token: str) -> frozenset[str]:
     # pg_trgm-style padding: two leading spaces + one trailing, then 3-grams. Mirrors the
-    # store's similarity() closely enough to calibrate one threshold across both.
+    # store's similarity() closely enough to calibrate one threshold across both. Cached:
+    # a frame of twenty lines compares a few hundred distinct tokens a few hundred thousand
+    # times, and building the set was a third of a slow frame (2026-09-16).
     padded = f"  {token} "
-    return {padded[i:i + 3] for i in range(len(padded) - 2)}
+    return frozenset(padded[i:i + 3] for i in range(len(padded) - 2))
 
 
 def _trigram_sim(a: str, b: str) -> float:
@@ -401,6 +405,17 @@ _MAKER_PICK_MARGIN = 0.12       # over the runner-up among the maker's beers
 _MAKER_PICK_MAX_PRODUCTS = 60   # a brewery's catalog; past this it is a distributor
 _MAKER_PICK_WINDOW = 3          # a name is one to three consecutive tokens
 _MAKER_PICK_MIN_TOKEN = 3       # "AL" and "DY" carry nothing on their own
+# A word in a window that shares nothing with any word of the name -- nor with the name
+# written as one word -- is a different word, not a garble of one, and the window is not a
+# reading of the name however the rest of it scores. "casa pombata" -- CASA FONDATA off a
+# Ramazzotti label, the second word misread -- is a 0.24 against `casa comerci` on the
+# strength of CASA alone, over the two-word floor, and named a Sardinian beer under a
+# one-word maker the same label had spelt by accident (2026-09-16). The bar is a trigram
+# or two, not resemblance: "NYTOPPANDY" is HEADY TOPPER stacked and read as one word, and
+# shares only TOP and OPP with it. Held to words of five letters or more: "ROY", "FADY" and
+# "DY" are what a stylized HEADY looks like to the recognizer.
+_MAKER_WINDOW_WORD_MIN = 0.1
+_MAKER_WINDOW_WORD_LEN = 5
 _MAKER_TOKEN_SIM = 0.5          # what counts as a (garbled) read of the maker's own name
 # The maker line is garbled too. The can prints THE ALCHEMIST and the scanner reads
 # "CHEMIST-VER" sixty times for every four "THE ALCHEMIST", and the producer guards --
@@ -417,6 +432,12 @@ _MAKER_TOKEN_SIM = 0.5          # what counts as a (garbled) read of the maker's
 # reads at, not what a clean read would score.
 _MAKER_HYPOTHESIS_MIN = 0.30
 _MAKER_HYPOTHESES = 6           # makers a line, or a word of it, may be tried against
+# A maker's line is a few words: THE ALCHEMIST, DAVIDE CAMPARI MILANO, a brewery and its
+# town. A line longer than this is a paragraph -- an appliance sticker, the back label --
+# and matching a whole paragraph against the producer table costs a window scan per row
+# per word of it; a fridge of stickers put a frame at 2.4 s (2026-09-16). Its words are
+# still tried one at a time, which is how the maker is found in a grouped line anyway.
+_MAKER_LINE_MAX_TOKENS = 12
 # The maker line carries more than the maker: "CHEMIST-VERMONT" is the name with the town
 # after it, and matched as a whole it resembles `Vermont Ice`, `Vermont Distillers` and five
 # more Vermont producers better than it resembles `The Alchemist` (0.38) -- which then never
@@ -586,14 +607,31 @@ def _read_as(word: str, read_toks: set[str]) -> bool:
     survive it -- with letters lost at one end, the recognizer's failure on stylized type
     that `_affix_read` allows a maker's name. TOPPLING arrives as PLING and PPLING off the
     brewery line of a Dino Break can, and a name held to every word must not lose the beer
-    to the way the can's typeface loses its first letters."""
+    to the way the can's typeface loses its first letters.
+
+    Lost, never gained, and what is left has to be the word: the read is no longer than
+    the word, and matches its start or its end letter for letter, one substitution allowed
+    (RAMAZZOTTI arrived as RAMAZZON and RAMAZZOI: the type thins at the end and the last
+    letter it does read is a guess). ALCHEMIST ends the way `Chemist` ends, and the rim of
+    a Heady Topper can read whole would otherwise have read a distillery's one-word name;
+    DRINKEY -- DRINK with the next word's first letters run on, off a can that prints DRINK
+    FROM THE CAN -- would have read `Drinky`, and FARMSTOCK, sharing its last five letters
+    with `Campstock`, would have read a rye that was not on the shelf (2026-09-16). The
+    first cut anchored five letters at one end and let the rest be anything."""
     k = _MAKER_HYPOTHESIS_WORD
     for r in read_toks:
         if _trigram_sim(word, r) >= _TOKEN_SUPPORT_MIN:
             return True
-        if len(word) >= k and len(r) >= k and (word[:k] == r[:k] or word[-k:] == r[-k:]):
-            return True
+        if len(word) >= k and k <= len(r) <= len(word):
+            n = len(r)
+            if _substitutions(word[:n], r) <= 1 or _substitutions(word[-n:], r) <= 1:
+                return True
     return False
+
+
+def _substitutions(a: str, b: str) -> int:
+    """Letters that differ between two strings of one length."""
+    return sum(x != y for x, y in zip(a, b, strict=True))
 
 
 def _unread(words: list[str], read_toks: set[str]) -> list[str]:
@@ -937,14 +975,52 @@ class _Frame:
     ranked: list[ScoredCandidate] = field(default_factory=list)
     proven: list[ScoredCandidate] = field(default_factory=list)
     unresolved: list[int] = field(default_factory=list)
+    by_maker: set[str] = field(default_factory=set)     # proven by the wordmark contest
 
+
+#: Lines each tracked object lends the scene when the objects are judged together, and how
+#: many the scene may hold -- see `_resolve_scene`.
+_SCENE_LINES_PER_OBJECT = 4
+_SCENE_MAX_LINES = 16
 
 #: How many rows an `ambiguous` verdict hands the client's fine stage.
 _OBJECT_SHORTLIST = 5
+# Lines of a tracked object judged. A tracked can accumulates every read of every line for
+# as long as it stays in view, and the frame's work is lines times candidates: a Miller can
+# twenty lines deep beside a fridge of stickers put one tick at 2.4 s, and a shelf of three
+# bottles tracked as one object ran to eighty (2026-09-16). Twenty is a whole label and its
+# neighbours; what a can has been read as eighty different ways is the same lines, garbled
+# -- and `_object_lines` picks the ones that say something new.
+_OBJECT_MAX_LINES = 20
 #: Share of the reading's identifying words a row must explain to be worth a second look.
 #: Strictly more than half: "NK FROM THEO BANGE" explains exactly half of `Theo P.` and
 #: that row is a coincidence, not a shortlist.
 _OBJECT_EXPLAINED = 0.5
+
+
+def _object_lines(texts: list[str], cap: int) -> list[str]:
+    """The lines of a tracked object worth judging, at most `cap` of them, in the order the
+    client sent.
+
+    The client sends a tracked object's lines most-seen first, and the most-seen lines are
+    the ones the recognizer reads the same way every tick: the short words. A can's own
+    line is long and stylized and never reads the same way twice, so each of its readings
+    is seen once and sorts last -- the first cut kept the first twelve lines of a can of
+    Dino Break and every one was WIDESCREEN, DUDE DUD or COLLECTIO off the fridge, with
+    DINO BREAK and the brewery's line at seventeen and beyond, and the object was judged
+    without the beer on it (2026-09-15, replayed 2026-09-16). Kept by what each line adds:
+    greedily, the line with the most identifying words not yet kept, so the can's lines come
+    before the fridge's echoes and a re-read that says nothing new comes last."""
+    words = [set(_identifying_tokens(t)) for t in texts]
+    seen: set[str] = set()
+    chosen: list[int] = []
+    left = list(range(len(texts)))
+    while left and len(chosen) < cap:
+        i = max(left, key=lambda j: (len(words[j] - seen), -j))
+        chosen.append(i)
+        left.remove(i)
+        seen |= words[i]
+    return [texts[i] for i in sorted(chosen)]
 
 
 def _object_vocabulary(c: ScoredCandidate) -> tuple[str, str]:
@@ -977,7 +1053,7 @@ def _own_name_tokens(name: str, maker_tokens: list[str]) -> list[str]:
 
 def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[str],
                     skip: frozenset[int] = frozenset(), min_width: int = 1,
-                    whole_word: bool = True) -> tuple[float, int, int]:
+                    whole_word: bool = True, prepared: bool = False) -> tuple[float, int, int]:
     """How much some window of the frame looks like this beer's own name: the similarity, the
     line it was on, and how many tokens the window had.
 
@@ -999,7 +1075,8 @@ def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[s
     for i, toks in enumerate(line_tokens):
         if i in skip:
             continue
-        toks = _window_tokens(" ".join(toks), maker_tokens)
+        if not prepared:                 # `_pick_among` hands lines already stripped
+            toks = _window_tokens(" ".join(toks), maker_tokens)
         for a in range(len(toks)):
             # A token that IS one of the name's words, and nothing more, is one word --
             # the corroboration it carries is the maker's line, so it counts only when
@@ -1017,6 +1094,10 @@ def _wordmark_score(line_tokens: list[list[str]], own: str, maker_tokens: list[s
             for b in range(a + min_width, min(len(toks), a + _MAKER_PICK_WINDOW) + 1):
                 if not any(len(t) >= _MAKER_PICK_MIN_TOKEN for t in toks[a:b]):
                     continue        # "AL" off "ALC." is not a window; "DY TOPP" is
+                if any(len(t) >= _MAKER_WINDOW_WORD_LEN
+                       and max(_trigram_sim(t, w) for w in (*own.split(), merged))
+                       < _MAKER_WINDOW_WORD_MIN for t in toks[a:b]):
+                    continue        # a word of another name (see _MAKER_WINDOW_WORD_MIN)
                 sim = _trigram_sim(" ".join(toks[a:b]), own)
                 if sim > best:
                     best, at, width = sim, i, b - a
@@ -1036,6 +1117,10 @@ def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str
     # only of its own maker's, so a sibling filed under a stray producer keeps its full name
     # and simply finds nothing left in the frame to match it.
     window_excl = list(maker_tokens) + list(other_makers)
+    # The windows a line offers do not depend on the beer being scored: strip each line of
+    # chrome and maker words once, not once per beer. A maker of forty beers over an
+    # object of twenty lines was eight hundred passes of the same work (2026-09-16).
+    windows = [_window_tokens(" ".join(toks), window_excl) for toks in line_tokens]
     scored: list[tuple[float, int, dict, bool]] = []
     for rec in items:
         own = _own_name_tokens(rec.get("name") or "", maker_tokens)
@@ -1049,9 +1134,9 @@ def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str
         # A two-word name is read by a two-word window, literally: one word of "sapphire
         # murcian lemon" read exactly is a prefix, not a name, and scored 0.43 off a bottle
         # of the plain gin. A one-word name is read by whatever resembles it closely enough.
-        sim, at, width = _wordmark_score(line_tokens, " ".join(own), window_excl, skip,
+        sim, at, width = _wordmark_score(windows, " ".join(own), window_excl, skip,
                                          min_width=1 if len(own) == 1 else 2,
-                                         whole_word=maker_read)
+                                         whole_word=maker_read, prepared=True)
         scored.append((sim, at, rec, len(own) == 1))
     if not scored:
         return None
@@ -1147,6 +1232,9 @@ def _explains_enough(c: ScoredCandidate, reading: str) -> bool:
 class Resolver:
     def __init__(self, store: Store) -> None:
         self.store = store
+        self._producer_memo: dict[tuple[str, int], list[tuple[dict, float]]] | None = None
+        self._hydrate_memo: dict[str, ResolvedProduct | None] | None = None
+        self._catalog_memo: dict[tuple[str, int | None], list[dict]] | None = None
 
     # Matching is delegated to the store: token-overlap on the SQLite dev store,
     # real pg_trgm trigram similarity on Postgres — same signature either way.
@@ -1158,6 +1246,18 @@ class Resolver:
         return None
 
     def _hydrate(self, product_rec: dict) -> ResolvedProduct | None:
+        # Remembered for the request (see `resolve`): a frame and the objects tracked over
+        # it surface the same rows, and each hydration is two store reads.
+        memo = self._hydrate_memo
+        key = product_rec.get("id") if isinstance(product_rec, dict) else None
+        if memo is not None and key is not None and key in memo:
+            return memo[key]
+        out = self._hydrate_uncached(product_rec)
+        if memo is not None and key is not None:
+            memo[key] = out
+        return out
+
+    def _hydrate_uncached(self, product_rec: dict) -> ResolvedProduct | None:
         # A merged-away row leaves a tombstone under its old id ({"id", "redirects_to"}), and
         # anything holding that id -- a SKU, a cached candidate, a client replaying an old
         # answer -- still hands it here. Follow it to the row that now holds the product
@@ -1210,9 +1310,9 @@ class Resolver:
             # styleless name against a styleless line, so "DRINK FROM" -- now that both words
             # are known chrome -- reached a producer literally registered as "drink drink!"
             # and offered its beer at 0.60.
-            if not _identifying_tokens(text):
+            if not _identifying_tokens(text) or len(_tokens(text)) > _MAKER_LINE_MAX_TOKENS:
                 continue
-            for prod, sc in match(text):
+            for prod, sc in self._producers(text):
                 pid = prod.get("id") or ""
                 if sc < _PRODUCER_MATCH_MIN or pid in seen:
                     continue
@@ -1227,7 +1327,7 @@ class Resolver:
                 if len(pname) < _SHORT_NAME_LEN and not _short_name_supported(text, pname):
                     continue
                 seen.add(pid)
-                items = products_of(pid)
+                items = self._products_of(pid)
                 if hint:
                     items = [p for p in items if (p.get("category") or "") == hint]
                 if not items or len(items) > _PRODUCER_MAX_PRODUCTS:
@@ -1267,9 +1367,11 @@ class Resolver:
             ident = _identifying_tokens(text)
             if not ident:
                 continue
-            queries = [text] + [t for t in ident if len(t) >= _MAKER_HYPOTHESIS_WORD]
+            queries = [t for t in ident if len(t) >= _MAKER_HYPOTHESIS_WORD]
+            if len(_tokens(text)) <= _MAKER_LINE_MAX_TOKENS:
+                queries.insert(0, text)
             for q in queries:
-                for prod, sc in match(q, limit=_MAKER_HYPOTHESES):
+                for prod, sc in self._producers(q, limit=_MAKER_HYPOTHESES):
                     pid = prod.get("id") or ""
                     pname = prod.get("name") or ""
                     if sc < _MAKER_HYPOTHESIS_MIN or not _affix_read(text, pname):
@@ -1310,7 +1412,7 @@ class Resolver:
                 maker_words += words
         out: list[tuple[int, dict, float]] = []
         for i, _, prod, _, read in best.values():
-            items = products_of(prod.get("id") or "", limit=_MAKER_PICK_MAX_PRODUCTS + 1)
+            items = self._products_of(prod.get("id") or "", limit=_MAKER_PICK_MAX_PRODUCTS + 1)
             if hint:
                 items = [p for p in items if (p.get("category") or "") == hint]
             if not items or len(items) > _MAKER_PICK_MAX_PRODUCTS:
@@ -1326,6 +1428,33 @@ class Resolver:
             out.append((at if at >= 0 else i, rec,
                         round(_PRODUCER_EVIDENCE + (1 - _PRODUCER_EVIDENCE) * shape, 3)))
         return out, picked
+
+    def _products_of(self, producer_id: str, limit: int | None = None) -> list[dict]:
+        """`store.products_of`, remembered for the request like `_producers`: the same
+        makers are hypothesised from every object tracked over a frame, and each catalog
+        hydrated is a store read per row."""
+        key = (producer_id, limit)
+        memo = self._catalog_memo
+        if memo is not None and key in memo:
+            return memo[key]
+        out = (self.store.products_of(producer_id) if limit is None
+               else self.store.products_of(producer_id, limit=limit))
+        if memo is not None:
+            memo[key] = out
+        return out
+
+    def _producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
+        """`store.match_producers`, remembered for the request: a frame's lines recur in
+        every object tracked over them, and the maker paths ask about each line and each
+        word of it. The memo lives for one `resolve()` (see there)."""
+        key = (text, limit)
+        memo = self._producer_memo
+        if memo is not None and key in memo:
+            return memo[key]
+        out = self.store.match_producers(text, limit=limit)
+        if memo is not None:
+            memo[key] = out
+        return out
 
     def _match_lines(self, texts: list[str]) -> list[list[tuple[dict, float]]]:
         """A frame's name matches, concurrently where the store can. The fallback keeps any
@@ -1412,6 +1541,14 @@ class Resolver:
         """
         detections = [d.model_copy(update={"text": _latin(d.text)}) if d.kind != "barcode" else d
                       for d in req.detections]
+        self._producer_memo, self._hydrate_memo, self._catalog_memo = {}, {}, {}
+        try:
+            return self._resolve(req, detections, profile)
+        finally:
+            self._producer_memo = self._hydrate_memo = self._catalog_memo = None
+
+    def _resolve(self, req: ScanResolveRequest, detections: list[DetectedText],
+                 profile: TasteProfile | None) -> ScanResolveResponse:
         frame = self._resolve_lines(detections, req.include_score, profile)
         corroborated = bool(frame.proven)
         # A frame nothing corroborates has no evidence to rank a list with, so offering one
@@ -1432,6 +1569,10 @@ class Resolver:
 
         objects = [self.resolve_object(o, profile, req.include_score, req.min_match_score)
                    for o in req.objects]
+        if not corroborated and not any(r.status == "resolved" for r in objects):
+            scene = self._resolve_scene(req.objects, profile, req.include_score)
+            if scene is not None:
+                objects = [scene if r.object_id == scene.object_id else r for r in objects]
         settled = [res.candidates[0] for res in objects if res.status == "resolved"]
         if settled:
             # An object's verdict makes the response corroborated, and the client draws a
@@ -1628,7 +1769,7 @@ class Resolver:
                 best_hit[rid] = (i, sc, rec)
             qualified_by_id.setdefault(rid, self._qualified_name(rec))
 
-        def _is_whole_label(rid: str, name: str, raw_score: float, line_i: int) -> bool:
+        def _is_whole_label(resolved: ResolvedProduct, raw_score: float, line_i: int) -> bool:
             """True when the line this candidate matched is its name and essentially nothing
             else -- proof on its own, needing no second line to agree.
 
@@ -1636,6 +1777,7 @@ class Resolver:
             judgement, and when they were written separately they contradicted each other: the
             penalty pushed the score under the very bar the proof required.
             """
+            rid, name = resolved.product.id, resolved.product.name
             qualified = qualified_by_id.get(rid, name)
             if sum(len(t) for t in _identifying_tokens(qualified)) < _MIN_SELF_PROOF_CHARS:
                 return False
@@ -1661,6 +1803,15 @@ class Resolver:
             if any(j != line_i and flat and flat in _flatten(d.text) and flat != _flatten(d.text)
                    for j, d in enumerate(detections)):
                 return False
+            # And the line has to read a word that is the drink's own, not only its maker's.
+            # A row named for its brewery and one word more -- `Toppling Goliath Brewing Co.
+            # Mozee` -- is most of the brewery's line by similarity, and the brewery's line
+            # alone, TOPPLING GOLIATH BREWING CO., proved it at 0.80 off a can of Dino Break
+            # whose own line was out of view (2026-09-16). A flagship named for its house
+            # has no such word to ask for and is held to the whole name as before.
+            own, flagship = _own_vocabulary(resolved)
+            if not flagship and not any(_read_as(w, set(line_tokens[line_i])) for w in own):
+                return False
             if raw_score >= _STRONG_MATCH and _accounts_for_the_line(
                     qualified, detections[line_i].text, threshold=_SELF_PROOF_SIM):
                 return True
@@ -1671,28 +1822,22 @@ class Resolver:
             # `Miller High Life` is in it. Two or more of the name's own words, all read on one
             # line, is the phrase rule met a second way; a name with one such word ("Colors",
             # `Black Sea` once "sea" is too short to count) is not helped by it.
-            return _reads_the_name(qualified, detections[line_i].text)
+            #
+            # Read the way the recognizer reads, letters lost at one end allowed (`loose`):
+            # RAMAZZOTTI arrived as RAMAZZON, RAMAZZOT, RAMAZZOI on thirty frames and never
+            # once whole -- the TTI is where the wordmark's type thins -- and "1815 RAMAZZON
+            # Aperiti Rosato" is the whole name in order, each word short a letter or two.
+            # Nothing was drawn (2026-09-16). Five letters is the floor a lost-letter read
+            # needs, so "BLACK SEA" still does not read `Black Seal`.
+            return _reads_the_name(qualified, detections[line_i].text, loose=True)
 
         read_toks = {t for toks in line_tokens for t in toks}
-        scored: list[tuple[int, ScoredCandidate]] = []
-        named_by_id: dict[str, int] = {}
-        whole_label: dict[str, bool] = {}
-        by_house: set[str] = set()                        # one-word labels their house proved
-        for line_i, sc, rec in best_hit.values():
-            resolved = self._hydrate(rec)
-            if (resolved is None or _is_business_name(resolved)
-                    or _kind_contradicts(resolved, frame_kinds)):
-                continue
-            cat = resolved.product.category.value if resolved.product.category else None
-            vocab = _candidate_vocabulary(resolved)
-            support = _frame_support(vocab, line_tokens, category=cat, hint=hint)
-            # The same count without the category's point. Agreeing on the category is real
-            # evidence for *ranking* -- it is what separates `The Alchemist Heady Topper` from
-            # `Alchemist Amer` -- but it cannot certify a frame, because on a can that prints
-            # "ALE" every beer in the catalog earns it. Counting it here let a row named "Ache"
-            # reach the corroboration bar off one mis-segmented fragment, and a certified frame
-            # is precisely the one the client does not ask the model about.
-            named = _frame_support(vocab, independent)
+
+        def _corroboration(resolved: ResolvedProduct, vocab: list[str],
+                           readings: list[list[str]]) -> int:
+            """How many of the frame's distinct readings name this product -- the count
+            without the category's point (see the call)."""
+            named = _frame_support(vocab, readings)
             # And lines that agree only on the maker's words have named the maker. A can of
             # Long Live Beerworks read LIVE on one line and LONG FIRES on another, and those
             # two named `Long Live Beerwoks Hola Fantasma` -- one of the brewery's beers, the
@@ -1711,8 +1856,31 @@ class Resolver:
                 # what MILLER beside HIGH LIFE has, and what GOSLINGS beside BLACK SEAL has
                 # for `Goslings Black Seal` and not for `Goslings Gold Seal`.
                 whole = not flagship or _reads_every_word(resolved.product.name or "", read_toks)
-                if not whole or not _frame_support(own, independent):
+                if not whole or not _frame_support(own, readings):
                     named = 1
+            return named
+
+        scored: list[tuple[int, ScoredCandidate]] = []
+        named_by_id: dict[str, int] = {}
+        evidence: dict[str, tuple[ResolvedProduct, list[str]]] = {}
+        whole_label: dict[str, bool] = {}
+        by_house: set[str] = set()                        # one-word labels their house proved
+        for line_i, sc, rec in best_hit.values():
+            resolved = self._hydrate(rec)
+            if (resolved is None or _is_business_name(resolved)
+                    or _kind_contradicts(resolved, frame_kinds)):
+                continue
+            cat = resolved.product.category.value if resolved.product.category else None
+            vocab = _candidate_vocabulary(resolved)
+            support = _frame_support(vocab, line_tokens, category=cat, hint=hint)
+            # The same count without the category's point. Agreeing on the category is real
+            # evidence for *ranking* -- it is what separates `The Alchemist Heady Topper` from
+            # `Alchemist Amer` -- but it cannot certify a frame, because on a can that prints
+            # "ALE" every beer in the catalog earns it. Counting it here let a row named "Ache"
+            # reach the corroboration bar off one mis-segmented fragment, and a certified frame
+            # is precisely the one the client does not ask the model about.
+            named = _corroboration(resolved, vocab, independent)
+            evidence[resolved.product.id] = (resolved, vocab)
             if named <= 1 and _house_names_the_label(resolved, detections, read_toks):
                 # The one-word label's second word is its house's line (see the rule).
                 named = _MIN_FRAME_FOR_PENALTY
@@ -1734,8 +1902,7 @@ class Resolver:
             # off "CHEMIST" beside two lines naming the Alchemist beer must still rank below it
             # -- while proof asks only whether some line is wholly this label, which is what a
             # shelf gives every product on it.
-            whole_label[resolved.product.id] = _is_whole_label(
-                resolved.product.id, resolved.product.name, sc, line_i)
+            whole_label[resolved.product.id] = _is_whole_label(resolved, sc, line_i)
             if named <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
                 score *= _UNCORROBORATED
             score = round(score, 3)
@@ -1754,6 +1921,39 @@ class Resolver:
                     cold_start=cold,
                 ),
             ))
+
+        # A line that is one product's whole label is that product's line, and its words
+        # are that product's words. HIGH LIFE off a Miller can beside RIDGE FARM off a
+        # sticker on the next shelf proved `High Ridge` -- a word from each, each on its own
+        # line, the way two lines are meant to agree -- while the first line was Miller High
+        # Life's whole label, proven as such (2026-09-17). A row that reads only SOME of the
+        # label's words on that line, and nothing else there, has borrowed them, and is
+        # counted again without the line. A row that reads a word there the label does not
+        # is on a line the recognizer merged from two cans -- HOPPY IPA ran into the Miller
+        # block on six frames, and WORMTOWN beside it is `Wormtown Be Hoppy` -- and keeps
+        # it; so does `Miller High Life` over the importer's `High Life` on the HIGH LIFE
+        # line, and so does `Goslings Black Seal` over the gin called `Black Seal` on BLACK
+        # SEAL 80 PROOF BERMUDA BLACK RUM: a row that reads every word the label reads there
+        # explains the line as well as the label does, and GOSLINGS beside it decides.
+        label_line_of = {rid: i for rid, (i, _, _) in best_hit.items()
+                         if whole_label.get(rid) and rid in evidence}
+
+        def _reads_on(vocab: list[str], line_i: int) -> set[str]:
+            toks = set(line_tokens[line_i])
+            return {w for w in vocab if _read_as(w, toks)}
+
+        for pid, (resolved, vocab) in evidence.items():
+            if (named_by_id.get(pid, 0) < _MIN_FRAME_FOR_PENALTY or whole_label.get(pid)
+                    or pid in by_house):
+                continue
+            owned = {reading_of[i] for rid, i in label_line_of.items()
+                     if rid != pid and i in reading_of
+                     and _reads_on(vocab, i) < _reads_on(evidence[rid][1], i)}
+            if not owned:
+                continue
+            readings = [toks for g, toks in enumerate(independent) if g not in owned]
+            if _corroboration(resolved, vocab, readings) < _MIN_FRAME_FOR_PENALTY:
+                named_by_id[pid] = 1
 
         # Collapse to one overlay per *real* product and cap the frame — the server-side
         # backstop against the crowding (and the duplicate-catalog-record double overlays) the
@@ -1882,7 +2082,47 @@ class Resolver:
         }
         ranked = [entry for entry in ranked if entry[1].resolved.product.id not in shadowed]
         proven = [c for _, c in ranked if _is_proven(c)]
-        return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved)
+        return _Frame(ranked=[c for _, c in ranked], proven=proven, unresolved=unresolved,
+                      by_maker=by_maker)
+
+    # ---- the scene: the objects together, when none answered alone ----
+
+    def _resolve_scene(self, objs: list[DetectedObject], profile: TasteProfile | None,
+                       include_score: bool) -> ObjectResolution | None:
+        """The maker's beer, when the maker is on one tracked object and the wordmark on
+        another.
+
+        The tracker follows regions of the screen, and on a can of Heady Topper the rim
+        (THE ALCHEMIST, read as CHEMIST-VERNO) and the wordmark (HEADY TOPPER, read as
+        RDY TOPP) are far enough apart to be two objects -- and each tick sends the three
+        largest lines of the frame, which on a fridge of stickers were the stickers. So no
+        request ever held both halves, and the maker path, which needs both, never ran:
+        fifteen frames of the maker read and nothing drawn (2026-09-16). Judged together,
+        the objects' lines are the frame the maker path was written for. Only the wordmark
+        contest is trusted across objects -- a maker read on one and a beer of its own
+        picked by shape on another is two parts of one can agreeing -- and the verdict lands
+        on the object that holds the wordmark.
+        """
+        texts: list[str] = []
+        owner: list[str] = []
+        for o in objs:
+            lines = [_latin(t) for t in o.texts if t and t.strip()]
+            for lt in _object_lines(lines, _SCENE_LINES_PER_OBJECT):
+                if lt not in texts:
+                    texts.append(lt)
+                    owner.append(o.id)
+        if len(texts) < 2 or len(set(owner)) < 2:
+            return None
+        texts, owner = texts[:_SCENE_MAX_LINES], owner[:_SCENE_MAX_LINES]
+        frame = self._resolve_lines([DetectedText(text=t) for t in texts], include_score, profile)
+        picks = [c for c in frame.proven if c.resolved.product.id in frame.by_maker]
+        if len(picks) != 1 or not (0 <= picks[0].detection_index < len(owner)):
+            return None
+        pick = picks[0]
+        at = owner[pick.detection_index]
+        return ObjectResolution(
+            object_id=at, status="resolved", query=" | ".join(texts),
+            candidates=[pick.model_copy(update={"object_id": at, "detection_index": -1})])
 
     # ---- objects: one can, one verdict ----
 
@@ -1910,7 +2150,7 @@ class Resolver:
                          `Top's` here, "ACHE MIST-VERM" does not put `Ache` here.
           * `unresolved` nothing the reading supports. Show nothing; keep reading.
         """
-        texts = [_latin(t) for t in obj.texts if t and t.strip()]
+        texts = _object_lines([_latin(t) for t in obj.texts if t and t.strip()], _OBJECT_MAX_LINES)
         query = " | ".join(texts + ([obj.barcode] if obj.barcode else []))
 
         def tagged(c: ScoredCandidate) -> ScoredCandidate:

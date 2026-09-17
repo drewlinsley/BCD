@@ -14,6 +14,8 @@ from bcd_api.resolver import (
     _identity_key,
     _is_business_name,
     _latin,
+    _object_lines,
+    _read_as,
     _reads_the_name,
     _same_read,
     _token_supported,
@@ -1217,6 +1219,51 @@ def test_two_reads_of_one_line_back_a_row_once():
     assert names == ["The Alchemist Heady Topper"], names
 
 
+def test_a_window_word_that_shares_nothing_with_the_name_is_another_word():
+    """"casa pombata" -- CASA FONDATA off a Ramazzotti label, the second word misread -- is
+    a 0.24 against `casa comerci` on the strength of CASA alone, over the two-word floor,
+    and named a Sardinian beer under a one-word maker the label had spelt by accident
+    (2026-09-16). A word of five letters that shares no trigram with any word of the name
+    is not a garble of one."""
+    cala = _producer("pr:cala", "Birra Cala")
+    beer = _beer("Birra Cala Casa Comerci", "p:comerci", "pr:cala")
+    store = _MakerStore(by_text={}, gold={"pr:cala": cala},
+                        producers={"RAMAZZOI\nCALA POMDATA NEI\n1815 9\nAperitivo\nRosato": [(cala, 0.4)]},
+                        catalog={"pr:cala": [beer]})
+    _, res = _verdict(store, ["RAMAZZOI\nCALA POMDATA NEI\n1815 9\nAperitivo\nRosato",
+                              "CASA POMBATA AE\na 1815 -", "Aperitio\nRosato"])
+    assert res.status != "resolved", _names(res)
+
+
+def test_a_whole_name_read_short_a_letter_or_two_still_proves_itself():
+    """RAMAZZOTTI arrived as RAMAZZON, RAMAZZOT, RAMAZZOI on thirty frames and never once
+    whole; "1815 RAMAZZON Aperiti Rosato" is the whole name in order, each word short a
+    letter or two, and nothing was drawn (2026-09-16)."""
+    row = Product(id="p:rosato", brand_id="b", producer_id="pr:imp", category=Category.SPIRIT,
+                  name="Ramazzotti Aperitivo Rosato").model_dump(mode="json")
+    store = _FrameStore(by_text={"1815\nRAMAZZON\nAperiti\nRosato": [(row, 0.72)]},
+                        gold={"pr:imp": _producer("pr:imp", "Knappogue Castle")})
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text="1815\nRAMAZZON\nAperiti\nRosato")]))
+    assert resp.corroborated
+    assert [c.resolved.product.name for c in resp.candidates] == ["Ramazzotti Aperitivo Rosato"]
+
+
+@pytest.mark.parametrize("word, read, ok", [
+    ("ramazzotti", "ramazzot", True),      # letters lost at the end
+    ("ramazzotti", "ramazzon", True),      # ...and the last one read a guess
+    ("toppling", "ppling", True),          # ...or lost at the start
+    ("campari", "campani", True),          # one substituted, same length
+    ("sapphire", "sapphires", False),      # a letter gained is a merge, not a loss
+    ("drinky", "drinkey", False),          # DRINK with the next word run on: not `Drinky`
+    ("campstock", "farmstock", False),     # five letters shared at one end is not the word
+    ("chemist", "alchemist", False),       # two gained is another word: the rim of a Heady can
+    ("seal", "sea", False),                # too short for a lost-letter read at all
+])
+def test_a_lost_letter_read_is_lost_not_gained(word, read, ok):
+    assert _read_as(word, {read}) is ok
+
+
 def test_lexicon_carries_names_not_generic_words(shelf):
     words = Resolver(shelf).lexicon(limit=100)
     assert "alchemist" in words and "topper" in words and "focal" in words
@@ -1940,6 +1987,108 @@ def test_a_business_name_is_not_a_product():
     assert [c.resolved.product.id for c in resp.candidates] == ["p:dino"]
     resp = Resolver(_FrameStore(frame, gold)).resolve(_frame("AGEPUSS", "SESAME", brewery_line))
     assert not resp.corroborated, "the brewery alone named a product"
+
+
+def test_the_makers_line_alone_does_not_prove_the_maker_plus_a_word():
+    """`Toppling Goliath Brewing Co. Mozee` is the brewery's name and one word more, and by
+    similarity it is most of the brewery's line: TOPPLING GOLIATH BREWING CO. proved it at
+    0.80 off a can of Dino Break whose own line was out of view (2026-09-16). The line has
+    to read a word that is the beer's own."""
+    tg = _producer("pr:tg", "Toppling Goliath Brewing Co.")
+    gold = {"pr:tg": tg, "b:tg": _brand("b:tg", "Toppling Goliath Brewing Co.", "pr:tg")}
+    mozee = _prod_branded("Toppling Goliath Brewing Co. Mozee", "p:mozee", "pr:tg", "b:tg")
+    brewery_line = "TOPPLING GOLIATH BREWING CO."
+    store = _FrameStore({brewery_line: [(mozee, 1.0)]}, gold)
+    resp = Resolver(store).resolve(_frame("BEAGLEPUSS", "DUDE DUDE", brewery_line))
+    assert not resp.corroborated, [c.resolved.product.name for c in resp.candidates]
+    _, res = _verdict(store, ["WIDESCREEN", "DUDE DUDE", brewery_line])
+    assert res.status != "resolved", _names(res)
+    # The beer's own word on the line, and the same row is the label.
+    store = _FrameStore({"TOPPLING GOLIATH BREWING CO. MOZEE": [(mozee, 1.0)]}, gold)
+    resp = Resolver(store).resolve(_frame("TOPPLING GOLIATH BREWING CO. MOZEE"))
+    assert resp.corroborated
+
+
+def test_a_whole_labels_line_lends_no_word_to_another_row():
+    """HIGH LIFE off a Miller can beside RIDGE FARM off a sticker on the next shelf proved
+    `High Ridge`: a word from each, each on its own line, while the first line was Miller
+    High Life's whole label (2026-09-17). The importer's `High Life` row shares that line
+    with the Miller row rather than borrowing from it, and the fuller row still wins."""
+    gold = {"pr:miller": _producer("pr:miller", "Miller Brewing Company"),
+            "b:miller": _brand("b:miller", "Miller", "pr:miller"),
+            "pr:99": _producer("pr:99", "99 Brand"), "b:99": _brand("b:99", "99 Brand", "pr:99"),
+            "pr:imp": _producer("pr:imp", "Some Importer"), "b:imp": _brand("b:imp", "High Life", "pr:imp")}
+    miller = _prod_branded("Miller High Life", "p:mhl", "pr:miller", "b:miller")
+    ridge = _prod_branded("High Ridge", "p:ridge", "pr:99", "b:99")
+    high_life = _prod_branded("High Life", "p:hl", "pr:imp", "b:imp")
+    can = "PREMIUM\nMiller\nBREWED\nHIGH LIFE\nESTD 1903\nFLUID OUNCES"
+    frame = {can: [(miller, 0.75), (high_life, 0.6), (ridge, 0.5)], "RIDGE FARM": [(ridge, 0.55)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(can, "RIDGE FARM", "lelot"))
+    assert resp.corroborated
+    assert [c.resolved.product.name for c in resp.candidates] == ["Miller High Life"]
+    # Two cans read as one block: HOPPY IPA ran into the Miller block on six frames, and
+    # WORMTOWN beside it is `Wormtown Be Hoppy`. HOPPY is not a word Miller reads there.
+    gold["pr:worm"] = _producer("pr:worm", "Wormtown Brewery")
+    gold["b:worm"] = _brand("b:worm", "Wormtown", "pr:worm")
+    hoppy = _prod_branded("Wormtown Be Hoppy", "p:hoppy", "pr:worm", "b:worm")
+    block = can + "\nThe Champagne of Beers\nHOPPY IPA\n6.5% 1 PINT"
+    frame = {block: [(miller, 0.7), (hoppy, 0.4)], "WORMTOWN": [(hoppy, 0.6)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(block, "WORMTOWN", "HIGH"))
+    assert sorted(c.resolved.product.name for c in resp.candidates) == [
+        "Miller High Life", "Wormtown Be Hoppy"]
+    # And a row that reads every word the label reads there explains the line as well as
+    # the label does: `Goslings Black Seal` over the gin called `Black Seal`, GOSLINGS
+    # beside it (the first cut, "every word of the row is one of the label's", lost the rum).
+    gold.update({"pr:gos": _producer("pr:gos", "Goslings"), "b:gos": _brand("b:gos", "Goslings", "pr:gos"),
+                 "pr:win": _producer("pr:win", "Winters"), "b:win": _brand("b:win", "Black Seal", "pr:win")})
+    rum = _prod_branded("Goslings Black Seal", "p:rum", "pr:gos", "b:gos")
+    gin = _prod_branded("Black Seal", "p:gin", "pr:win", "b:win")
+    seal = "BLACK SEAL\n80 PROOF\nBERMUDA BLACK RUM"
+    frame = {seal: [(gin, 1.0), (rum, 0.7)], "Goslings\nSince 1806": [(rum, 0.6)]}
+    resp = Resolver(_FrameStore(frame, gold)).resolve(_frame(seal, "Goslings\nSince 1806"))
+    assert [c.resolved.product.name for c in resp.candidates] == ["Goslings Black Seal"]
+
+
+def test_an_objects_lines_are_kept_by_what_they_add():
+    """The client sends a tracked object's lines most-seen first, and most-seen are the short
+    words the recognizer reads the same way every tick: the first twelve lines of a can of
+    Dino Break beside a fridge were WIDESCREEN, COLLECTIO and DUDE DUD, with DINO BREAK and
+    the brewery at seventeen and beyond (2026-09-15). Kept by the identifying words each
+    adds, in the order sent."""
+    lines = ["WIDESCREEN", "COLLECTIO", "Longfires", "BEAGLEPUSS*", "TOPPLING GOLIATH BREWING CO.",
+             "DUDE DUDE", "ESCREEN", "CO", "DUDE DUD", "COLL", "Longfire,", "COLLECT", "Longfice",
+             "Longine,", "WIDESCREEN\nDUDE DUD", "4\nPACK\n4 - 16/L 02. CANS", "9201\n10780",
+             "DINO BREAN\nWEST COAST STYLE DOUBLE INDIA PALE ALE WITH SIMCOE, AMARILLO & CENTENNAL HOPS",
+             "MAR BLE\nBEAGLEPUSS*", "PPLING GOLIATH BREWING CO."]
+    kept = _object_lines(lines, 6)
+    assert lines[17] in kept and "TOPPLING GOLIATH BREWING CO." in kept
+    assert "CO" not in kept and "COLL" not in kept and "DUDE DUD" not in kept
+    assert "WIDESCREEN" not in kept, "WIDESCREEN / DUDE DUD says everything it does"
+    assert kept == [t for t in lines if t in kept], "the client's order is kept"
+    assert _object_lines(lines, 100) == lines
+    assert _object_lines([], 5) == []
+
+
+def test_the_scene_joins_a_maker_on_one_object_to_the_wordmark_on_another():
+    """On a can of Heady Topper the rim (THE ALCHEMIST) and the wordmark (HEADY TOPPER, read
+    as RDY TOPP) are far enough apart to be tracked as two objects, and each tick's three
+    largest lines were a fridge's stickers, so no request ever held both halves: fifteen
+    frames of the maker read and nothing drawn (2026-09-16). Judged together, the maker's
+    beer is picked, and the verdict lands on the object holding the wordmark."""
+    store = _alchemist_store("THE ALCHEMIST")
+    rim = DetectedObject(id="rim", texts=["THE ALCHEMIST", "ALC. 8% BY VOL"])
+    mark = DetectedObject(id="mark", texts=["FADY TOPPE", "1 PINT"])
+    resp = Resolver(store).resolve(ScanResolveRequest(
+        detections=[DetectedText(text="WIDESCREEN"), DetectedText(text="COLLECTION")],
+        objects=[rim, mark]))
+    by_id = {o.object_id: o for o in resp.objects}
+    assert by_id["mark"].status == "resolved", [(o.object_id, o.status) for o in resp.objects]
+    assert _names(by_id["mark"]) == ["The Alchemist Heady Topper"]
+    assert by_id["rim"].status != "resolved"
+    assert resp.corroborated
+    # Alone, neither half is the beer: the scene is not a second chance for one object.
+    resp = Resolver(store).resolve(ScanResolveRequest(objects=[mark]))
+    assert resp.objects[0].status != "resolved"
 
 
 def test_a_maker_hypothesis_rests_on_a_word_that_identifies_the_maker():
