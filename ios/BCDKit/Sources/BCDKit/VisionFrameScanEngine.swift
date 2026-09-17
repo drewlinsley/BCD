@@ -42,10 +42,13 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         public init() {}
     }
 
-    public let frames: AsyncStream<[DetectedText]>
+    /// The frames of the current run; `stop()` finishes it and the next `start()` opens a
+    /// fresh one (see `VisionKitScanEngine.frames` for why).
+    public var frames: AsyncStream<[DetectedText]> { lock.withLock { _frames } }
     public let session = AVCaptureSession()
     public var contentAspect: Double? { lock.withLock { _contentAspect } }
 
+    private var _frames: AsyncStream<[DetectedText]>
     private var continuation: AsyncStream<[DetectedText]>.Continuation?
     private let config: Config
     private let sessionQueue = DispatchQueue(label: "bcd.capture.session")
@@ -63,13 +66,21 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
 
     public init(config: Config = Config()) {
         self.config = config
-        var cont: AsyncStream<[DetectedText]>.Continuation!
-        self.frames = AsyncStream { cont = $0 }
-        self.continuation = cont
+        (_frames, continuation) = Self.openStream()
         super.init()
     }
 
+    private static func openStream() -> (AsyncStream<[DetectedText]>,
+                                         AsyncStream<[DetectedText]>.Continuation) {
+        var cont: AsyncStream<[DetectedText]>.Continuation!
+        let stream = AsyncStream { cont = $0 }
+        return (stream, cont)
+    }
+
     public func start() async {
+        lock.withLock {
+            if continuation == nil { (_frames, continuation) = Self.openStream() }
+        }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
                 self.configureIfNeeded()
@@ -80,7 +91,10 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
     }
 
     public func stop() {
-        continuation?.finish()
+        lock.withLock {
+            continuation?.finish()
+            continuation = nil
+        }
         sessionQueue.async { if self.session.isRunning { self.session.stopRunning() } }
     }
 
@@ -167,7 +181,7 @@ public final class VisionFrameScanEngine: NSObject, ScanEngine, @unchecked Senda
         }
         // Regions travel beside the text stream (`RegionProvider`), read by the coordinator
         // as it ingests each frame, so a text-only engine and this one share one protocol.
-        continuation?.yield(texts)
+        lock.withLock { continuation }?.yield(texts)
     }
 
     /// Coarse stage: lift foreground instances, keep the drink containers, box them.

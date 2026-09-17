@@ -13,6 +13,7 @@ import AVFoundation
 
 struct ScanView: View {
     @EnvironmentObject var env: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = ScanViewModel()
     @State private var ask: String = ""
     @State private var selected: ScoredCandidate?
@@ -24,16 +25,45 @@ struct ScanView: View {
 
             GeometryReader { geo in
                 ForEach(Array(model.overlays.enumerated()), id: \.element.id) { idx, overlay in
-                    let anchor = model.viewPoint(overlay.anchor, in: geo.size)
+                    let at = model.viewPoint(overlay.anchor, in: geo.size)
+                    let tie = model.viewPoint(overlay.tie, in: geo.size)
+                    let tint = OverlayChip.tint(for: overlay.candidate)
+                    // What the chip names: a thin outline round the tracked can, and a
+                    // leader from the chip to it when the chip had to sit elsewhere. With
+                    // two cans in view this is what says which name is whose.
+                    if let box = overlay.box {
+                        let tl = model.viewPoint(CGPoint(x: box.minX, y: box.minY), in: geo.size)
+                        let br = model.viewPoint(CGPoint(x: box.maxX, y: box.maxY), in: geo.size)
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(tint.opacity(0.7), lineWidth: 1.5)
+                            .frame(width: max(0, br.x - tl.x) * geo.size.width,
+                                   height: max(0, br.y - tl.y) * geo.size.height)
+                            .position(x: (tl.x + br.x) / 2 * geo.size.width,
+                                      y: (tl.y + br.y) / 2 * geo.size.height)
+                            .animation(.easeOut(duration: 0.25), value: tl)
+                            .allowsHitTesting(false)
+                    }
+                    if overlay.isDisplaced {
+                        Path { p in
+                            p.move(to: CGPoint(x: at.x * geo.size.width, y: at.y * geo.size.height))
+                            p.addLine(to: CGPoint(x: tie.x * geo.size.width, y: tie.y * geo.size.height))
+                        }
+                        .stroke(tint.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .allowsHitTesting(false)
+                        Circle().fill(tint)
+                            .frame(width: 7, height: 7)
+                            .position(x: tie.x * geo.size.width, y: tie.y * geo.size.height)
+                            .allowsHitTesting(false)
+                    }
                     OverlayChip(candidate: overlay.candidate,
                                 reaction: env.reactions
                                     .reaction(for: overlay.candidate.resolved.product.id))
-                        .position(x: anchor.x * geo.size.width,
-                                  y: anchor.y * geo.size.height)
+                        .position(x: at.x * geo.size.width,
+                                  y: at.y * geo.size.height)
                         // A chip stays put while its label jitters (the coordinator pins it)
-                        // and glides when the camera pans; the glide is animated so the
-                        // rare move reads as following the bottle, not as a new chip.
-                        .animation(.easeOut(duration: 0.25), value: anchor)
+                        // and moves once when the camera has panned; the move is animated so
+                        // it reads as following the bottle, not as a new chip.
+                        .animation(.easeOut(duration: 0.25), value: at)
                         // Overlays arrive best-first and SwiftUI draws later views on top, so
                         // the best match was landing *underneath* every weaker one anchored
                         // near it. Reported from the camera as a green box briefly visible but
@@ -53,6 +83,12 @@ struct ScanView: View {
         }
         .task { model.configure(env: env); model.startLive() }
         .onDisappear { model.stop() }
+        // Back from the background: the camera was stopped by iOS and VisionKit does not
+        // restart it on its own, so the HUD sat on a live-looking preview doing nothing
+        // until the app was relaunched (2026-09-17).
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.resume() }
+        }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
         }
@@ -114,7 +150,13 @@ struct ScanView: View {
 struct HUDOverlay: Identifiable {
     let id: String
     let candidate: ScoredCandidate
+    /// Where the chip is drawn.
     let anchor: CGPoint
+    /// The point on the bottle it names (the same as `anchor` unless the chip was moved).
+    let tie: CGPoint
+    /// The tracked object's box, when the chip is an object's verdict.
+    let box: BoundingBox?
+    var isDisplaced: Bool { hypot(anchor.x - tie.x, anchor.y - tie.y) > 0.02 }
 }
 
 struct OverlayChip: View {
@@ -124,7 +166,9 @@ struct OverlayChip: View {
 
     // Match score rides the reaction ramp so the HUD has one good-to-bad colour language
     // rather than two competing ones.
-    private var tint: Color {
+    private var tint: Color { Self.tint(for: candidate) }
+
+    static func tint(for candidate: ScoredCandidate) -> Color {
         guard let s = candidate.personalScore else { return Brand.reactionRest }
         // `>=` on the middle band: 0.5 is the neutral score the recommender returns when it
         // has no strong view, and `> 0.5` dropped it into the "poured it out" colour -- so a
@@ -191,7 +235,9 @@ final class ScanViewModel: ObservableObject {
         coord.$overlays
             .map { ovs in
                 ovs.map { HUDOverlay(id: $0.id, candidate: $0.candidate,
-                                     anchor: CGPoint(x: $0.x, y: $0.y)) }
+                                     anchor: CGPoint(x: $0.x, y: $0.y),
+                                     tie: CGPoint(x: $0.anchorX, y: $0.anchorY),
+                                     box: $0.box) }
             }
             .assign(to: &$overlays)
         coord.$lastLatencyMs.assign(to: &$lastLatencyMs)
@@ -233,6 +279,11 @@ final class ScanViewModel: ObservableObject {
         coordinator?.startLive()
     }
     func stop() { coordinator?.stop() }
+    /// The app came back to the foreground with this tab showing.
+    func resume() {
+        if let env { coordinator?.sendsFrames = env.consent.labelPhotos }
+        coordinator?.resume()
+    }
 
     /// Chat-bar filter: parse the ask once and apply it to every live tick.
     func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }

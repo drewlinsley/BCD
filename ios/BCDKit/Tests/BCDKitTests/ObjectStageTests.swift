@@ -366,6 +366,42 @@ func objCandidate(_ id: String, _ name: String, score: Double = 1.0) -> ScoredCa
         else { Issue.record("expected a model-adjudicated resolution") }
     }
 
+    @Test func aShortlistOfOneIsNotPutToTheModel() async {
+        // Offered one name, the model took it: `Bermuda Brand Black Rum` for the BLACK SEAL
+        // line of a Gosling's bottle, three times in one scan (2026-09-17). A pick needs a
+        // choice; a shortlist of one waits for more text.
+        let stage = ObjectStage()
+        stage.ingest(label(["BLACK SEAL BERMUDA BLACK RUM"])); stage.ingest(label(["BLACK SEAL BERMUDA BLACK RUM"]))
+        let sent = stage.pending()
+        let lone = ObjectResolution(objectId: sent[0].id, status: .ambiguous,
+                                    candidates: [objCandidate("p9", "Bermuda Brand Black Rum", score: 0.58)])
+        let llm = MockLLMProvider()
+        await stage.apply([lone], sent: sent, fineReader: nil, llm: llm, telemetry: nil)
+        #expect(stage.overlays.isEmpty)
+        if case .ambiguous(let list)? = stage.objects.first?.status { #expect(list.count == 1) }
+        else { Issue.record("expected the shortlist to be kept, not decided") }
+    }
+
+    @Test func twoObjectsNamingOneProductDrawOneChip() async {
+        // The tracker follows regions, and a can whose rim and wordmark are far enough apart
+        // is two objects, both named by the server: two chips saying "Miller High Life" on
+        // one can, reported as "a couple of times two guesses displayed" (2026-09-17).
+        let stage = ObjectStage()
+        let rim = label(["MILLER"], y: 0.30)
+        let mark = label(["HIGH LIFE"], y: 0.62)
+        stage.ingest(rim + mark); stage.ingest(rim + mark); stage.ingest(rim + mark)
+        let sent = stage.pending()
+        #expect(sent.count == 2)
+        let verdicts = sent.map {
+            ObjectResolution(objectId: $0.id, status: .resolved,
+                             candidates: [objCandidate("miller", "Miller High Life")])
+        }
+        await stage.apply(verdicts, sent: sent, fineReader: nil, llm: nil, telemetry: nil)
+        #expect(stage.objects.filter { $0.status.candidate != nil }.count == 2)
+        #expect(stage.overlays.map(\.id) == ["miller"], "one product, one chip")
+        #expect(stage.overlays[0].box != nil, "and the chip knows its can")
+    }
+
     @Test func anAmbiguousObjectWithoutEvidenceShowsNothing() async {
         let stage = ObjectStage()
         stage.ingest(label(["FADY TOP"])); stage.ingest(label(["FADY TOP"]))
