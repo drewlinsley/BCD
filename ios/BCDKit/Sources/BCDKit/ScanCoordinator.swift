@@ -638,7 +638,7 @@ public final class ScanCoordinator: ObservableObject {
     /// An object's chip perched above its box, off the label, tied to the box's top.
     private func perched(_ o: ResolvedOverlay) -> ResolvedOverlay {
         guard let box = o.box else { return o }
-        let p = HUDLayout.perch(for: box, name: o.candidate.resolved.product.name,
+        let p = HUDLayout.perch(for: box, name: HUDLayout.title(of: o.candidate),
                                 hasReason: o.candidate.reason != nil)
         return ResolvedOverlay(id: o.id, candidate: o.candidate, x: p.x, y: p.y,
                                anchorX: p.anchorX, anchorY: p.anchorY, box: box)

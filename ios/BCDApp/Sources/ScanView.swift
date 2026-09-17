@@ -180,7 +180,9 @@ struct OverlayChip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(candidate.resolved.product.name).font(.subheadline.bold()).lineLimit(1)
+            Text(DisplayName.label(candidate.resolved.product.name,
+                                   brand: candidate.resolved.brand.name))
+                .font(.subheadline.bold()).lineLimit(2)
             HStack(spacing: 6) {
                 if let s = candidate.personalScore {
                     Label("\(Int(s * 100))", systemImage: "hand.thumbsup.fill").font(.caption2)

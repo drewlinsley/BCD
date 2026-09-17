@@ -585,6 +585,21 @@ private final class StubLLM: LLMProvider, @unchecked Sendable {
                                     producer: "The Alchemist LLC") == "Heady Topper")
     }
 
+    @Test func aLabelPrintsTheBrandTheNameLeftOut() {
+        // Open Food Facts files the brand apart from the name: a bottle of Tito's came up
+        // as "Handmade Vodka" (2026-09-17).
+        #expect(DisplayName.label("Handmade Vodka", brand: "Tito’s") == "Tito’s Handmade Vodka")
+        #expect(DisplayName.label("Tito's Vodka", brand: "Tito’s") == "Tito's Vodka")
+        #expect(DisplayName.label("Titos Vodka", brand: "Tito's") == "Titos Vodka")
+        #expect(DisplayName.label("Bitter Campari", brand: "Campari") == "Bitter Campari")
+        #expect(DisplayName.label("The Alchemist Heady Topper", brand: "The Alchemist") == "The Alchemist Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "Heady Topper") == "Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "unknown") == "Heady Topper")
+        #expect(DisplayName.label("Heady Topper", brand: "") == "Heady Topper")
+        #expect(DisplayName.label("East Vapour Infused London Dry Gin", brand: "Bombay Sapphire")
+                == "Bombay Sapphire East Vapour Infused London Dry Gin")
+    }
+
     @Test func keepsTheBrandWhenAllThatIsLeftIsACategory() {
         // "Ouzo" and "Vodka" under a brand line identify nothing — the repetition is worth
         // less than the loss.
@@ -1182,8 +1197,8 @@ private final class RestartableEngine: ScanEngine, @unchecked Sendable {
         let laid = HUDLayout.spread([a, b])
         #expect(laid[0].y == 0.3)
         #expect(laid[1].y > laid[0].y + HUDLayout.chipHeight)
-        let ra = HUDLayout.footprint(x: laid[0].x, y: laid[0].y, name: a.candidate.resolved.product.name, hasReason: false)
-        let rb = HUDLayout.footprint(x: laid[1].x, y: laid[1].y, name: b.candidate.resolved.product.name, hasReason: false)
+        let ra = HUDLayout.footprint(x: laid[0].x, y: laid[0].y, name: HUDLayout.title(of: a.candidate), hasReason: false)
+        let rb = HUDLayout.footprint(x: laid[1].x, y: laid[1].y, name: HUDLayout.title(of: b.candidate), hasReason: false)
         #expect(ra.intersection(rb) == nil)
         #expect(laid[1].anchorX == 0.52 && laid[1].anchorY == 0.31 && laid[1].isDisplaced)
         #expect(HUDLayout.spread([a, b]).map(\.y) == laid.map(\.y), "deterministic")

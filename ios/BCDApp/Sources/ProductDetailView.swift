@@ -24,7 +24,10 @@ struct ProductDetailView: View {
     private var producer: Producer { candidate.resolved.producer }
 
     private var producerName: String { DisplayName.producer(producer.name) }
-    private var productName: String { DisplayName.product(product.name, producer: producer.name) }
+    private var productName: String {
+        DisplayName.product(DisplayName.label(product.name, brand: candidate.resolved.brand.name),
+                            producer: producer.name)
+    }
 
     var body: some View {
         NavigationStack {

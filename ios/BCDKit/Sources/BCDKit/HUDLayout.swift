@@ -30,11 +30,14 @@ public enum HUDLayout {
     public static let settle: TimeInterval = 0.5
 
     /// The chip's footprint, normalised, estimated from what it says. The HUD's chip is at
-    /// most 180 pt wide on a 393 pt screen and two or three lines tall; the estimate errs
-    /// wide so a near miss still spreads.
+    /// most 180 pt wide on a 393 pt screen; its title wraps to two lines past about
+    /// `titleLineChars` characters, and a reason adds a line. The estimate errs wide so a
+    /// near miss still spreads.
     public static let chipMaxWidth = 0.46
     public static let chipHeight = 0.065
     public static let chipHeightWithReason = 0.08
+    public static let titleLineChars = 22
+    public static let titleExtraLine = 0.022
     /// Space left between chips, and between a chip and the box it sits above.
     public static let gap = 0.012
     /// A chip never sits in the top or bottom band, where the status pill and chat bar are.
@@ -67,10 +70,21 @@ public enum HUDLayout {
         return pin
     }
 
+    /// What the chip prints as its title -- the label's name, brand and all.
+    public static func title(of candidate: ScoredCandidate) -> String {
+        DisplayName.label(candidate.resolved.product.name, brand: candidate.resolved.brand.name)
+    }
+
+    static func size(name: String, hasReason: Bool) -> (w: Double, h: Double) {
+        let w = min(chipMaxWidth, 0.06 + 0.02 * Double(name.count))
+        var h = hasReason ? chipHeightWithReason : chipHeight
+        if name.count > titleLineChars { h += titleExtraLine }
+        return (w, h)
+    }
+
     /// The footprint of a chip centred at (x, y).
     public static func footprint(x: Double, y: Double, name: String, hasReason: Bool) -> BoundingBox {
-        let w = min(chipMaxWidth, 0.06 + 0.02 * Double(name.count))
-        let h = hasReason ? chipHeightWithReason : chipHeight
+        let (w, h) = size(name: name, hasReason: hasReason)
         return BoundingBox(x: x - w / 2, y: y - h / 2, w: w, h: h)
     }
 
@@ -79,8 +93,7 @@ public enum HUDLayout {
     /// the box the chip belongs to.
     public static func perch(for box: BoundingBox, name: String, hasReason: Bool)
         -> (x: Double, y: Double, anchorX: Double, anchorY: Double) {
-        let h = hasReason ? chipHeightWithReason : chipHeight
-        let w = min(chipMaxWidth, 0.06 + 0.02 * Double(name.count))
+        let (w, h) = size(name: name, hasReason: hasReason)
         let x = min(max(box.midX, w / 2 + gap), 1 - w / 2 - gap)
         let above = box.minY - gap - h / 2
         if above - h / 2 >= topMargin {
@@ -98,7 +111,7 @@ public enum HUDLayout {
         var placed: [BoundingBox] = []
         var out: [ResolvedOverlay] = []
         for o in overlays {
-            let name = o.candidate.resolved.product.name
+            let name = title(of: o.candidate)
             let hasReason = o.candidate.reason != nil
             var y = o.y
             var rect = footprint(x: o.x, y: y, name: name, hasReason: hasReason)

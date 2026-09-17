@@ -2013,17 +2013,19 @@ class Resolver:
                      *_maker_names(resolved)]
             return {w for part in parts for w in _name_words(part or "")}
 
+        all_words = {pid: _all_words(resolved) for pid, (resolved, _) in evidence.items()}
+        maker_ids = {pid: _maker_ids(resolved) for pid, (resolved, _) in evidence.items()}
         yields_to: dict[str, set[str]] = {}
         for pid, (resolved, _) in evidence.items():
             if pid in by_upc or pid in by_maker or pid in by_house:
                 continue
             words = _identifying_tokens(resolved.product.name or "")
-            mine = _all_words(resolved)
-            makers = _maker_ids(resolved)
-            for other, (other_resolved, _) in evidence.items():
-                if other == pid or not (makers & _maker_ids(other_resolved)):
+            mine = all_words[pid]
+            makers = maker_ids[pid]
+            for other in evidence:
+                if other == pid or not (makers & maker_ids[other]):
                     continue
-                theirs = _all_words(other_resolved)
+                theirs = all_words[other]
                 extra = [w for w in words if w not in theirs]
                 if not extra or any(_read_as(w, read_toks) for w in extra):
                     continue

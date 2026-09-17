@@ -210,9 +210,12 @@ def word_similarity(a: str, b: str) -> float:
     return max((_jaccard(ta, w) for w in _windows(b, up_to)), default=0.0)
 
 
+@lru_cache(maxsize=200_000)
 def match_score(name: str, qualified: str, text: str) -> float:
     """The store's number: greatest of the six terms `PostgresStore.match_products` ranks
-    by, so a threshold calibrated on Postgres holds here."""
+    by, so a threshold calibrated on Postgres holds here. Remembered: the same rows meet
+    the same lines on every object over a frame and on every tick a tracked line stays in
+    view, and the window scan is most of a slow tick (2026-09-17)."""
     return max(
         similarity(name, text),
         word_similarity(name, text),
@@ -345,6 +348,8 @@ class LabelIndex:
     # ---- persistence ----
 
     def save(self, path: str) -> None:
+        self.__dict__.pop("_line_memo", None)
+        self.__dict__.pop("_producer_memo", None)
         tmp = f"{path}.tmp"
         with open(tmp, "wb") as f:
             pickle.dump(self.__dict__, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -493,12 +498,31 @@ class LabelIndex:
                 rows[r] = rows.get(r, 0) + 1
         return sorted(rows, key=rows.__getitem__, reverse=True)[:CANDIDATES]
 
+    #: Lines answered and remembered. A tracked object carries the same lines tick after
+    #: tick, and every object over a frame carries the frame's lines; a shelf of five
+    #: objects asked fifty-four line queries a tick, thirty of them the same line twice, and
+    #: the tick took 1.3 s (2026-09-17). The index does not change while the process runs,
+    #: so an answer is good for as long as it is.
+    MEMO_LINES = 4096
+
     def match_products(self, text: str, limit: int = 3) -> list[tuple[str, float]]:
         """Best-first (product id, similarity) for one OCR line — the store's answer, from
         memory. The similarity is pg_trgm's, computed on the rows the tokens surface."""
         text = (text or "").strip()
         if not text:
             return []
+        memo = self.__dict__.setdefault("_line_memo", {})
+        key = (text, limit)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        out = self._match_products(text, limit)
+        if len(memo) >= self.MEMO_LINES:
+            memo.clear()
+        memo[key] = out
+        return out
+
+    def _match_products(self, text: str, limit: int) -> list[tuple[str, float]]:
         rows = self._token_stage(text, self.product_post, len(self.ids))
         if not rows:
             rows = self._generic_stage(text)
@@ -553,6 +577,18 @@ class LabelIndex:
         text = (text or "").strip()
         if not text:
             return []
+        memo = self.__dict__.setdefault("_producer_memo", {})
+        key = (text, limit)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        out = self._match_producers(text, limit)
+        if len(memo) >= self.MEMO_LINES:
+            memo.clear()
+        memo[key] = out
+        return out
+
+    def _match_producers(self, text: str, limit: int) -> list[tuple[str, float]]:
         rows = self._token_stage(text, self.producer_post, len(self.producer_ids))
         scored = []
         for r in rows:
@@ -590,17 +626,38 @@ class IndexedStore:
     lookups, barcodes, iteration, writes — passes straight through to the wrapped store,
     so `Resolver` and the API see one object with the same surface they had."""
 
+    #: Catalog rows remembered by id. A tick over a shelf of five objects fetched 3,400
+    #: rows one by one from Postgres -- the same few hundred rows, hydrated for every object
+    #: and every tick -- for a second of its time (2026-09-17). Only the catalog's own ids
+    #: are kept: it does not change while the process runs (a merge is followed by a
+    #: restart), where a taste profile written by the API a moment ago must read back.
+    CATALOG_PREFIXES = ("off:", "ttb:", "prod:", "brand:", "sku:")
+    MEMO_RECORDS = 50_000
+
     def __init__(self, store: Store, index: LabelIndex) -> None:
         self._store = store
         self.index = index
+        self._records_memo: dict[str, dict | None] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
 
+    def get_gold(self, gid: str) -> dict | None:
+        if not gid.startswith(self.CATALOG_PREFIXES):
+            return self._store.get_gold(gid)
+        memo = self._records_memo
+        if gid in memo:
+            return memo[gid]
+        rec = self._store.get_gold(gid)
+        if len(memo) >= self.MEMO_RECORDS:
+            memo.clear()
+        memo[gid] = rec
+        return rec
+
     def _records(self, ids: Iterable[str]) -> list[dict]:
         out = []
         for pid in ids:
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append(rec)
         return out
@@ -608,7 +665,7 @@ class IndexedStore:
     def match_products(self, text: str, limit: int = 3, **_: Any) -> list[tuple[dict, float]]:
         out = []
         for pid, sim in self.index.match_products(text, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, sim))
         return out
@@ -620,7 +677,7 @@ class IndexedStore:
     def match_frame(self, lines: Sequence[str], limit: int = 8) -> list[tuple[dict, int, float]]:
         out = []
         for pid, at, sim in self.index.match_frame(lines, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, at, sim))
         return out
@@ -628,7 +685,7 @@ class IndexedStore:
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
         out = []
         for pid, sim in self.index.match_producers(text, limit):
-            rec = self._store.get_gold(pid)
+            rec = self.get_gold(pid)
             if rec is not None:
                 out.append((rec, sim))
         return out
