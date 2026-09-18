@@ -316,6 +316,35 @@ class PostgresStore:
                 (gid, entity_type, Jsonb(record), name, sensory, lat, lon, generic),
             )
 
+    def put_gold_many(self, rows: list[tuple[str, str, dict[str, Any]]]) -> None:
+        """`put_gold` for a batch, in one transaction: an enrichment pass writes half a
+        million rows, and one autocommitted upsert each is one fsync each."""
+        if not rows:
+            return
+        params = []
+        for gid, entity_type, record in rows:
+            record = _no_nuls(record)
+            name = record.get("name")
+            generic = carries_no_identity(name or "") if entity_type == "product" else None
+            arr = _sensory_array(record) if entity_type == "product" else None
+            sensory = _vec_literal(arr) if arr is not None else None
+            params.append((gid, entity_type, Jsonb(record), name, sensory,
+                           record.get("lat"), record.get("lon"), generic))
+        with self._lock, self._conn.transaction(), self._conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO gold (id, entity_type, record, name, sensory, lat, lon,
+                                  generic, updated_at)
+                VALUES (%s, %s, %s, %s, %s::vector, %s, %s, %s, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    entity_type=EXCLUDED.entity_type, record=EXCLUDED.record,
+                    name=EXCLUDED.name, sensory=EXCLUDED.sensory,
+                    lat=EXCLUDED.lat, lon=EXCLUDED.lon,
+                    generic=EXCLUDED.generic, updated_at=now()
+                """,
+                params,
+            )
+
     def get_gold(self, gid: str) -> dict[str, Any] | None:
         with self._lock, self._conn.cursor() as cur:
             row = cur.execute("SELECT record FROM gold WHERE id=%s", (gid,)).fetchone()
