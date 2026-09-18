@@ -58,3 +58,7 @@ ios/Local.xcconfig
 # the label index cache the API builds beside the data (rebuilt when the catalog changes)
 data/label_index.pkl
 data/*_backup.json
+# submitted Message Batches, waiting to be collected (product ids only)
+data/profile_batches/
+# questions and answers exchanged outside the API (the answers live on in bronze)
+data/profiles/

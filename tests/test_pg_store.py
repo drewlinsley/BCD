@@ -96,6 +96,14 @@ def test_trigram_match_is_typo_tolerant(pg: PostgresStore):
     assert 0.0 < fuzzy[0][1] <= 1.0  # a similarity score comes back
 
 
+def test_a_name_out_of_the_catalog_finds_its_rows_exactly(pg: PostgresStore):
+    _seed_product(pg, "h1", "Heady Topper", None)
+    _seed_product(pg, "h2", "Heady Topper", None)
+    _seed_product(pg, "h3", "Heady Topper Clone", None)
+    assert {r["id"] for r in pg.products_named("Heady Topper")} == {"h1", "h2"}
+    assert pg.products_named("heady topper") == []  # exact: the name came from the catalog
+
+
 def test_nearest_by_sensory_cosine(pg: PostgresStore):
     _seed_product(pg, "trop", "Tropical IPA", {"tropical": 1.0, "citrus": 0.9})
     _seed_product(pg, "roast", "Roasty Stout", {"roasted_coffee_choc": 1.0, "bitterness": 0.4})

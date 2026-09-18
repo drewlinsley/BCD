@@ -206,6 +206,17 @@ class MedallionStore:
             ).fetchall()
         return [json.loads(r["record"]) for r in rows]
 
+    def products_named(self, name: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Every product carrying exactly this name -- for a name that came out of the catalog
+        in the first place (a scan log, a HUD chip), so no fuzz is wanted."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT record FROM gold WHERE entity_type='product' "
+                "AND json_extract(record, '$.name') = ? LIMIT ?",
+                (name, limit),
+            ).fetchall()
+        return [json.loads(r["record"]) for r in rows]
+
     # ---- search (used by the resolver / recommend) ----
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]:
         """Token-overlap name match, best-first — the laptop stand-in for pg_trgm. The
@@ -322,6 +333,7 @@ class Store(Protocol):
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]: ...
     def counts(self) -> dict[str, int]: ...
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]: ...
+    def products_named(self, name: str, limit: int = 10) -> list[dict[str, Any]]: ...
     def match_products(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
     def match_products_many(self, texts: Sequence[str],
                             limit: int = 3) -> list[list[tuple[dict, float]]]: ...

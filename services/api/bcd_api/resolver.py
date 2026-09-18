@@ -1497,7 +1497,7 @@ class Resolver:
         """
         sensory = product.sensory
         cold_start = sensory is not None and sensory.source.value in (
-            "chemistry_prior", "style_prior"
+            "chemistry_prior", "style_prior", "llm_profile"
         )
         if profile is None or profile.sensory_ideal is None or sensory is None:
             # No personalization yet: fall back to a mild style-affinity prior.

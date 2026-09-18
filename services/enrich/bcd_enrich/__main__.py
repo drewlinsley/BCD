@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import collections
-import os
 import time
 
 from bcd_ingest.store import open_store
@@ -38,6 +37,7 @@ from bcd_schema import (
 )
 
 from . import sensory_from_recipe
+from ._env import load_dotenv
 from .style_prior import abv_from_style, detect_style, readable_style, sensory_from_style
 
 #: The provenance method a style carries when the registry filed it (a class code).
@@ -152,27 +152,8 @@ def run(root: str = "./data", dry_run: bool = False, limit: int | None = None,
     return 0
 
 
-def _load_dotenv(path: str = ".env") -> None:
-    """The API's `.env` reader, so `python -m bcd_enrich` from the repo root finds the same
-    catalog the API serves. Without it the store falls back to the SQLite dev files under
-    `./data`, and a run there would enrich nothing anyone scans."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        return
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key and key not in os.environ:
-            os.environ[key] = value.strip().strip("\"'")
-
-
 def main() -> int:
-    _load_dotenv()
+    load_dotenv()
     ap = argparse.ArgumentParser(prog="bcd_enrich")
     ap.add_argument("--root", default="./data")
     ap.add_argument("--dry-run", action="store_true", help="print what would change; write nothing")

@@ -21,6 +21,7 @@ class SensorySource(str, Enum):
     REVIEW_CONSENSUS = "review_consensus"  # extracted from reviews
     RECONCILED = "reconciled"  # weighted blend of the two
     STYLE_PRIOR = "style_prior"  # fallback: BJCP style centroid
+    LLM_PROFILE = "llm_profile"  # a language model's read of THIS product, from its name
 
 
 # The canonical descriptor axes. Kept flat and stable — codegen and embeddings depend

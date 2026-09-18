@@ -15,8 +15,17 @@ public enum ExtractionMethod: String, Codable, Sendable {
     case retailerListing = "retailer_listing"
     case communityClone = "community_clone"
     case reviewConsensus = "review_consensus"
+    case llmRecalled = "llm_recalled"
     case llmInferredFromStylePrior = "llm_inferred_from_style_prior"
     case userContributed = "user_contributed"
+
+    /// A method this build has not heard of decodes as the least trusted one rather than
+    /// failing the whole response: a new provenance kind on the server would otherwise
+    /// take every candidate off the HUD until the app was updated.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ExtractionMethod(rawValue: raw) ?? .llmInferredFromStylePrior
+    }
 
     /// How much visual weight the provenance chip earns. Drives the receipt UI.
     public var trustRank: Int {
@@ -24,7 +33,7 @@ public enum ExtractionMethod: String, Codable, Sendable {
         case .statedByProducer, .regulatoryFiling: return 3
         case .labelOCR, .retailerListing: return 2
         case .communityClone, .reviewConsensus, .userContributed: return 1
-        case .llmInferredFromStylePrior: return 0
+        case .llmRecalled, .llmInferredFromStylePrior: return 0
         }
     }
 }
