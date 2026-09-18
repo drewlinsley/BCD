@@ -247,3 +247,30 @@ def test_the_generic_flag_is_written_for_products(pg: PostgresStore):
             "SELECT id, generic FROM gold WHERE id IN ('p-a','p-b')").fetchall())
     assert rows["p-a"] is True
     assert rows["p-b"] is False
+
+
+def test_a_batch_write_lands_the_same_as_one_at_a_time(pg: PostgresStore):
+    """`put_gold_many` is `put_gold` in one transaction: the same row, the same derived
+    columns (name, the sensory vector, the generic flag), and an upsert for a row that is
+    already there. An enrichment pass writes half a million rows this way."""
+    hoppy = {"citrus": 0.8, "bitterness": 0.7}
+    rows = []
+    for i, axes in enumerate([hoppy, None, hoppy]):
+        sensory = (SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=0.3, axes=axes)
+                   if axes else None)
+        p = Product(id=f"p:{i}", brand_id="b", producer_id="pr", category=Category.BEER,
+                    name=f"Batch Beer {i}", sensory=sensory)
+        rows.append((p.id, "product", p.model_dump(mode="json")))
+    pg.put_gold_many(rows)
+    assert pg.get_gold("p:1")["name"] == "Batch Beer 1"
+    with pg._conn.cursor() as cur:
+        got = cur.execute("SELECT id, name, sensory IS NOT NULL, generic FROM gold "
+                          "WHERE entity_type='product' ORDER BY id").fetchall()
+    assert [(r[0], r[1], r[2]) for r in got] == [
+        ("p:0", "Batch Beer 0", True), ("p:1", "Batch Beer 1", False), ("p:2", "Batch Beer 2", True)]
+    # the upsert: the same id again, renamed
+    renamed = dict(rows[1][2], name="Batch Beer One")
+    pg.put_gold_many([("p:1", "product", renamed)])
+    assert pg.get_gold("p:1")["name"] == "Batch Beer One"
+    assert pg.counts()["gold"] == 3
+    pg.put_gold_many([])

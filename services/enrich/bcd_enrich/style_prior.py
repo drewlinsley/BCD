@@ -109,6 +109,47 @@ _CENTROIDS: dict[str, dict[str, float]] = {
     "liqueur": {"sweet": 0.8, "honey": 0.4, "vanilla_oak": 0.3, "caramel_toffee": 0.35,
                 "alcohol_warmth": 0.4},
     "spirit": {"alcohol_warmth": 0.65, "dryness_finish": 0.5, "vanilla_oak": 0.25, "sweet": 0.2},
+    # --- what the TTB registry files by the tens of thousands, and the keyword rules had no
+    # centroid for: half a million rows arrived with a class code and nothing here to map it
+    # to (2026-09-17). ---
+    "ale": {"malty_bready": 0.5, "caramel_toffee": 0.3, "bitterness": 0.45, "citrus": 0.3,
+            "floral": 0.25, "body_fullness": 0.45, "carbonation": 0.5, "dryness_finish": 0.45},
+    "flavored_malt": {"sweet": 0.6, "citrus": 0.45, "berry": 0.4, "tropical": 0.3,
+                      "carbonation": 0.65, "bitterness": 0.1, "malty_bready": 0.15,
+                      "body_fullness": 0.3, "dryness_finish": 0.3, "sour_tart": 0.25},
+    "malt_liquor": {"malty_bready": 0.45, "sweet": 0.5, "alcohol_warmth": 0.5, "carbonation": 0.5,
+                    "bitterness": 0.2, "body_fullness": 0.4, "dryness_finish": 0.3},
+    "na_beer": {"malty_bready": 0.45, "sweet": 0.35, "grassy": 0.25, "bitterness": 0.25,
+                "carbonation": 0.55, "body_fullness": 0.25, "dryness_finish": 0.35},
+    "sake": {"malty_bready": 0.4, "sweet": 0.35, "floral": 0.35, "stone_fruit": 0.3,
+             "banana_ester": 0.25, "alcohol_warmth": 0.35, "dryness_finish": 0.45,
+             "body_fullness": 0.35, "carbonation": 0.1},
+    "cider": {"stone_fruit": 0.6, "sour_tart": 0.45, "sweet": 0.4, "floral": 0.3,
+              "carbonation": 0.6, "dryness_finish": 0.5, "body_fullness": 0.3,
+              "alcohol_warmth": 0.25},
+    "flavored_vodka": {"citrus": 0.45, "berry": 0.4, "sweet": 0.5, "floral": 0.25,
+                       "alcohol_warmth": 0.55, "dryness_finish": 0.4},
+    "flavored_gin": {"herbal": 0.5, "berry": 0.45, "citrus": 0.45, "sweet": 0.5, "floral": 0.4,
+                     "alcohol_warmth": 0.5, "dryness_finish": 0.4},
+    "flavored_rum": {"sweet": 0.65, "tropical": 0.5, "citrus": 0.35, "vanilla_oak": 0.35,
+                     "caramel_toffee": 0.3, "alcohol_warmth": 0.5, "banana_ester": 0.3},
+    "flavored_whiskey": {"sweet": 0.6, "vanilla_oak": 0.5, "honey": 0.45, "caramel_toffee": 0.45,
+                         "spicy_phenolic": 0.35, "alcohol_warmth": 0.55, "stone_fruit": 0.3},
+    "fruit_liqueur": {"sweet": 0.75, "stone_fruit": 0.5, "berry": 0.5, "citrus": 0.4,
+                      "floral": 0.3, "alcohol_warmth": 0.35, "body_fullness": 0.45},
+    "coffee_liqueur": {"roasted_coffee_choc": 0.85, "sweet": 0.75, "vanilla_oak": 0.4,
+                       "caramel_toffee": 0.4, "alcohol_warmth": 0.35, "body_fullness": 0.55},
+    "nut_liqueur": {"nutty": 0.8, "sweet": 0.7, "vanilla_oak": 0.35, "caramel_toffee": 0.4,
+                    "stone_fruit": 0.3, "alcohol_warmth": 0.35, "body_fullness": 0.5},
+    "herbal_liqueur": {"herbal": 0.75, "spicy_phenolic": 0.5, "sweet": 0.55, "honey": 0.35,
+                       "citrus": 0.3, "alcohol_warmth": 0.5, "dryness_finish": 0.4},
+    "mint_liqueur": {"herbal": 0.8, "sweet": 0.7, "spicy_phenolic": 0.3, "alcohol_warmth": 0.35,
+                     "dryness_finish": 0.35},
+    "chocolate_liqueur": {"roasted_coffee_choc": 0.8, "sweet": 0.75, "vanilla_oak": 0.35,
+                          "nutty": 0.3, "alcohol_warmth": 0.35, "body_fullness": 0.55},
+    "bitters": {"herbal": 0.85, "spicy_phenolic": 0.6, "citrus": 0.4, "sour_tart": 0.3,
+                "sweet": 0.3, "alcohol_warmth": 0.6, "dryness_finish": 0.6},
+    "neutral_spirit": {"alcohol_warmth": 0.8, "dryness_finish": 0.6},
     # --- wine / other ---
     "wine": {"berry": 0.5, "stone_fruit": 0.4, "sour_tart": 0.4, "vanilla_oak": 0.35, "sweet": 0.35,
              "alcohol_warmth": 0.45, "dryness_finish": 0.55, "floral": 0.35},
@@ -124,19 +165,25 @@ _ABV: dict[str, float] = {
     "white_rum": 40.0, "rum": 40.0, "gin": 42.0, "vodka": 40.0, "mezcal": 45.0, "tequila": 40.0,
     "brandy": 40.0, "triple_sec": 40.0, "anise": 40.0, "cream_liqueur": 17.0, "amaro": 25.0,
     "liqueur": 25.0, "spirit": 40.0, "wine": 12.5,
+    "ale": 5.5, "flavored_malt": 5.0, "malt_liquor": 7.5, "na_beer": 0.4, "sake": 15.0,
+    "cider": 5.5, "flavored_vodka": 35.0, "flavored_gin": 30.0, "flavored_rum": 35.0,
+    "flavored_whiskey": 35.0,
+    "fruit_liqueur": 20.0, "coffee_liqueur": 20.0, "nut_liqueur": 24.0, "herbal_liqueur": 30.0,
+    "mint_liqueur": 25.0, "chocolate_liqueur": 20.0, "bitters": 40.0, "neutral_spirit": 40.0,
 }
 
 # (style, keyword-substrings). Order = priority; most specific first, within each category.
 _BEER_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("neipa", ("hazy", "juicy", "neipa", "new england", "haze")),
-    ("dipa", ("double ipa", "dipa", "imperial ipa", "triple ipa", "double i.p.a")),
+    ("dipa", ("double ipa", "dipa", "imperial ipa", "triple ipa", "double i.p.a",
+              "double india pale", "imperial india pale", "triple india pale")),
     ("ipa", ("ipa", "india pale", "i.p.a", " apa")),
     ("pale_ale", ("pale ale", "american pale", "apa ")),
     ("imperial_stout", ("imperial stout", "russian imperial", "impy")),
     ("stout", ("stout",)),
     ("porter", ("porter",)),
-    ("wheat", ("hefe", "weiss", "weizen", "witbier", "wit ", "white ale", "blanche", "wheat",
-               "blanc", "weisse", "hoegaarden")),
+    ("wheat", ("hefe", "weiss", "weizen", "witbier", "wit ", "white ale", "belgian white",
+               "blanche", "wheat", "blanc", "weisse", "hoegaarden")),
     ("tripel", ("tripel", "triple")),
     ("belgian_dark", ("dubbel", "quadrupel", "quad", "abbey", "abbaye", "trappist", "grimbergen",
                       "leffe", "belgian strong")),
@@ -176,9 +223,231 @@ _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("triple_sec", ("cointreau", "triple sec", "grand marnier", "curacao", "curaçao")),
     ("anise", ("absinthe", "ouzo", "pastis", "sambuca", "anis", "raki", "arak")),
     ("cream_liqueur", ("baileys", "irish cream", "cream liqueur")),
-    ("amaro", ("amaro", "aperol", "campari", "vermouth", "fernet", "cynar", "martini")),
+    ("amaro", ("amaro", "aperol", "campari", "vermouth", "fernet", "cynar", "martini",
+               "aperitivo", "aperitif", "bitter")),
     ("liqueur", ("liqueur", "likör", "likor", "licor", "schnapps", "kahlua", "coffee liqueur")),
 ]
+
+# TTB class/type text -> style key. The registry's own vocabulary, matched as substrings of
+# the description with its bottling suffix removed ("Scotch Whisky Fb" is foreign-bottled
+# Scotch, "Tequila Usb" is US-bottled tequila). Order is load-bearing: specific before the
+# general word it contains. Two kinds of class: a SPECIFIC one names the style outright and
+# outranks anything the product's name says ("Absolut Citron" under `Vodka - Other Flavored`
+# is a flavored vodka, whatever the brand keyword makes of it); a GENERIC one ("Ale", "Beer",
+# "Whisky", "Malt Beverages Specialities - Flavored") is a bucket, and the name decides
+# first -- a fruit IPA filed as a flavored malt beverage is still an IPA.
+_CLASS_RULES: list[tuple[str, tuple[str, ...]]] = [
+    # beer
+    ("na_beer", ("near beer", "non alcoholic", "non-alcoholic", "cereal beverage")),
+    ("malt_liquor", ("malt liquor",)),
+    ("stout", ("stout",)),
+    ("porter", ("porter",)),
+    ("flavored_malt", ("malt beverages specialities - flavored",
+                       "malt beverage specialties - flavored",
+                       "malt beverages specialties - flavored", "flavored malt")),
+    ("ale", ("ale",)),
+    ("lager", ("lager",)),
+    ("beer", ("beer", "malt beverage")),
+    # whisky
+    ("peated_scotch", ("islay",)),
+    ("scotch", ("scotch", "single malt scotch")),
+    ("irish_whiskey", ("irish whisk",)),
+    ("bourbon", ("bourbon", "corn whisk")),
+    ("rye", ("rye whisk",)),
+    ("flavored_whiskey", ("whisky (flavored)", "whiskey (flavored)", "flavored whisk",
+                          "liqueurs (whisky)", "liqueurs (whiskey)")),
+    ("whiskey", ("whisk", "canadian", "single malt")),
+    # agave
+    ("mezcal", ("mezcal",)),
+    ("tequila", ("tequila", "agave")),
+    # rum
+    ("flavored_rum", ("rum other flavored", "flavored rum", "liqueurs (rum)", "spiced rum")),
+    ("white_rum", ("rum (white)", "rum white", "white rum")),
+    ("aged_rum", ("rum (gold)", "rum gold", "gold rum", "rum (dark)", "aged rum", "rum dark")),
+    ("rum", ("rum",)),
+    # gin, vodka, neutral
+    ("flavored_gin", ("gin - flavored", "flavored gin", "gin flavored", "sloe gin")),
+    ("gin", ("gin",)),
+    ("flavored_vodka", ("vodka - ", "vodka flavored", "flavored vodka", "liqueurs (vodka)")),
+    ("vodka", ("vodka",)),
+    ("neutral_spirit", ("neutral spirit", "grain spirit")),
+    # brandy
+    ("brandy", ("brandy", "cognac", "armagnac", "calvados", "pisco", "grappa", "slivovitz",
+                "eau de vie", "eau-de-vie")),
+    # liqueurs and the rest
+    ("cream_liqueur", ("cream liqueur", "creme or creams", "cremes or creams", "dairy cream")),
+    ("coffee_liqueur", ("coffee", "cafe")),
+    ("chocolate_liqueur", ("creme de cacao", "chocolate")),
+    ("mint_liqueur", ("creme de menthe", "peppermint", "mint")),
+    ("nut_liqueur", ("amaretto", "nut liqueur", "noyaux", "almond", "hazelnut")),
+    ("anise", ("anisette", "ouzo", "ojen", "absinthe", "sambuca", "anis", "arack", "arak", "raki")),
+    ("triple_sec", ("triple sec", "curacao", "orange liqueur")),
+    ("bitters", ("bitters",)),
+    ("herbal_liqueur", ("herb", "seeds", "specialties & proprietaries",
+                        "specialities & proprietaries", "cordial", "kummel")),
+    ("fruit_liqueur", ("fruit", "peels", "schnapps")),
+    ("amaro", ("amaro", "vermouth", "aperitif", "aperitivo")),
+    ("liqueur", ("liqueur",)),
+    ("sake", ("sake",)),
+    ("cider", ("cider", "perry")),
+    ("wine", ("wine", "champagne", "sparkling", "mead")),
+    ("spirit", ("other spirits", "spirits")),
+]
+
+#: Classes that are buckets rather than styles: the product's name decides first.
+_GENERIC_CLASS_STYLES = frozenset({"ale", "beer", "flavored_malt", "whiskey", "rum",
+                                   "gin", "vodka", "brandy", "liqueur", "herbal_liqueur",
+                                   "fruit_liqueur", "spirit"})
+
+_BOTTLING_SUFFIX = re.compile(r"\s+(fb|usb|bib)\b\*?$")
+
+
+def normalize_class(class_type: str | None) -> str:
+    """A TTB class/type description as the rules read it: casefolded, the bottling suffix
+    (FB foreign-bottled, USB US-bottled, BIB bottled-in-bond) and stray asterisks gone."""
+    c = _norm(class_type or "").strip().rstrip("*").strip()
+    return _BOTTLING_SUFFIX.sub("", c).strip()
+
+
+def class_style(class_type: str | None) -> str | None:
+    """The style key a TTB class/type description names, or None for no description."""
+    c = normalize_class(class_type)
+    if not c:
+        return None
+    for style, kws in _CLASS_RULES:
+        if any(k in c for k in kws):
+            return style
+    return None
+
+
+# What a person would call the style, from what the registry calls it. The detail screen
+# printed the class code as filed -- "Other Rum Gold Usb" on a bottle of Gosling's, reported
+# from the camera as "should be ID'd as rum" (2026-09-16). The bottling suffix is dropped and
+# the registry's bucketing words ("Other", "Specialties") go; a style the NAME detects more
+# precisely than the class (an IPA filed as "Ale") is printed as that style.
+_STYLE_NAMES: dict[str, str] = {
+    "neipa": "New England IPA", "dipa": "Double IPA", "ipa": "IPA", "pale_ale": "Pale Ale",
+    "imperial_stout": "Imperial Stout", "stout": "Stout", "porter": "Porter", "wheat": "Wheat Beer",
+    "tripel": "Tripel", "belgian_dark": "Belgian Dark Ale", "saison": "Saison", "sour": "Sour Ale",
+    "amber": "Amber Ale", "brown": "Brown Ale", "bock": "Bock", "pilsner": "Pilsner",
+    "helles": "Helles", "radler": "Radler", "lager": "Lager", "beer": "Beer", "ale": "Ale",
+    "flavored_malt": "Flavored Malt Beverage", "malt_liquor": "Malt Liquor",
+    "na_beer": "Non-Alcoholic Beer", "peated_scotch": "Peated Scotch", "scotch": "Scotch Whisky",
+    "irish_whiskey": "Irish Whiskey", "bourbon": "Bourbon", "rye": "Rye Whiskey",
+    "whiskey": "Whiskey", "flavored_whiskey": "Flavored Whiskey", "spiced_rum": "Spiced Rum",
+    "aged_rum": "Gold Rum", "white_rum": "White Rum", "flavored_rum": "Flavored Rum", "rum": "Rum",
+    "gin": "Gin", "flavored_gin": "Flavored Gin", "vodka": "Vodka",
+    "flavored_vodka": "Flavored Vodka",
+    "neutral_spirit": "Neutral Spirit", "mezcal": "Mezcal", "tequila": "Tequila",
+    "brandy": "Brandy", "triple_sec": "Orange Liqueur", "anise": "Anise Spirit",
+    "cream_liqueur": "Cream Liqueur", "coffee_liqueur": "Coffee Liqueur",
+    "chocolate_liqueur": "Chocolate Liqueur", "mint_liqueur": "Mint Liqueur",
+    "nut_liqueur": "Nut Liqueur", "herbal_liqueur": "Herbal Liqueur",
+    "fruit_liqueur": "Fruit Liqueur", "bitters": "Bitters", "amaro": "Amaro", "liqueur": "Liqueur",
+    "spirit": "Spirit", "sake": "Sake", "cider": "Cider", "wine": "Wine",
+}
+
+# Class descriptions whose readable name is better said outright than derived.
+_CLASS_NAMES: dict[str, str] = {
+    "single malt scotch whisky": "Single Malt Scotch",
+    "straight bourbon whisky": "Straight Bourbon",
+    "straight bourbon whisky blends": "Straight Bourbon",
+    "bourbon whisky": "Bourbon",
+    "blended bourbon whisky": "Blended Bourbon",
+    "straight rye whisky": "Straight Rye",
+    "straight rye whisky blends": "Straight Rye",
+    "rye whisky": "Rye Whiskey",
+    "blended whisky": "Blended Whiskey",
+    "canadian whisky": "Canadian Whisky",
+    "irish whisky": "Irish Whiskey",
+    "corn whisky": "Corn Whiskey",
+    "american single malt whiskey": "American Single Malt",
+    "london dry distilled gin": "London Dry Gin",
+    "london dry gin": "London Dry Gin",
+    "cognac (brandy)": "Cognac",
+    "armagnac (brandy)": "Armagnac",
+    "apple brandy (calvados)": "Calvados",
+    "apple brandy": "Apple Brandy",
+    "plum brandy (slivovitz)": "Slivovitz",
+    "other grape brandy (pisco, grappa)": "Grape Brandy",
+    "agave spirits": "Agave Spirit",
+    "tequila": "Tequila",
+    "mezcal": "Mezcal",
+    "specialties & proprietaries": "Specialty",
+    "other specialties & proprietaries": "Specialty",
+    "specialities & proprietaries": "Specialty",
+    "sake - imported": "Sake",
+    "sake - imported flavored": "Flavored Sake",
+    "sake - domestic flavored": "Flavored Sake",
+    "other (herbs & seeds)": "Herbal Liqueur",
+    "other herb & seed cordials/liqueurs": "Herbal Liqueur",
+    "herbs and seeds schnapps liqueur": "Herbal Schnapps",
+    "herbs & seeds schnapps liqueur": "Herbal Schnapps",
+    "fruits & peels schnapps liqueur": "Fruit Schnapps",
+    "peppermint schnapps": "Peppermint Schnapps",
+    "coffee (cafe) liqueur": "Coffee Liqueur",
+    "other liqueur (creme or creams)": "Cream Liqueur",
+    "other liqueur (cremes or creams)": "Cream Liqueur",
+    "dairy cream liqueur/cordial": "Cream Liqueur",
+    "creme de cacao brown": "Crème de Cacao",
+    "creme de cacao white": "Crème de Cacao",
+    "creme de menthe green": "Crème de Menthe",
+    "creme de menthe white": "Crème de Menthe",
+    "anisette, ouzo, ojen": "Anisette",
+    "bitters - beverage": "Bitters",
+    "triple sec": "Triple Sec",
+    "curacao": "Curaçao",
+    "amaretto": "Amaretto",
+    "malt beverages specialities - flavored": "Flavored Malt Beverage",
+    "malt beverages specialities": "Malt Beverage Specialty",
+    "malt beverages": "Malt Beverage",
+    "cereal beverages - near beer (non alcoholic)": "Non-Alcoholic Beer",
+    "malt liquor": "Malt Liquor",
+    "neutral spirits - grain": "Grain Neutral Spirit",
+    "vodka 80-89 proof": "Vodka",
+    "vodka 100 proof up": "Vodka",
+    "diluted vodka": "Vodka",
+    "fruit flavored liqueurs": "Fruit Liqueur",
+    "other fruits & peels liqueurs": "Fruit Liqueur",
+    "other fruit & peels liqueurs": "Fruit Liqueur",
+    "whisky specialties": "Whisky",
+    "rum specialties": "Rum",
+    "vodka specialties": "Vodka",
+    "gin specialties": "Gin",
+    "other spirits": "Spirit",
+}
+
+
+#: The registry's bucketing words, dropped from a generic class before it is printed.
+_CLASS_FILLER = frozenset({"other", "specialties", "specialities", "specialty", "domestic",
+                           "foreign", "foriegn", "imported", "u.s.", "ur.s.", "us", "-"})
+_CLASS_PAREN = re.compile(r"\((\w+)\)")
+
+
+def readable_style(class_type: str | None, detected: str | None = None) -> str | None:
+    """What to print for a product's style: a named style the product's name detects when the
+    class is only a bucket, else the class in plain words, else the registry's text with
+    its suffix dropped."""
+    c = normalize_class(class_type)
+    cls = class_style(class_type)
+    if detected and detected in _STYLE_NAMES and (cls is None or cls in _GENERIC_CLASS_STYLES) \
+            and detected not in _GENERIC_CLASS_STYLES:
+        return _STYLE_NAMES[detected]
+    if c in _CLASS_NAMES:
+        return _CLASS_NAMES[c]
+    if cls is not None and cls not in _GENERIC_CLASS_STYLES:
+        return _STYLE_NAMES.get(cls)
+    if cls is not None:
+        # A generic class: the registry's words, tidied. "Other Rum (white)" is a white rum,
+        # "Whisky Specialties" is whisky.
+        paren = _CLASS_PAREN.search(c)
+        base = _CLASS_PAREN.sub("", c)
+        words = ([paren.group(1)] if paren else []) + [w for w in base.split()
+                                                       if w not in _CLASS_FILLER]
+        tidy = " ".join(w.title() for w in words)
+        return tidy or _STYLE_NAMES.get(cls)
+    return (class_type or "").strip() or None
+
 
 _NA_MARKERS = ("0,0", "0.0", "alcohol free", "alcohol-free", "alkoholfrei", "sans alcool",
                "non alcoholic", "non-alcoholic", "sin alcohol", "analcolico", "0 %", "0%",
@@ -197,35 +466,43 @@ def is_non_alcoholic(name: str) -> bool:
     return bool(re.search(r"\b0[.,]0\b", n))
 
 
-def detect_style(name: str, category: Category | str | None) -> str | None:
-    """Best style key for a product, or None if even the category is unknown. Category gates the
-    keyword set so a beer's "blanc" reads as a witbier and a spirit's as a white rum."""
+def detect_style(name: str, category: Category | str | None,
+                 class_type: str | None = None) -> str | None:
+    """Best style key for a product, or None if even the category is unknown.
+
+    A specific TTB class decides outright (see `_CLASS_RULES`); a generic one leaves it to
+    the name, and answers only when the name says nothing. Category gates the name keywords
+    so a beer's "blanc" reads as a witbier and a spirit's as a white rum; the registry's
+    "other" (aperitivos, amari, the specialties) reads the spirit rules."""
     n = _norm(name)
     cat = category.value if isinstance(category, Category) else (category or "")
     cat = str(cat).lower()
-    rules = _BEER_RULES if cat == "beer" else _SPIRIT_RULES if cat == "spirit" else []
+    cls = class_style(class_type)
+    if cls is not None and cls not in _GENERIC_CLASS_STYLES:
+        return cls
+    rules = (_BEER_RULES if cat == "beer" else
+             _SPIRIT_RULES if cat in ("spirit", "other") else [])
     for style, kws in rules:
         if any(k in n for k in kws):
             return style
+    if cls is not None:
+        return cls
     # Nothing matched: fall back to the broad category centroid so the row is still scoreable.
-    if cat == "beer":
-        return "beer"
-    if cat == "spirit":
-        return "spirit"
-    if cat == "wine":
-        return "wine"
-    return None
+    return {"beer": "beer", "spirit": "spirit", "other": "spirit", "wine": "wine",
+            "sake": "sake", "cider": "cider", "mead": "wine", "rtd": "flavored_malt"}.get(cat)
 
 
 def sensory_from_style(name: str, category: Category | str | None,
                        style_hint: str | None = None) -> SensoryVector | None:
     """A STYLE_PRIOR SensoryVector for the product, or None when no style can be inferred. A
-    non-alcoholic marker zeroes alcohol_warmth so a 0.0% reads distinct from its full sibling."""
-    style = detect_style(f"{style_hint or ''} {name}", category)
+    non-alcoholic marker zeroes alcohol_warmth so a 0.0% reads distinct from its full sibling.
+    `style_hint` is what the catalog says the style is -- a TTB class/type description, or a
+    style word off an Open Food Facts row -- and is read as a class first, then as words."""
+    style = detect_style(f"{style_hint or ''} {name}", category, class_type=style_hint)
     if style is None:
         return None
     axes = dict(_CENTROIDS[style])
-    if is_non_alcoholic(name):
+    if is_non_alcoholic(name) or style == "na_beer":
         axes["alcohol_warmth"] = 0.0
         axes["body_fullness"] = round(axes.get("body_fullness", 0.3) * 0.7, 3)
     # Broad category fallbacks are even weaker than a named style.
@@ -233,9 +510,10 @@ def sensory_from_style(name: str, category: Category | str | None,
     return SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=conf, axes=axes)
 
 
-def abv_from_style(name: str, category: Category | str | None) -> float | None:
+def abv_from_style(name: str, category: Category | str | None,
+                   style_hint: str | None = None) -> float | None:
     """Typical ABV for the inferred style, or None. 0.4 for a detected non-alcoholic product."""
     if is_non_alcoholic(name):
         return 0.4
-    style = detect_style(name, category)
+    style = detect_style(f"{style_hint or ''} {name}", category, class_type=style_hint)
     return _ABV.get(style) if style else None
