@@ -562,6 +562,17 @@ class PostgresStore:
             rows = cur.execute(sql, params).fetchall()
         return [(r[0], round(float(r[1]), 3)) for r in rows]
 
+    def products_named(self, name: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Every product carrying exactly this name. Equality on `name` rides the trigram
+        index (14 ms over half a million rows); `search_gold_products` falls back to an ILIKE
+        over the whole record, which is a five-second scan per name."""
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                "SELECT record FROM gold WHERE entity_type='product' AND name = %s LIMIT %s",
+                (name, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
         """A producer's catalog, best-known first — what the producer path offers once it has
         identified the maker. Rows carrying real data (an ABV, a sensory vector) sort first, so

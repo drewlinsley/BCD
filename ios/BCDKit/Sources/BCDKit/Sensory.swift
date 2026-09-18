@@ -88,6 +88,14 @@ public enum SensorySource: String, Codable, Sendable {
     case reviewConsensus = "review_consensus"
     case reconciled
     case stylePrior = "style_prior"
+    case llmProfile = "llm_profile"
+
+    /// An unknown source decodes as a style prior -- the weakest -- rather than failing the
+    /// product it belongs to. See `ExtractionMethod.init(from:)`.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SensorySource(rawValue: raw) ?? .stylePrior
+    }
 }
 
 public struct SensoryVector: Codable, Sendable {

@@ -55,6 +55,25 @@ import Foundation
                 ExtractionMethod.llmInferredFromStylePrior.trustRank)
         #expect(ExtractionMethod.statedByProducer.trustRank >
                 ExtractionMethod.reviewConsensus.trustRank)
+        #expect(ExtractionMethod.llmRecalled.trustRank <
+                ExtractionMethod.communityClone.trustRank)
+    }
+
+    /// A server that has learned a new provenance method or sensory source must not blank
+    /// the HUD on a phone that has not: the unknown value decodes as the weakest known one.
+    @Test func unknownEnumValuesDecodeAsTheWeakest() throws {
+        let method = try JSONDecoder().decode(ExtractionMethod.self,
+                                              from: "\"psychic_reading\"".data(using: .utf8)!)
+        #expect(method == .llmInferredFromStylePrior)
+        let known = try JSONDecoder().decode(ExtractionMethod.self,
+                                             from: "\"llm_recalled\"".data(using: .utf8)!)
+        #expect(known == .llmRecalled)
+        let source = try JSONDecoder().decode(SensorySource.self,
+                                              from: "\"tea_leaves\"".data(using: .utf8)!)
+        #expect(source == .stylePrior)
+        let profile = try JSONDecoder().decode(SensorySource.self,
+                                               from: "\"llm_profile\"".data(using: .utf8)!)
+        #expect(profile == .llmProfile)
     }
 }
 

@@ -22,6 +22,7 @@ class ExtractionMethod(str, Enum):
     RETAILER_LISTING = "retailer_listing"  # shop/menu product page
     COMMUNITY_CLONE = "community_clone"  # homebrew clone recipe
     REVIEW_CONSENSUS = "review_consensus"  # aggregated from reviews
+    LLM_RECALLED = "llm_recalled"  # what a language model remembers of the product; unverified
     LLM_INFERRED_FROM_STYLE_PRIOR = "llm_inferred_from_style_prior"  # weakest: a guess
     USER_CONTRIBUTED = "user_contributed"
 
@@ -35,6 +36,7 @@ METHOD_CONFIDENCE_CEILING: dict[ExtractionMethod, float] = {
     ExtractionMethod.RETAILER_LISTING: 0.8,
     ExtractionMethod.COMMUNITY_CLONE: 0.6,
     ExtractionMethod.REVIEW_CONSENSUS: 0.6,
+    ExtractionMethod.LLM_RECALLED: 0.6,
     ExtractionMethod.LLM_INFERRED_FROM_STYLE_PRIOR: 0.4,
     ExtractionMethod.USER_CONTRIBUTED: 0.7,
 }
