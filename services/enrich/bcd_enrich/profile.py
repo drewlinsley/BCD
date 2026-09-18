@@ -22,6 +22,9 @@ kept in bronze (source `llm-profile`), so a change to these rules is a re-apply,
 On the wire this is one POST per product to the Messages API with a forced tool call (the schema
 is the tool's input), or one Message Batches submission for bulk at half the price. Plain `httpx`,
 as `bcd_api.vision` does, so it adds no dependency. Run it with `python -m bcd_enrich.profile`.
+Without an API account the same questions go out to a file (`--export`) and the answers -- written
+by hand, or by a model in a chat session -- come back through one (`--answers`), validated and
+applied exactly as an API answer would be.
 """
 
 from __future__ import annotations
@@ -360,10 +363,11 @@ class ProductProfile(BaseModel):
     @property
     def sensory_confidence(self) -> float:
         """The vector's confidence: the model's own when it knows the product, else held to
-        what a named style prior is worth."""
+        what a named style prior is worth -- and allowed below the detail screen's 0.30
+        "tastes like" gate, so a guess about a bare "Ale" stays wallpaper."""
         if self.known:
             return round(max(0.45, min(0.9, self.confidence)), 2)
-        return round(min(_STYLE_ONLY_MAX, max(0.3, self.confidence)), 2)
+        return round(min(_STYLE_ONLY_MAX, max(0.2, self.confidence)), 2)
 
     def top_axes(self, n: int = 3) -> list[str]:
         ranked = sorted(self.axes.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -721,6 +725,8 @@ def run(args: argparse.Namespace) -> int:
 
     if args.collect:
         return _collect(store, args, model, key)
+    if args.answers:
+        return _from_file(store, args, model)
 
     products = select_products(store, ids=args.ids, searches=args.search,
                                from_scans=args.from_scans, scan_glob=args.scans,
@@ -754,6 +760,14 @@ def run(args: argparse.Namespace) -> int:
         producer = store.get_gold(rec.get("producer_id") or "")
         brand = store.get_gold(rec.get("brand_id") or "")
         questions.append((rec, describe(rec, producer, brand)))
+
+    if args.export:
+        with open(args.export, "w", encoding="utf-8") as f:
+            for rec, q in questions:
+                f.write(json.dumps({"id": rec["id"], "name": rec.get("name", ""),
+                                    "question": q}) + "\n")
+        print(f"wrote {len(questions)} questions to {args.export}")
+        return 0
 
     if args.dry_run:
         sys_tokens = _estimate_tokens(system_prompt())
@@ -831,6 +845,56 @@ def run(args: argparse.Namespace) -> int:
           + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
           + f"; wrote {len(writes)} products; tokens "
           + ", ".join(f"{k}={v}" for k, v in sorted(usage.items())))
+    store.close()
+    return 0
+
+
+def _from_file(store, args: argparse.Namespace, model: str) -> int:
+    """Answers written outside the API -- one JSON object per line, `{"id": ..., "answer":
+    {...}}` -- go through the same validation and the same apply rules as an API answer, and
+    into bronze the same way, with `via` saying where they came from."""
+    questions = {}
+    if args.export:
+        with open(args.export, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    row = json.loads(line)
+                    questions[row["id"]] = row.get("question", "")
+    writes: list[tuple[str, str, dict]] = []
+    tally: collections.Counter[str] = collections.Counter()
+    with open(args.answers, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                pid, answer = row["id"], row["answer"]
+            except (ValueError, KeyError, TypeError) as e:
+                print(f"  ! line {n}: {type(e).__name__}: {e}")
+                tally["failed"] += 1
+                continue
+            rec = store.get_gold(pid)
+            if rec is None or not rec.get("category"):
+                print(f"  ! line {n}: no product {pid!r}")
+                tally["failed"] += 1
+                continue
+            profile = ProductProfile.model_validate(answer)
+            tally[profile.recognition] += 1
+            changed = apply_profile(rec, profile, model=model)
+            if not args.quiet:
+                print(_report(rec, profile, changed))
+            if changed:
+                writes.append((pid, "product", rec))
+            if not args.dry_run:
+                doc = bronze_doc(pid, questions.get(pid, ""), answer, model=model)
+                doc.payload["via"] = args.via
+                store.put_bronze(doc)
+    if writes and not args.dry_run:
+        store.put_gold_many(writes)
+    print("─" * 60)
+    print(f"read {sum(tally.values())} answers from {args.answers}: "
+          + ", ".join(f"{k}={v}" for k, v in sorted(tally.items()))
+          + f"; {'would write' if args.dry_run else 'wrote'} {len(writes)} products")
     store.close()
     return 0
 
@@ -918,6 +982,13 @@ def main(argv: list[str] | None = None) -> int:
                      help="submit through the Message Batches API instead of asking now")
     how.add_argument("--collect", metavar="BATCH_ID",
                      help="fetch a submitted batch's answers and apply them")
+    how.add_argument("--export", metavar="FILE",
+                     help="write the questions to FILE (JSONL) instead of asking; with "
+                          "--answers, the questions to keep beside the answers in bronze")
+    how.add_argument("--answers", metavar="FILE",
+                     help="apply answers from FILE (JSONL of {id, answer}) instead of asking")
+    how.add_argument("--via", default="session",
+                     help="with --answers: where they came from, for the record")
     how.add_argument("--wait", type=int, default=0, metavar="SECONDS",
                      help="with --collect: poll every N seconds until the batch has ended")
     how.add_argument("--quiet", action="store_true", help="with --collect: no per-row lines")

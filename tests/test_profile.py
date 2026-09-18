@@ -287,3 +287,48 @@ def test_the_scan_logs_select_what_the_camera_drew(tmp_path):
                            scan_glob=str(tmp_path / "scans*.jsonl"), lineup=8, limit=None)
     assert {r["id"] for r in rows} == {"p:heady", "p:sib"}
     store.close()
+
+
+# ---- answers from a file ------------------------------------------------------------------------
+
+def test_answers_from_a_file_land_like_the_apis(tmp_path, capsys, monkeypatch):
+    from bcd_enrich.profile import main
+
+    # The CLI reads the repo's `.env`, which points at the live catalog and would leak the
+    # rest of that file into every later test; this test's store is SQLite.
+    monkeypatch.setattr("bcd_enrich.profile.load_dotenv", lambda: None)
+    monkeypatch.setenv("BCD_STORE_BACKEND", "sqlite")
+    store_root = tempfile.mkdtemp()
+    store = MedallionStore(root=store_root)
+    store.put_gold("prod:1", "producer", {"id": "prod:1", "name": "The Alchemist"})
+    store.put_gold("p:1", "product", _row())
+    store.close()
+    questions = tmp_path / "q.jsonl"
+    answers = tmp_path / "a.jsonl"
+
+    assert main(["--root", store_root, "--ids", "p:1", "--export", str(questions)]) == 0
+    q = json.loads(questions.read_text().splitlines()[0])
+    assert q["id"] == "p:1" and q["question"].startswith("Product: Heady Topper")
+
+    answers.write_text(json.dumps({"id": "p:1", "answer": _answer()}) + "\n"
+                       + json.dumps({"id": "p:missing", "answer": _answer()}) + "\n"
+                       + "not json\n")
+    assert main(["--root", store_root, "--answers", str(answers), "--export", str(questions),
+                 "--model", "claude-opus-5", "--via", "session"]) == 0
+    out = capsys.readouterr().out
+    assert "[K 0.85] 'Heady Topper': New England IPA" in out
+    assert "no product 'p:missing'" in out and "line 3" in out
+    assert "wrote 1 products" in out
+
+    store = MedallionStore(root=store_root)
+    p = Product.model_validate(store.get_gold("p:1"))
+    assert p.sensory.source == SensorySource.LLM_PROFILE
+    assert p.style.provenance.extractor_version.startswith("claude-opus-5/")
+    docs = list(store.iter_bronze("llm-profile"))
+    assert len(docs) == 1 and docs[0].natural_key == "p:1"
+    assert docs[0].payload["via"] == "session"
+    assert docs[0].payload["question"].startswith("Product: Heady Topper")
+    # Asked again, the product counts as answered and no question goes out.
+    assert main(["--root", store_root, "--ids", "p:1", "--export", str(questions)]) == 0
+    assert questions.read_text() == ""
+    store.close()
