@@ -177,6 +177,46 @@ def test_the_makers_own_words_and_strength_stay():
     assert [i.raw_name for i in p.recipe.ingredients] == ["simcoe", "Apollo", "Conan yeast"]
 
 
+def test_a_known_strength_replaces_a_styles_typical_one_but_never_a_filed_one():
+    guessed = Provenance(source_id="style-prior", confidence=0.4,
+                         method=ExtractionMethod.LLM_INFERRED_FROM_STYLE_PRIOR,
+                         quote="typical ABV for the inferred style")
+    rec = _row()
+    rec["spec"]["abv_pct"] = {"value": 5.5, "provenance": guessed.model_dump(mode="json")}
+    changed = apply_profile(rec, ProductProfile.model_validate(_answer()), model="m")
+    assert "abv" in changed
+    abv = Product.model_validate(rec).spec.abv_pct
+    assert abv.value == 8.0 and abv.provenance.method == ExtractionMethod.LLM_RECALLED
+
+    filed = _row(abv=5.5)  # what the registry says stays, however sure the model is
+    assert "abv" not in apply_profile(filed, ProductProfile.model_validate(_answer()), model="m")
+    assert Product.model_validate(filed).spec.abv_pct.value == 5.5
+
+
+def test_the_rows_current_answer_takes_back_what_an_earlier_one_wrote():
+    rec = _row()
+    rec["recipe"] = {"ingredients": [{
+        "role": "adjunct", "entity_kind": "other", "entity_ref": None, "raw_name": "Oats",
+        "quantity": None, "unit": None, "percent_of_bill": None, "timing": None,
+        "provenance": STATED.model_dump(mode="json")}], "process_steps": []}
+    apply_profile(rec, ProductProfile.model_validate(_answer()), model="m")
+    p = Product.model_validate(rec)
+    assert p.style.value == "New England IPA" and p.spec.abv_pct.value == 8.0
+    assert [i.raw_name for i in p.recipe.ingredients] == ["Oats", "Simcoe", "Apollo",
+                                                            "Conan yeast"]
+    # The row turns out to be the session version: no strength known, one hop, another style.
+    session = _answer(style="Session IPA", abv_pct=None, summary="The little one.",
+                      ingredients=[{"name": "Citra", "kind": "hop", "role": "dry_hop"}])
+    session["axes"] = {**session["axes"], "body_fullness": 0.3, "alcohol_warmth": 0.15}
+    changed = apply_profile(rec, ProductProfile.model_validate(session), model="m")
+    assert set(changed) == {"sensory", "style", "description", "ingredients-3",
+                            "ingredients+1", "abv-"}
+    p = Product.model_validate(rec)
+    assert p.style.value == "Session IPA"  # ours to change, however specific it read
+    assert p.spec.abv_pct is None and p.description.value == "The little one."
+    assert [i.raw_name for i in p.recipe.ingredients] == ["Oats", "Citra"]  # the maker's stays
+
+
 def test_a_strength_needs_the_model_to_be_sure():
     rec = _row()
     changed = apply_profile(rec, ProductProfile.model_validate(_answer(confidence=0.6)),
@@ -331,4 +371,107 @@ def test_answers_from_a_file_land_like_the_apis(tmp_path, capsys, monkeypatch):
     # Asked again, the product counts as answered and no question goes out.
     assert main(["--root", store_root, "--ids", "p:1", "--export", str(questions)]) == 0
     assert questions.read_text() == ""
+    store.close()
+
+    # A rule change is a re-apply of the answers already in bronze -- with no selection, every
+    # one of them. Here the row lost its strength; the answer puts it back.
+    store = MedallionStore(root=store_root)
+    rec = store.get_gold("p:1")
+    rec["spec"]["abv_pct"] = None
+    store.put_gold("p:1", "product", rec)
+    store.close()
+    capsys.readouterr()
+    assert main(["--root", store_root, "--reapply", "--dry-run", "--quiet"]) == 0
+    out = capsys.readouterr().out
+    assert "wrote abv" in out and "would re-apply 1 of 1 from bronze" in out
+    store = MedallionStore(root=store_root)
+    assert Product.model_validate(store.get_gold("p:1")).spec.abv_pct is None
+    store.close()
+    assert main(["--root", store_root, "--reapply", "--quiet"]) == 0
+    assert "re-applied 1 of 1 from bronze" in capsys.readouterr().out
+    store = MedallionStore(root=store_root)
+    assert Product.model_validate(store.get_gold("p:1")).spec.abv_pct.value == 8.0
+    store.close()
+
+
+def test_a_pattern_profiles_every_row_carrying_the_products_name(tmp_path, capsys, monkeypatch):
+    """A maker's lineup: one authored profile per product, stamped onto every registry row that
+    carries the product's name -- and only those."""
+    from bcd_enrich.profile import main
+
+    monkeypatch.setattr("bcd_enrich.profile.load_dotenv", lambda: None)
+    monkeypatch.setenv("BCD_STORE_BACKEND", "sqlite")
+    store_root = tempfile.mkdtemp()
+    store = MedallionStore(root=store_root)
+    # The registry gives a maker one permit per state; the products hang off either.
+    store.put_gold("prod:de", "producer", {"id": "prod:de", "name": "Dogfish Head"})
+    store.put_gold("prod:md", "producer", {"id": "prod:md", "name": "Dogfish Head"})
+    store.put_gold("prod:hp", "producer", {"id": "prod:hp", "name": "Harpoon"})
+
+    def row(pid, name, prod, *, conf=0.25, source=SensorySource.STYLE_PRIOR, **kw):
+        rec = _row(name=name, sensory_source=source, **kw)
+        rec.update(id=pid, producer_id=prod)
+        if rec.get("sensory"):
+            rec["sensory"]["confidence"] = conf
+        store.put_gold(pid, "product", rec)
+
+    row("p:1", "60 Minute IPA", "prod:de", style="IPA")  # the floor read the style
+    row("p:2", "Dogfish Head 60 Minute", "prod:md")  # ...and here it could not
+    row("p:3", "60 Minute IPA Nitro Coffee", "prod:de")  # excluded by the author
+    row("p:4", "90 Minute IPA", "prod:de", style="IPA")
+    row("p:5", "Dogfish Head 60 Minute IPA", "prod:de", source=SensorySource.LLM_PROFILE,
+        conf=0.9)  # already profiled by hand
+    row("p:6", "Harpoon", "prod:hp")  # a bare name: the floor fell back to the category
+    row("p:7", "Harpoon 10 Year UPA", "prod:hp", conf=0.35)  # the floor read "IPA" out of it
+    row("p:8", "60 Minute IPA", "prod:other")  # another maker's beer of the same name
+    store.close()
+
+    sixty = _answer(style="IPA", abv_pct=6.0, summary="Continuously hopped.",
+                    ingredients=[{"name": "Warrior", "kind": "hop", "role": "bittering_hop"}])
+    ninety = _answer(style="Double IPA", abv_pct=9.0, summary="Big and boozy.")
+    house = _answer(recognition="style_only", confidence=0.4, style="American ale",
+                    abv_pct=5.5, summary="A New England ale.", ingredients=[])
+    patterns = tmp_path / "patterns.jsonl"
+    patterns.write_text("\n".join(json.dumps(p) for p in [
+        {"producer": "Dogfish Head", "match": r"\b60 minute\b", "exclude": r"coffee",
+         "answer": sixty},
+        {"producer": ["Dogfish Head"], "match": r"\b(60|90) minute\b", "exclude": r"coffee",
+         "answer": ninety},
+        {"producer": "Harpoon", "match": r"^harpoon\b", "answer": house},
+        {"producer": "Nobody Brewing", "match": r".", "answer": house},
+    ]) + "\n")
+
+    assert main(["--root", store_root, "--patterns", str(patterns), "--model", "claude-opus-5",
+                 "--dry-run", "--quiet"]) == 0
+    out = capsys.readouterr().out
+    assert "   2  Dogfish Head / \\b60 minute\\b: 60 Minute IPA; Dogfish Head 60 Minute" in out
+    assert "(+1 already profiled)" in out
+    # The second pattern's "60 minute" rows are already claimed; it gets 90 Minute alone.
+    assert "   1  Dogfish Head / \\b(60|90) minute\\b: 90 Minute IPA" in out
+    assert "   1  Harpoon / ^harpoon\\b: Harpoon  (+1 left to the style floor)" in out
+    assert "! pattern 3: no producer named ['Nobody Brewing']" in out
+    assert "4 patterns claimed 4 rows: known=3, style_only=1; would write 4 products" in out
+    store = MedallionStore(root=store_root)
+    assert Product.model_validate(store.get_gold("p:1")).sensory.source == \
+        SensorySource.STYLE_PRIOR  # a dry run
+    store.close()
+
+    assert main(["--root", store_root, "--patterns", str(patterns), "--model", "claude-opus-5",
+                 "--via", "session", "--quiet"]) == 0
+    assert "wrote 4 products" in capsys.readouterr().out
+    store = MedallionStore(root=store_root)
+    by_id = {r["id"]: Product.model_validate(r) for r in store.iter_gold("product")}
+    for pid in ("p:1", "p:2"):
+        assert by_id[pid].style.value == "IPA" and by_id[pid].spec.abv_pct.value == 6.0
+        assert [i.raw_name for i in by_id[pid].recipe.ingredients] == ["Warrior"]
+    # A style the floor read out of the name is specific enough; the profile fills generic ones.
+    assert by_id["p:4"].style.value == "IPA" and by_id["p:4"].spec.abv_pct.value == 9.0
+    assert by_id["p:6"].sensory.source == SensorySource.LLM_PROFILE
+    assert by_id["p:6"].spec.abv_pct is None  # a maker-level guess states no strength
+    for pid in ("p:3", "p:7", "p:8"):
+        assert by_id[pid].sensory.source == SensorySource.STYLE_PRIOR, pid
+    assert by_id["p:5"].sensory.confidence == 0.9  # the hand-written profile stands
+    docs = {d.natural_key: d for d in store.iter_bronze("llm-profile")}
+    assert set(docs) == {"p:1", "p:2", "p:4", "p:6"}
+    assert docs["p:1"].payload["via"] == "session" and docs["p:1"].payload["answer"] == sixty
     store.close()
