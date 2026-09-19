@@ -104,6 +104,27 @@ def test_a_name_out_of_the_catalog_finds_its_rows_exactly(pg: PostgresStore):
     assert pg.products_named("heady topper") == []  # exact: the name came from the catalog
 
 
+def test_a_makers_whole_lineup_from_its_name(pg: PostgresStore):
+    """The registry files one permit per state, so a maker is several producer rows; a lineup
+    pass wants every one of them, and every product under each -- not the producer path's
+    front eight."""
+    for i in range(10):
+        _seed_product(pg, f"dh{i}", f"Dogfish Head Beer {i}", None)
+    pg.put_gold("prod:dh0", "producer", Producer(id="prod:dh0", name="Dogfish Head")
+                .model_dump(mode="json"))
+    pg.put_gold("prod:dh1", "producer", Producer(id="prod:dh1", name="Dogfish Head")
+                .model_dump(mode="json"))
+    for i in range(1, 10):  # the other nine products hang off the second permit
+        rec = pg.get_gold(f"dh{i}")
+        rec["producer_id"] = "prod:dh1"
+        pg.put_gold(f"dh{i}", "product", rec)
+    assert {m["id"] for m in pg.producers_named("Dogfish Head")} == {"prod:dh0", "prod:dh1"}
+    assert pg.producers_named("dogfish head") == []
+    assert [r["id"] for r in pg.products_of("prod:dh0")] == ["dh0"]
+    assert len(pg.products_of("prod:dh1")) == 8  # the producer path's page
+    assert len(pg.products_of("prod:dh1", limit=None)) == 9  # the lineup pass wants all of it
+
+
 def test_nearest_by_sensory_cosine(pg: PostgresStore):
     _seed_product(pg, "trop", "Tropical IPA", {"tropical": 1.0, "citrus": 0.9})
     _seed_product(pg, "roast", "Roasty Stout", {"roasted_coffee_choc": 1.0, "bitterness": 0.4})

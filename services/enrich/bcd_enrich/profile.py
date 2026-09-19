@@ -11,20 +11,26 @@ comes back where the recommender and the detail screen read:
   * `product.style`              when the row had none, or only a generic one ("Ale");
   * `product.description`        a one-sentence summary; the descriptors sit in its receipt;
   * `product.recipe.ingredients` the hops, grains, botanicals and barrels the maker has stated;
-  * `product.spec.abv_pct`       when the row had none and the model knows the label's.
+  * `product.spec.abv_pct`       when the row had none, or only a style's typical strength,
+                                 and the model knows the label's.
 
 Everything it writes carries `ExtractionMethod.LLM_RECALLED`: recalled, not read, capped at 0.6
 confidence -- one rank above a style guess, below anything with a URL. The model says whether it
 actually knows the product or is only reading its name (`style_only`), and the apply step trusts a
-style-only answer with less and never lets it state an ingredient or a strength. The raw answer is
-kept in bronze (source `llm-profile`), so a change to these rules is a re-apply, not a re-purchase.
+style-only answer with less and never lets it state an ingredient or a strength. What an earlier
+answer wrote -- a style, a strength, an ingredient -- the row's current answer may replace or take
+back; what was read off a label, a filing or the maker's page, never. The raw answer is kept in
+bronze (source `llm-profile`), so a change to these rules is a re-apply, not a re-purchase.
 
 On the wire this is one POST per product to the Messages API with a forced tool call (the schema
 is the tool's input), or one Message Batches submission for bulk at half the price. Plain `httpx`,
 as `bcd_api.vision` does, so it adds no dependency. Run it with `python -m bcd_enrich.profile`.
 Without an API account the same questions go out to a file (`--export`) and the answers -- written
 by hand, or by a model in a chat session -- come back through one (`--answers`), validated and
-applied exactly as an API answer would be.
+applied exactly as an API answer would be. A maker's lineup is done with `--patterns`: one
+authored profile per product, stamped onto every catalog row carrying that product's name -- the
+registry files "60 Minute IPA", "60 Minute India Pale Ale" and "Dogfish Head 60 Minute" as three
+rows, and they are one beer.
 """
 
 from __future__ import annotations
@@ -545,6 +551,24 @@ def _replaceable_source(rec: dict, profile: ProductProfile) -> bool:
     return source == SensorySource.CHEMISTRY_PRIOR.value and profile.known
 
 
+def _method(sourced: dict | None) -> str | None:
+    return ((sourced or {}).get("provenance") or {}).get("method")
+
+
+def _ours(sourced: dict | None) -> bool:
+    """Whether an earlier answer wrote this -- and so the current answer may take it back."""
+    return _method(sourced) == ExtractionMethod.LLM_RECALLED.value
+
+
+def _a_guess(sourced: dict | None) -> bool:
+    """A recalled fact may take the place of nothing, of a style guess, or of an earlier recall
+    -- never of anything read off a label, a filing or the maker's own page."""
+    if not sourced or sourced.get("value") is None:
+        return True
+    return _ours(sourced) or \
+        _method(sourced) == ExtractionMethod.LLM_INFERRED_FROM_STYLE_PRIOR.value
+
+
 def apply_profile(rec: dict, profile: ProductProfile, *, model: str) -> list[str]:
     """Write the profile into the gold record, in place. Returns the fields it changed."""
     changed: list[str] = []
@@ -560,22 +584,19 @@ def apply_profile(rec: dict, profile: ProductProfile, *, model: str) -> list[str
             rec["sensory"] = new
             changed.append("sensory")
 
-    if profile.style and _generic_style(rec) and \
-            (profile.known or profile.confidence >= 0.5):
-        current = rec.get("style") if isinstance(rec.get("style"), dict) else None
-        if not current or current.get("value") != profile.style:
-            quote = f"was: {current['value']}" if current and current.get("value") else \
-                profile.basis
-            rec["style"] = {"value": profile.style,
-                            "provenance": _provenance(profile, model, quote)}
-            changed.append("style")
+    current = rec.get("style") if isinstance(rec.get("style"), dict) else None
+    if profile.style and (_ours(current) or _generic_style(rec)) and \
+            (profile.known or profile.confidence >= 0.5) and \
+            (current or {}).get("value") != profile.style:
+        quote = f"was: {current['value']}" if current and current.get("value") else \
+            profile.basis
+        rec["style"] = {"value": profile.style,
+                        "provenance": _provenance(profile, model, quote)}
+        changed.append("style")
 
     if profile.summary:
         current = rec.get("description") if isinstance(rec.get("description"), dict) else None
-        method = ((current or {}).get("provenance") or {}).get("method")
-        ours = method in (ExtractionMethod.LLM_RECALLED.value,
-                          ExtractionMethod.LLM_INFERRED_FROM_STYLE_PRIOR.value)
-        if (not current or ours) and (current or {}).get("value") != profile.summary:
+        if _a_guess(current) and (current or {}).get("value") != profile.summary:
             rec["description"] = {
                 "value": profile.summary,
                 "provenance": _provenance(profile, model,
@@ -583,11 +604,18 @@ def apply_profile(rec: dict, profile: ProductProfile, *, model: str) -> list[str
             }
             changed.append("description")
 
+    recipe = rec.get("recipe")
+    if not isinstance(recipe, dict):
+        recipe = {"ingredients": [], "process_steps": []}
+    rows = recipe.setdefault("ingredients", [])
+    stated = {i.name.lower() for i in profile.ingredients} if profile.known else set()
+    kept = [r for r in rows
+            if not (_ours(r) and str(r.get("raw_name", "")).lower() not in stated)]
+    if dropped := len(rows) - len(kept):
+        recipe["ingredients"] = rows = kept
+        rec["recipe"] = recipe
+        changed.append(f"ingredients-{dropped}")
     if profile.known and profile.ingredients:
-        recipe = rec.get("recipe")
-        if not isinstance(recipe, dict):
-            recipe = {"ingredients": [], "process_steps": []}
-        rows = recipe.setdefault("ingredients", [])
         have = {" ".join(str(r.get("raw_name", "")).split()).lower() for r in rows}
         added = 0
         for ing in profile.ingredients:
@@ -605,17 +633,19 @@ def apply_profile(rec: dict, profile: ProductProfile, *, model: str) -> list[str
             rec["recipe"] = recipe
             changed.append(f"ingredients+{added}")
 
+    spec = rec.get("spec") if isinstance(rec.get("spec"), dict) else {}
+    current = spec.get("abv_pct") if isinstance(spec.get("abv_pct"), dict) else None
     if profile.known and profile.abv_pct is not None and \
             profile.confidence >= _ABV_MIN_CONFIDENCE:
-        spec = rec.get("spec")
-        if not isinstance(spec, dict):
-            spec = {}
-        if not (isinstance(spec.get("abv_pct"), dict) and
-                spec["abv_pct"].get("value") is not None):
+        if _a_guess(current) and (current or {}).get("value") != profile.abv_pct:
             spec["abv_pct"] = {"value": profile.abv_pct,
                                "provenance": _provenance(profile, model, profile.basis)}
             rec["spec"] = spec
             changed.append("abv")
+    elif _ours(current):
+        spec["abv_pct"] = None
+        rec["spec"] = spec
+        changed.append("abv-")
 
     if changed:
         Product.model_validate(rec)  # never write a row the schema would refuse to read back
@@ -727,14 +757,21 @@ def run(args: argparse.Namespace) -> int:
         return _collect(store, args, model, key)
     if args.answers:
         return _from_file(store, args, model)
+    if args.patterns:
+        return _from_patterns(store, args, model)
 
-    products = select_products(store, ids=args.ids, searches=args.search,
-                               from_scans=args.from_scans, scan_glob=args.scans,
-                               lineup=args.lineup, limit=args.limit)
+    answered = _answered(store)
+    selecting = args.from_scans or args.ids or args.search
+    if args.reapply and not selecting:
+        # no selection: every row that has an answer
+        products = [r for r in (store.get_gold(k) for k in sorted(answered)) if r]
+    else:
+        products = select_products(store, ids=args.ids, searches=args.search,
+                                   from_scans=args.from_scans, scan_glob=args.scans,
+                                   lineup=args.lineup, limit=args.limit)
     if not products:
         print("nothing selected: use --from-scans, --ids, or --search")
         return 1
-    answered = _answered(store)
 
     if args.reapply:
         batch: list[tuple[str, str, dict]] = []
@@ -744,12 +781,14 @@ def run(args: argparse.Namespace) -> int:
                 continue
             profile = ProductProfile.model_validate(doc.payload.get("answer") or {})
             changed = apply_profile(rec, profile, model=doc.payload.get("model") or model)
-            print(_report(rec, profile, changed))
-            if changed and not args.dry_run:
+            if changed or not args.quiet:
+                print(_report(rec, profile, changed))
+            if changed:
                 batch.append((rec["id"], "product", rec))
-        if batch:
+        if batch and not args.dry_run:
             store.put_gold_many(batch)
-        print(f"re-applied {len(batch)} of {len(products)} from bronze")
+        print(f"{'would re-apply' if args.dry_run else 're-applied'} {len(batch)} of "
+              f"{len(products)} from bronze")
         return 0
 
     todo = [r for r in products if args.force or r["id"] not in answered]
@@ -845,6 +884,125 @@ def run(args: argparse.Namespace) -> int:
           + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
           + f"; wrote {len(writes)} products; tokens "
           + ", ".join(f"{k}={v}" for k, v in sorted(usage.items())))
+    store.close()
+    return 0
+
+
+class Pattern(BaseModel):
+    """One authored profile and the rows it is for: a maker (or several -- the registry files
+    one permit per state), a regex on the product name, and what to leave out."""
+
+    producer: str | list[str] | None = None
+    match: str
+    exclude: str | None = None
+    category: str | None = None
+    answer: dict[str, Any]
+
+    @property
+    def makers(self) -> list[str] | None:
+        if self.producer is None:
+            return None
+        if isinstance(self.producer, str):
+            return [m.strip() for m in self.producer.split("|") if m.strip()]
+        return list(self.producer)
+
+
+def _floor_reads_the_name(rec: dict) -> bool:
+    """Whether the style floor found a named style in this row (its prior sits at 0.35) rather
+    than falling back to the category centroid (0.25)."""
+    sv = rec.get("sensory")
+    return isinstance(sv, dict) and sv.get("source") == SensorySource.STYLE_PRIOR.value and \
+        float(sv.get("confidence") or 0) >= 0.35
+
+
+def expand_patterns(store, patterns: list[Pattern], *, force: bool = False,
+                    report=print) -> list[tuple[dict, dict]]:
+    """(row, answer) for every catalog row a pattern claims. Patterns are taken in order and
+    the first to claim a row keeps it. A row already profiled is left alone unless `force`.
+    A pattern the author only knows at maker level (`style_only`) yields to a style floor that
+    read a named style out of the row -- "Harpoon 10 Year UPA" is better served by the IPA
+    centroid than by a generic "the kind of beer Harpoon makes"."""
+    taken: set[str] = set()
+    out: list[tuple[dict, dict]] = []
+    rows_of: dict[tuple, list[dict] | None] = {}
+    everything: list[dict] | None = None
+    for i, p in enumerate(patterns):
+        makers = p.makers
+        if makers is None:
+            if everything is None:
+                everything = list(store.iter_gold("product"))
+            rows = everything
+        else:
+            key = tuple(makers)
+            if key not in rows_of:
+                pids = [m["id"] for name in makers for m in store.producers_named(name)]
+                rows_of[key] = [r for pid in pids for r in store.products_of(pid, limit=None)] \
+                    if pids else None
+            rows = rows_of[key]
+        if rows is None:
+            report(f"  ! pattern {i}: no producer named {makers}")
+            continue
+        rx = re.compile(p.match, re.I)
+        ex = re.compile(p.exclude, re.I) if p.exclude else None
+        guess = p.answer.get("recognition") == "style_only"
+        hit, done, floor = [], 0, 0
+        for rec in rows:
+            name = rec.get("name") or ""
+            if not rx.search(name) or (ex and ex.search(name)):
+                continue
+            if p.category and rec.get("category") != p.category:
+                continue
+            if rec["id"] in taken:
+                continue
+            sv = rec.get("sensory")
+            profiled = isinstance(sv, dict) and sv.get("source") == SensorySource.LLM_PROFILE.value
+            if profiled and not force:
+                done += 1
+                continue
+            if guess and _floor_reads_the_name(rec):
+                floor += 1
+                continue
+            taken.add(rec["id"])
+            hit.append(name)
+            out.append((rec, p.answer))
+        report(f"{len(hit):4d}  {' | '.join(makers) if makers else '*'} / {p.match}: "
+               + "; ".join(sorted(set(hit))[:3])[:90]
+               + (f"  (+{done} already profiled)" if done else "")
+               + (f"  (+{floor} left to the style floor)" if floor else ""))
+    return out
+
+
+def _from_patterns(store, args: argparse.Namespace, model: str) -> int:
+    patterns = []
+    with open(args.patterns, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if line.strip():
+                try:
+                    patterns.append(Pattern.model_validate(json.loads(line)))
+                except (ValueError, TypeError) as e:
+                    print(f"  ! line {n}: {type(e).__name__}: {e}")
+                    return 1
+    pairs = expand_patterns(store, patterns, force=args.force)
+    writes: list[tuple[str, str, dict]] = []
+    tally: collections.Counter[str] = collections.Counter()
+    for rec, answer in pairs:
+        profile = ProductProfile.model_validate(answer)
+        tally[profile.recognition] += 1
+        changed = apply_profile(rec, profile, model=model)
+        if not args.quiet:
+            print(_report(rec, profile, changed))
+        if changed:
+            writes.append((rec["id"], "product", rec))
+        if not args.dry_run:
+            doc = bronze_doc(rec["id"], "", answer, model=model)
+            doc.payload["via"] = args.via
+            store.put_bronze(doc)
+    if writes and not args.dry_run:
+        store.put_gold_many(writes)
+    print("─" * 60)
+    print(f"{len(patterns)} patterns claimed {len(pairs)} rows: "
+          + ", ".join(f"{k}={v}" for k, v in sorted(tally.items()))
+          + f"; {'would write' if args.dry_run else 'wrote'} {len(writes)} products")
     store.close()
     return 0
 
@@ -977,7 +1135,8 @@ def main(argv: list[str] | None = None) -> int:
     how.add_argument("--force", action="store_true",
                      help="ask again about products that already have an answer in bronze")
     how.add_argument("--reapply", action="store_true",
-                     help="re-run the apply rules over the answers already in bronze")
+                     help="re-run the apply rules over the answers already in bronze "
+                          "(with no selection: over every answered row)")
     how.add_argument("--batch", action="store_true",
                      help="submit through the Message Batches API instead of asking now")
     how.add_argument("--collect", metavar="BATCH_ID",
@@ -987,11 +1146,16 @@ def main(argv: list[str] | None = None) -> int:
                           "--answers, the questions to keep beside the answers in bronze")
     how.add_argument("--answers", metavar="FILE",
                      help="apply answers from FILE (JSONL of {id, answer}) instead of asking")
+    how.add_argument("--patterns", metavar="FILE",
+                     help="apply one authored profile per product to every row carrying its "
+                          "name (JSONL of {producer, match, exclude, answer})")
     how.add_argument("--via", default="session",
                      help="with --answers: where they came from, for the record")
     how.add_argument("--wait", type=int, default=0, metavar="SECONDS",
                      help="with --collect: poll every N seconds until the batch has ended")
-    how.add_argument("--quiet", action="store_true", help="with --collect: no per-row lines")
+    how.add_argument("--quiet", action="store_true",
+                     help="with --collect, --patterns or --reapply: no per-row lines "
+                          "(--reapply still lists the rows it changes)")
     return run(ap.parse_args(argv))
 
 
