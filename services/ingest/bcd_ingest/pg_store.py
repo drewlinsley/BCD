@@ -237,6 +237,17 @@ class PostgresStore:
                     WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
+                -- The rows we actually know something about -- rated, profiled, or with an
+                -- ingredient list -- are half a percent of the catalog; the rest carry their
+                -- style's centroid. Asked for the nearest known rows, the full index visits
+                -- its ef_search candidates, finds every one a centroid, and answers nothing
+                -- (measured: 0 rows, 396 removed by filter). A partial index over the known
+                -- rows answers the same question in a millisecond. The predicate must appear
+                -- verbatim in the query for the planner to pick it.
+                CREATE INDEX IF NOT EXISTS ix_gold_sensory_known_hnsw
+                    ON gold USING hnsw (sensory vector_cosine_ops)
+                    WHERE entity_type='product' AND sensory IS NOT NULL
+                      AND (record->'sensory'->>'source') <> 'style_prior';
                 """
             )
 
@@ -657,14 +668,20 @@ class PostgresStore:
             list(pool.map(run, range(workers)))    # list() so a worker's error propagates
         return results
 
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
-        """Cosine ANN over the sensory column — the pgvector core of recommendation."""
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
+                           known: bool = False) -> list[dict[str, Any]]:
+        """Cosine ANN over the sensory column — the pgvector core of recommendation.
+        `known=True` asks only the rows whose vector is not a style centroid (see the
+        partial index `ix_gold_sensory_known_hnsw`; the predicate here is its predicate)."""
+        scope = "WHERE entity_type='product' AND sensory IS NOT NULL"
+        if known:
+            scope += " AND (record->'sensory'->>'source') <> 'style_prior'"
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
-                """
+                f"""
                 SELECT record
                 FROM gold
-                WHERE entity_type='product' AND sensory IS NOT NULL
+                {scope}
                 ORDER BY sensory <=> %s::vector
                 LIMIT %s
                 """,

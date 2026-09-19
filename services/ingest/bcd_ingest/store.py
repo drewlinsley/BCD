@@ -307,13 +307,17 @@ class MedallionStore:
         they hold."""
         return 0
 
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
+                           known: bool = False) -> list[dict[str, Any]]:
         """Cosine nearest-neighbor over products that carry a sensory vector, computed in
-        python. The Postgres store does this as a single pgvector `<=>` ANN query."""
+        python. The Postgres store does this as a single pgvector `<=>` ANN query.
+        `known=True` leaves out the rows whose vector is only their style's centroid."""
         scored: list[tuple[dict, float]] = []
         for p in self.iter_gold("product"):
             arr = _sensory_array(p)
             if arr is None:
+                continue
+            if known and (p.get("sensory") or {}).get("source") == "style_prior":
                 continue
             scored.append((p, _cosine(vec, arr)))
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -351,7 +355,8 @@ class Store(Protocol):
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
     def products_of(self, producer_id: str, limit: int | None = 8) -> list[dict]: ...
     def refresh_search_names(self, ids: Iterable[str] | None = None) -> int: ...
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
+                           known: bool = False) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 
 

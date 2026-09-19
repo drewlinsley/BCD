@@ -21,7 +21,6 @@ from bcd_schema import (
     FeedbackRequest,
     FeedbackResponse,
     LexiconResponse,
-    Product,
     ProductSearchResponse,
     ResolvedProduct,
     ScanResolveRequest,
@@ -34,6 +33,7 @@ from bcd_schema.api import DetectedText
 from fastapi import FastAPI, Query
 
 from .index import IndexedStore, LabelIndex
+from .recommend import rank_catalog
 from .resolver import Resolver
 from .taste import TASTE_EVENTS, load_profile, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
@@ -299,26 +299,13 @@ def _log_vision(req: ScanVisionRequest, resp: ScanVisionResponse) -> None:
 
 @app.post("/v1/recommend")
 def recommend(user_id: str = "demo", limit: int = 10) -> dict:
-    """Rank the catalog for a user. When the profile has a sensory_ideal the store does
-    the candidate generation — pgvector cosine ANN on Postgres, python cosine on the
-    SQLite dev store — and we then score + explain each candidate. No profile vector yet
-    (cold user) falls back to scanning the catalog."""
-    store: Store = _state["store"]
-    resolver: Resolver = _state["resolver"]
-    profile = _profile_for(user_id)
-    if profile is not None and profile.sensory_ideal is not None:
-        # over-fetch (limit*3) so the re-score with style/ABV priors has room to reorder
-        candidates = store.nearest_by_sensory(profile.sensory_ideal.to_array(), limit=limit * 3)
-    else:
-        candidates = list(store.iter_gold("product"))
-    scored = []
-    for rec in candidates:
-        product = Product.model_validate(rec)
-        s, reason, cold = resolver.score(product, profile)
-        scored.append({"product_id": product.id, "name": product.name,
-                       "score": s, "reason": reason, "cold_start": cold})
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return {"user_id": user_id, "results": scored[:limit]}
+    """Rank the catalog for a user: the store finds the nearest vectors (pgvector on
+    Postgres, python cosine on the SQLite dev store), `rank_catalog` scores and orders them
+    -- a match before a partial one, what drinkers rated before what we know before what we
+    guess, then the score -- and says which of those each result is (`evidence`)."""
+    results = rank_catalog(_state["store"], _state["resolver"], _profile_for(user_id),
+                           limit=limit)
+    return {"user_id": user_id, "results": results}
 
 
 @app.post("/v1/feedback", response_model=FeedbackResponse)

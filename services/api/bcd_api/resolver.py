@@ -2340,6 +2340,16 @@ def _top_axis(sv: SensoryVector) -> str | None:
     return max(sv.axes.items(), key=lambda kv: kv[1])[0].replace("_", " ")
 
 
+def match_band(score: float) -> int:
+    """The band the score's one-line 'why' is written in: 0 claims a match, 1 a partial one,
+    2 says plainly that it is outside the user's usual. The recommender ranks by this band
+    before anything else, so the list never says "some citrus, which you like" above a row
+    it would call a match."""
+    if score >= _STRONG_MATCH:
+        return 0
+    return 1 if score >= _MILD_MATCH else 2
+
+
 def _match_reason(score: float, sensory: SensoryVector, ideal: SensoryVector) -> str:
     """Explain the score honestly.
 
@@ -2349,9 +2359,10 @@ def _match_reason(score: float, sensory: SensoryVector, ideal: SensoryVector) ->
     overlay telling the user something the score itself contradicts.
     """
     shared = _agreeing_axis(sensory, ideal)
-    if score >= _STRONG_MATCH:
+    band = match_band(score)
+    if band == 0:
         return f"matches your {shared} preference" if shared else "matches your taste profile"
-    if score >= _MILD_MATCH:
+    if band == 1:
         return f"some {shared}, which you like" if shared else "a partial match"
     loud = _top_axis(sensory)
     return f"outside your usual — mostly {loud}" if loud else "outside your usual"
