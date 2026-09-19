@@ -143,6 +143,42 @@ def test_nearest_by_sensory_cosine(pg: PostgresStore):
     assert "Roasty Stout" in names
 
 
+def test_the_known_rows_are_reachable_through_the_floors_ties(pg: PostgresStore):
+    """The style floor puts thousands of rows on one centroid. Asked for the nearest rows
+    with a filter on the source, the full HNSW index visits its ef_search candidates, finds
+    every one a centroid, and answers nothing -- measured on the live catalog. The known rows
+    have their own partial index, and the `known=True` query is written on its predicate."""
+    from bcd_schema import SENSORY_AXES
+    ax = {a: i for i, a in enumerate(SENSORY_AXES)}
+    ideal = [0.0] * len(SENSORY_AXES)
+    ideal[ax["tropical"]], ideal[ax["citrus"]] = 0.9, 0.8
+    batch = []
+    for i in range(600):
+        p = Product(id=f"floor{i}", brand_id="brand:x", producer_id="prod:x",
+                    category=Category.BEER, name=f"Registry IPA {i}",
+                    sensory=SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=0.35,
+                                          axes={"tropical": 0.9, "citrus": 0.8}))
+        batch.append((p.id, "product", p.model_dump(mode="json")))
+    pg.put_gold_many(batch)
+    _seed_product(pg, "heady", "Heady Topper", {"tropical": 0.85, "citrus": 0.7,
+                                                 "piney_resinous": 0.3})  # chemistry_prior
+    pg._conn.commit()
+
+    assert all(r["name"].startswith("Registry") for r in pg.nearest_by_sensory(ideal, limit=5))
+    known = pg.nearest_by_sensory(ideal, limit=5, known=True)
+    assert [r["name"] for r in known] == ["Heady Topper"]
+    # ...and it is the partial index answering, not a scan the planner happened to prefer
+    # on a small table.
+    with pg._conn.cursor() as cur:
+        cur.execute("SET LOCAL enable_seqscan = off")
+        plan = "\n".join(r[0] for r in cur.execute(
+            "EXPLAIN SELECT record FROM gold WHERE entity_type='product' AND sensory IS NOT NULL "
+            "AND (record->'sensory'->>'source') <> 'style_prior' ORDER BY sensory <=> %s::vector "
+            "LIMIT 5", ("[" + ",".join(str(x) for x in ideal) + "]",)).fetchall())
+    pg._conn.rollback()
+    assert "ix_gold_sensory_known_hnsw" in plan
+
+
 def test_open_store_selects_postgres_from_url():
     """Factory picks Postgres when a database URL is supplied, SQLite otherwise."""
     try:
