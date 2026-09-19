@@ -573,10 +573,19 @@ class PostgresStore:
             ).fetchall()
         return [r[0] for r in rows]
 
-    def products_of(self, producer_id: str, limit: int = 8) -> list[dict]:
+    def producers_named(self, name: str) -> list[dict[str, Any]]:
+        """Every producer carrying exactly this name -- the registry files one permit per
+        state, so a maker can have several rows. Equality rides the trigram index."""
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                "SELECT record FROM gold WHERE entity_type='producer' AND name = %s", (name,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def products_of(self, producer_id: str, limit: int | None = 8) -> list[dict]:
         """A producer's catalog, best-known first — what the producer path offers once it has
         identified the maker. Rows carrying real data (an ABV, a sensory vector) sort first, so
-        a thin duplicate does not represent the brewery."""
+        a thin duplicate does not represent the brewery. `limit=None` returns all of it."""
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
                 """

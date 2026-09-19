@@ -24,7 +24,10 @@ is the tool's input), or one Message Batches submission for bulk at half the pri
 as `bcd_api.vision` does, so it adds no dependency. Run it with `python -m bcd_enrich.profile`.
 Without an API account the same questions go out to a file (`--export`) and the answers -- written
 by hand, or by a model in a chat session -- come back through one (`--answers`), validated and
-applied exactly as an API answer would be.
+applied exactly as an API answer would be. A maker's lineup is done with `--patterns`: one
+authored profile per product, stamped onto every catalog row carrying that product's name -- the
+registry files "60 Minute IPA", "60 Minute India Pale Ale" and "Dogfish Head 60 Minute" as three
+rows, and they are one beer.
 """
 
 from __future__ import annotations
@@ -727,6 +730,8 @@ def run(args: argparse.Namespace) -> int:
         return _collect(store, args, model, key)
     if args.answers:
         return _from_file(store, args, model)
+    if args.patterns:
+        return _from_patterns(store, args, model)
 
     products = select_products(store, ids=args.ids, searches=args.search,
                                from_scans=args.from_scans, scan_glob=args.scans,
@@ -845,6 +850,125 @@ def run(args: argparse.Namespace) -> int:
           + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
           + f"; wrote {len(writes)} products; tokens "
           + ", ".join(f"{k}={v}" for k, v in sorted(usage.items())))
+    store.close()
+    return 0
+
+
+class Pattern(BaseModel):
+    """One authored profile and the rows it is for: a maker (or several -- the registry files
+    one permit per state), a regex on the product name, and what to leave out."""
+
+    producer: str | list[str] | None = None
+    match: str
+    exclude: str | None = None
+    category: str | None = None
+    answer: dict[str, Any]
+
+    @property
+    def makers(self) -> list[str] | None:
+        if self.producer is None:
+            return None
+        if isinstance(self.producer, str):
+            return [m.strip() for m in self.producer.split("|") if m.strip()]
+        return list(self.producer)
+
+
+def _floor_reads_the_name(rec: dict) -> bool:
+    """Whether the style floor found a named style in this row (its prior sits at 0.35) rather
+    than falling back to the category centroid (0.25)."""
+    sv = rec.get("sensory")
+    return isinstance(sv, dict) and sv.get("source") == SensorySource.STYLE_PRIOR.value and \
+        float(sv.get("confidence") or 0) >= 0.35
+
+
+def expand_patterns(store, patterns: list[Pattern], *, force: bool = False,
+                    report=print) -> list[tuple[dict, dict]]:
+    """(row, answer) for every catalog row a pattern claims. Patterns are taken in order and
+    the first to claim a row keeps it. A row already profiled is left alone unless `force`.
+    A pattern the author only knows at maker level (`style_only`) yields to a style floor that
+    read a named style out of the row -- "Harpoon 10 Year UPA" is better served by the IPA
+    centroid than by a generic "the kind of beer Harpoon makes"."""
+    taken: set[str] = set()
+    out: list[tuple[dict, dict]] = []
+    rows_of: dict[tuple, list[dict] | None] = {}
+    everything: list[dict] | None = None
+    for i, p in enumerate(patterns):
+        makers = p.makers
+        if makers is None:
+            if everything is None:
+                everything = list(store.iter_gold("product"))
+            rows = everything
+        else:
+            key = tuple(makers)
+            if key not in rows_of:
+                pids = [m["id"] for name in makers for m in store.producers_named(name)]
+                rows_of[key] = [r for pid in pids for r in store.products_of(pid, limit=None)] \
+                    if pids else None
+            rows = rows_of[key]
+        if rows is None:
+            report(f"  ! pattern {i}: no producer named {makers}")
+            continue
+        rx = re.compile(p.match, re.I)
+        ex = re.compile(p.exclude, re.I) if p.exclude else None
+        guess = p.answer.get("recognition") == "style_only"
+        hit, done, floor = [], 0, 0
+        for rec in rows:
+            name = rec.get("name") or ""
+            if not rx.search(name) or (ex and ex.search(name)):
+                continue
+            if p.category and rec.get("category") != p.category:
+                continue
+            if rec["id"] in taken:
+                continue
+            sv = rec.get("sensory")
+            profiled = isinstance(sv, dict) and sv.get("source") == SensorySource.LLM_PROFILE.value
+            if profiled and not force:
+                done += 1
+                continue
+            if guess and _floor_reads_the_name(rec):
+                floor += 1
+                continue
+            taken.add(rec["id"])
+            hit.append(name)
+            out.append((rec, p.answer))
+        report(f"{len(hit):4d}  {' | '.join(makers) if makers else '*'} / {p.match}: "
+               + "; ".join(sorted(set(hit))[:3])[:90]
+               + (f"  (+{done} already profiled)" if done else "")
+               + (f"  (+{floor} left to the style floor)" if floor else ""))
+    return out
+
+
+def _from_patterns(store, args: argparse.Namespace, model: str) -> int:
+    patterns = []
+    with open(args.patterns, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if line.strip():
+                try:
+                    patterns.append(Pattern.model_validate(json.loads(line)))
+                except (ValueError, TypeError) as e:
+                    print(f"  ! line {n}: {type(e).__name__}: {e}")
+                    return 1
+    pairs = expand_patterns(store, patterns, force=args.force)
+    writes: list[tuple[str, str, dict]] = []
+    tally: collections.Counter[str] = collections.Counter()
+    for rec, answer in pairs:
+        profile = ProductProfile.model_validate(answer)
+        tally[profile.recognition] += 1
+        changed = apply_profile(rec, profile, model=model)
+        if not args.quiet:
+            print(_report(rec, profile, changed))
+        if changed:
+            writes.append((rec["id"], "product", rec))
+        if not args.dry_run:
+            doc = bronze_doc(rec["id"], "", answer, model=model)
+            doc.payload["via"] = args.via
+            store.put_bronze(doc)
+    if writes and not args.dry_run:
+        store.put_gold_many(writes)
+    print("─" * 60)
+    print(f"{len(patterns)} patterns claimed {len(pairs)} rows: "
+          + ", ".join(f"{k}={v}" for k, v in sorted(tally.items()))
+          + f"; {'would write' if args.dry_run else 'wrote'} {len(writes)} products")
     store.close()
     return 0
 
@@ -987,6 +1111,9 @@ def main(argv: list[str] | None = None) -> int:
                           "--answers, the questions to keep beside the answers in bronze")
     how.add_argument("--answers", metavar="FILE",
                      help="apply answers from FILE (JSONL of {id, answer}) instead of asking")
+    how.add_argument("--patterns", metavar="FILE",
+                     help="apply one authored profile per product to every row carrying its "
+                          "name (JSONL of {producer, match, exclude, answer})")
     how.add_argument("--via", default="session",
                      help="with --answers: where they came from, for the record")
     how.add_argument("--wait", type=int, default=0, metavar="SECONDS",
