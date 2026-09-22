@@ -100,6 +100,12 @@ def _no_nuls(value: Any) -> Any:
 
 
 class PostgresStore:
+    # The rows we know something about, as the recommender means it: the vector is not
+    # their style's centroid. The predicate of `ix_gold_known_updated` and the WHERE of
+    # `gold_known_vectors`, so it has to read the same in both.
+    _KNOWN = ("entity_type='product' AND sensory IS NOT NULL "
+              "AND (record->'sensory'->>'source') <> 'style_prior'")
+
     def __init__(self, url: str = "postgresql://localhost:5432/bcd", *,
                  search_path: str | None = None) -> None:
         """`search_path` (e.g. "bcd_test,public") scopes every table this store creates
@@ -117,6 +123,8 @@ class PostgresStore:
         # Idle readers for concurrent frame matching, opened on demand (see `_reader`).
         self._readers: list[psycopg.Connection] = []
         self._readers_lock = threading.Lock()
+        # When gold_known_vectors was last built, as the latest known row's `updated_at`.
+        self._known_stamp: datetime | None = None
         if search_path:
             with self._conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {search_path.split(',')[0].strip()}")
@@ -237,17 +245,31 @@ class PostgresStore:
                     WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
-                -- The rows we actually know something about -- rated, profiled, or with an
-                -- ingredient list -- are half a percent of the catalog; the rest carry their
-                -- style's centroid. Asked for the nearest known rows, the full index visits
-                -- its ef_search candidates, finds every one a centroid, and answers nothing
-                -- (measured: 0 rows, 396 removed by filter). A partial index over the known
-                -- rows answers the same question in a millisecond. The predicate must appear
-                -- verbatim in the query for the planner to pick it.
-                CREATE INDEX IF NOT EXISTS ix_gold_sensory_known_hnsw
-                    ON gold USING hnsw (sensory vector_cosine_ops)
-                    WHERE entity_type='product' AND sensory IS NOT NULL
-                      AND (record->'sensory'->>'source') <> 'style_prior';
+                """
+            )
+            # The rows we actually know something about -- rated, profiled, or with an
+            # ingredient list -- are under two percent of the catalog; the rest carry their
+            # style's centroid, and the full index, asked for the nearest known rows, visits
+            # its ef_search candidates, finds every one a centroid, and answers nothing
+            # (measured: 0 rows, 396 removed by filter). And the known rows are not one
+            # recommendation each: a lineup profile puts one vector on every label variant
+            # of its beer (Voodoo Ranger: 43 rows; the independent bottlings of Highland
+            # Park: 215), so the nearest hundred known rows were seven beers, and an HNSW
+            # scan over them stops at its candidate list before the tenth. This view holds
+            # one row per known vector, with the rows that carry it, shortest names first.
+            # `nearest_known` rebuilds it when a known row has been written since (the
+            # partial index makes that check one probe, and the rebuild a scan of the known
+            # rows rather than the table) and then scans it exactly: 1.4k vectors today.
+            cur.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS ix_gold_known_updated
+                    ON gold (updated_at) WHERE {self._KNOWN};
+                CREATE MATERIALIZED VIEW IF NOT EXISTS gold_known_vectors AS
+                    SELECT sensory, count(*) AS n, max(updated_at) AS updated_at,
+                           (array_agg(id ORDER BY length(name), name))[1:16] AS ids
+                    FROM gold WHERE {self._KNOWN} GROUP BY sensory;
+                -- superseded by the view; the query that used it asked row by row
+                DROP INDEX IF EXISTS ix_gold_sensory_known_hnsw;
                 """
             )
 
@@ -668,26 +690,54 @@ class PostgresStore:
             list(pool.map(run, range(workers)))    # list() so a worker's error propagates
         return results
 
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
-                           known: bool = False) -> list[dict[str, Any]]:
-        """Cosine ANN over the sensory column — the pgvector core of recommendation.
-        `known=True` asks only the rows whose vector is not a style centroid (see the
-        partial index `ix_gold_sensory_known_hnsw`; the predicate here is its predicate)."""
-        scope = "WHERE entity_type='product' AND sensory IS NOT NULL"
-        if known:
-            scope += " AND (record->'sensory'->>'source') <> 'style_prior'"
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
+        """Cosine ANN over the sensory column — the pgvector core of recommendation."""
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
-                f"""
+                """
                 SELECT record
                 FROM gold
-                {scope}
+                WHERE entity_type='product' AND sensory IS NOT NULL
                 ORDER BY sensory <=> %s::vector
                 LIMIT %s
                 """,
                 (_vec_literal(vec), limit),
             ).fetchall()
         return [r[0] for r in rows]
+
+    def nearest_known(self, vec: list[float], limit: int = 10) -> list[list[dict[str, Any]]]:
+        """The `limit` nearest distinct vectors among the known rows -- those whose vector
+        is not their style's centroid -- nearest first, each as the rows that carry it,
+        shortest names first and at most sixteen of them. Answered from
+        `gold_known_vectors`, rebuilt first if a known row has been written since."""
+        with self._lock, self._conn.cursor() as cur:
+            self._freshen_known_vectors(cur)
+            groups = [g for (g,) in cur.execute(
+                """
+                SELECT ids FROM gold_known_vectors
+                ORDER BY sensory <=> %s::vector
+                LIMIT %s
+                """,
+                (_vec_literal(vec), limit),
+            ).fetchall()]
+            records = dict(cur.execute(
+                "SELECT id, record FROM gold WHERE id = ANY(%s)",
+                ([i for g in groups for i in g],),
+            ).fetchall())
+        # A row merged away since the view was built is missing here; a group of none is
+        # no recommendation.
+        out = [[records[i] for i in g if i in records] for g in groups]
+        return [members for members in out if members]
+
+    def _freshen_known_vectors(self, cur: psycopg.Cursor) -> None:
+        """Rebuild `gold_known_vectors` when a known row has been written since it was
+        built. Writes move `updated_at`, so the latest one is the view's version; reading
+        it is one probe of the partial index."""
+        (stamp,) = cur.execute(
+            f"SELECT max(updated_at) FROM gold WHERE {self._KNOWN}").fetchone()
+        if stamp is None or stamp != self._known_stamp:
+            cur.execute("REFRESH MATERIALIZED VIEW gold_known_vectors")
+            self._known_stamp = stamp
 
     def close(self) -> None:
         with self._readers_lock:

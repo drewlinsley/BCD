@@ -16,12 +16,14 @@ the beers we know never appear. This ranks on three things, in order:
      read the name);
   3. the score.
 
-Candidates come from two nearest-neighbour queries: the nearest rows overall, which the floor's
-ties fill, and the nearest *known* rows, which those ties would otherwise keep out of any top-N.
 Rows carrying the same vector are the same recommendation -- a lineup profile stamped on a beer's
 label variants across a maker's permits, or ten thousand registry IPAs on one centroid -- and
 collapse to one entry, under the best-evidenced and then plainest-named row, so a list of ten is
 ten different drinks, and the floor appears once per style rather than filling the list.
+Candidates come from two nearest-neighbour queries: the nearest *known* vectors, each with the
+rows that carry it, which the floor's ties would otherwise keep out of any top-N (and which,
+asked row by row, were seven beers in the nearest hundred rows); and the nearest rows overall,
+which the ties fill and which stand for the styles.
 """
 
 from __future__ import annotations
@@ -82,14 +84,17 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
     one-line reason, the cold-start flag and what the evidence behind it is."""
     if profile is not None and profile.sensory_ideal is not None:
         ideal = profile.sensory_ideal.to_array()
-        # Over-fetch so the re-rank has room, and ask the known rows separately: on the live
-        # catalog the floor's ties fill any single top-N before the first known row appears.
-        # The known rows are asked for ten deep because they collapse hard -- a lineup profile
-        # sits on every label variant of its beer (Enjoy By: 29 rows), and the hundred nearest
-        # known rows for the demo profile are 25 beers.
+        # Over-fetch so the re-rank has room, and ask the known vectors separately: on the
+        # live catalog the floor's ties fill any single top-N before the first known row
+        # appears. The score is the cosine, so the nearest known vectors are the known
+        # entries of the list in order; three deep leaves room for the floor's entries.
+        # (Rated rows outrank known ones within a band, so once drinkers have rated more
+        # than a list's worth of rows they will want asking for separately, the same way.)
         pool: dict[str, dict] = {}
-        for rec in (*store.nearest_by_sensory(ideal, limit=limit * 10, known=True),
-                    *store.nearest_by_sensory(ideal, limit=limit * 3)):
+        for members in store.nearest_known(ideal, limit=limit * 3):
+            for rec in members:
+                pool.setdefault(rec["id"], rec)
+        for rec in store.nearest_by_sensory(ideal, limit=limit * 3):
             pool.setdefault(rec["id"], rec)
         candidates = list(pool.values())
     else:
