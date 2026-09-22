@@ -364,11 +364,14 @@ _CLASS_TO_CATEGORY = {
 
 #: Words that are wrong in title case. TTB writes everything in capitals, so casing has to
 #: be inferred, and an acronym is the one place inference reliably fails: "IPA" must not
-#: become "Ipa" on a label card.
+#: become "Ipa" on a label card. "N/A" and "N.A." are how a near-beer label says
+#: non-alcoholic ("Bud Light N/A", "Genesee N.A."); 155 catalog rows read "N/a" before they
+#: were listed here. A bare "NA" is not: it is also a word ("Na Praia"), and stays as cased.
 _KEEP_UPPER = {
     "ipa", "dipa", "neipa", "apa", "xpa", "esb", "ipl", "pbr", "abv", "ibu", "usa", "us",
     "uk", "nz", "vsop", "vs", "xo", "bba", "bbl", "ii", "iii", "iv", "vi", "vii", "viii",
     "ix", "xi", "xii", "llc", "inc", "lp", "dc", "nyc", "la", "sf", "pa", "ny", "ca",
+    "n/a", "n.a",
 }
 
 
@@ -399,6 +402,30 @@ def _cap(word: str) -> str:
     parts += [(seg[:1].upper() + seg[1:].lower()) if len(seg) > 1 else seg.lower()
               for seg in rest]
     return "'".join(parts)
+
+
+def _is_placeholder(fanciful: str | None) -> bool:
+    """True when the fanciful-name box says, in its entirety, that there is nothing in it.
+
+    TTB's export leaves the field empty for a label with no fanciful name; some filers type
+    NONE (or "- NONE -", or a bare dash) into the box instead, and the catalog read that as a
+    word: "Dewar's White Label None", "Knockando None" -- 62 live rows. Matched on the letters
+    alone so the punctuation and casing a filer wraps it in do not matter, and only when it is
+    the whole value: "Salvation For None" is a beer.
+
+    "N/A" and "NA" are deliberately not here. On a label they mean non-alcoholic -- "Genesee
+    N.A.", "O'Doul's N/A" -- and a filing cannot be told apart from one where the filer meant
+    "not applicable" ("Old Forester N/A"), so both stay as written."""
+    text = (fanciful or "").strip()
+    if not text:
+        return True
+    core = "".join(ch for ch in text.lower() if ch.isalnum())
+    return core == "none" or (not core and set(text) <= set("-\u2013\u2014 "))
+
+
+def _fanciful(text: str | None) -> str:
+    """The fanciful name as silver carries it: readable, and empty when it was a placeholder."""
+    return "" if _is_placeholder(text) else (_titlecase(text) or "")
 
 
 class TTBColaConnector(Connector):
@@ -579,7 +606,7 @@ class TTBColaConnector(Connector):
                 # TTB shouts. The label card sets product names in a serif display face,
                 # where all-caps reads as an error rather than a style.
                 "brand_name": _titlecase(r.get("brand_name")),
-                "fanciful_name": _titlecase(r.get("fanciful_name")),
+                "fanciful_name": _fanciful(r.get("fanciful_name")),
                 "class_type": _titlecase(r.get("class_type")),
                 "permittee": r.get("permittee"),
                 # The state the COLA was filed from. Free with every search row, and the
@@ -682,10 +709,12 @@ def _display_name(brand: str, fanciful: str | None) -> str:
     ("Pale Ale", "Kentucky Straight Bourbon Whiskey") — useless as an overlay label and a weak
     trigram target — so lead with the brand the COLA always carries: "Sierra Nevada" + "Pale Ale"
     -> "Sierra Nevada Pale Ale". Skip the prepend only when the fanciful already names the brand
-    (avoids "Sierra Nevada Sierra Nevada ..."). No fanciful -> the brand stands alone."""
+    (avoids "Sierra Nevada Sierra Nevada ..."). No fanciful -> the brand stands alone, and a
+    filer's NONE counts as none (see `_is_placeholder`), so a promote over silver written before
+    that gate existed lands the same name as a fresh ingest."""
     brand = (brand or "").strip()
     fanciful = (fanciful or "").strip()
-    if not fanciful:
+    if _is_placeholder(fanciful):
         return brand
     if brand and brand.lower() not in fanciful.lower():
         return f"{brand} {fanciful}"
