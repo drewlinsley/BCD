@@ -45,6 +45,60 @@ def test_ttb_name_brand_alone_when_no_fanciful():
     assert _display_name("Lagavulin", "") == "Lagavulin"
 
 
+def test_ttb_name_treats_a_placeholder_fanciful_as_none():
+    # Some filers type NONE into the fanciful-name box instead of leaving it blank, and the
+    # catalog read it as a word: "Dewar's White Label None", "Knockando None" -- 62 live rows.
+    # Whatever punctuation or casing wraps it, the brand stands alone.
+    for none in ("NONE", "None", "none", "NONE.", "- NONE -", "-", "--"):
+        assert _display_name("Knockando", none) == "Knockando", none
+    # Only a value that IS the placeholder. A name that merely ends with the word is a beer.
+    assert (_display_name("Burial Beer Co", "Salvation For None")
+            == "Burial Beer Co Salvation For None")
+
+
+def test_ttb_name_keeps_na_because_it_means_non_alcoholic():
+    # "N/A", "NA" and "N.A." are what a near-beer label says ("Genesee N.A.", "O'Doul's N/A").
+    # A filing cannot tell that from a filer's "not applicable", so none of them is a placeholder.
+    assert _display_name("Genesee", "N.A.") == "Genesee N.A."
+    assert _display_name("O'Doul's", "N/A") == "O'Doul's N/A"
+    assert _display_name("Coors", "NA") == "Coors NA"
+    # Nor are real one-letter names: Glenmorangie X, Molson XXX.
+    assert _display_name("Glenmorangie", "X") == "Glenmorangie X"
+    assert _display_name("Molson", "XXX") == "Molson XXX"
+
+
+def test_ttb_normalize_blanks_a_placeholder_fanciful_in_silver():
+    # The gate sits where silver is written too, so the record says what the label says: no
+    # fanciful name. A real one is still title-cased on the way through.
+    from bcd_ingest.connectors.ttb_cola import TTBColaConnector
+    from bcd_ingest.store import BronzeDoc
+
+    conn = TTBColaConnector(store=None, use_fixture=False)
+
+    def silver(fanciful):
+        doc = BronzeDoc("b:1", "ttb-cola-registry", "98176000000147", "2026-09-21", None,
+                        {"ttb_id": "98176000000147", "brand_name": "KNOCKANDO",
+                         "fanciful_name": fanciful, "class_type": "SCOTCH WHISKY"})
+        return conn.normalize(doc)[0]
+
+    assert silver("NONE")["fanciful_name"] == ""
+    assert silver("- NONE -")["fanciful_name"] == ""
+    assert silver("PALE ALE")["fanciful_name"] == "Pale Ale"
+    assert _display_name(silver("NONE")["brand_name"], silver("NONE")["fanciful_name"]) == "Knockando"
+
+
+def test_ttb_titlecase_keeps_na_upper():
+    # The title-caser turned "N/A" into "N/a" and "N.A." into "N.a." -- 155 live rows read
+    # "Bud Light N/a". They are acronyms like IPA and keep their capitals; a bare NA is also
+    # a word ("Na Praia") and is left to the ordinary rule.
+    from bcd_ingest.connectors.ttb_cola import _titlecase
+
+    assert _titlecase("BUD LIGHT N/A") == "Bud Light N/A"
+    assert _titlecase("GENESEE N.A.") == "Genesee N.A."
+    assert _titlecase("10 BARREL BREWING CO. N/A IPA") == "10 Barrel Brewing Co. N/A IPA"
+    assert _titlecase("XTRA-RUGGED NA") == "Xtra-rugged Na"
+
+
 # ---- OFF weak-name gate: bare classes + non-Latin foreign-market rows ----
 
 def test_off_bare_spirit_classes_are_weak():
