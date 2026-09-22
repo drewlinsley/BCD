@@ -115,14 +115,19 @@ def test_what_we_know_ranks_above_the_floors_ties(store):
     assert got[0]["producer"] == "Lawson's Finest"
 
 
-def test_the_known_rows_are_asked_for_separately(store):
+def test_the_known_vectors_are_asked_for_separately(store):
     """On the live catalog the floor's ties fill any single top-N; the known rows have to be
-    fetched on their own or they never reach the ranker."""
+    fetched on their own or they never reach the ranker -- and fetched by vector, because a
+    lineup profile sits on every label variant of its beer and row by row the nearest
+    hundred were seven beers."""
     ideal = PROFILE.sensory_ideal.to_array()
     assert all(r["sensory"]["source"] == "style_prior"
                for r in store.nearest_by_sensory(ideal, limit=3))
-    known = store.nearest_by_sensory(ideal, limit=3, known=True)
-    assert known and all(r["sensory"]["source"] != "style_prior" for r in known)
+    groups = store.nearest_known(ideal, limit=3)
+    assert [[r["name"] for r in g] for g in groups] == [
+        ["The Alchemist Heady Topper"], ["Harpoon"],
+        ["Rhinegeist Truth", "Truth India Pale Ale"]]  # one vector, shortest name first
+    assert all(r["sensory"]["source"] != "style_prior" for g in groups for r in g)
 
 
 def test_no_taste_vector_yet_still_ranks_the_catalog(store):

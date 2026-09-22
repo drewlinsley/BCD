@@ -307,21 +307,32 @@ class MedallionStore:
         they hold."""
         return 0
 
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
-                           known: bool = False) -> list[dict[str, Any]]:
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]:
         """Cosine nearest-neighbor over products that carry a sensory vector, computed in
-        python. The Postgres store does this as a single pgvector `<=>` ANN query.
-        `known=True` leaves out the rows whose vector is only their style's centroid."""
+        python. The Postgres store does this as a single pgvector `<=>` ANN query."""
         scored: list[tuple[dict, float]] = []
         for p in self.iter_gold("product"):
             arr = _sensory_array(p)
             if arr is None:
                 continue
-            if known and (p.get("sensory") or {}).get("source") == "style_prior":
-                continue
             scored.append((p, _cosine(vec, arr)))
         scored.sort(key=lambda x: x[1], reverse=True)
         return [p for p, _ in scored[:limit]]
+
+    def nearest_known(self, vec: list[float], limit: int = 10) -> list[list[dict[str, Any]]]:
+        """The `limit` nearest distinct vectors among the known rows -- those whose vector
+        is not their style's centroid -- nearest first, each as the rows that carry it,
+        shortest names first and at most sixteen of them. The Postgres store answers this
+        from a view with one row per known vector."""
+        groups: dict[tuple[float, ...], list[dict]] = {}
+        for p in self.iter_gold("product"):
+            arr = _sensory_array(p)
+            if arr is None or (p.get("sensory") or {}).get("source") == "style_prior":
+                continue
+            groups.setdefault(tuple(arr), []).append(p)
+        nearest = sorted(groups.items(), key=lambda kv: -_cosine(vec, list(kv[0])))
+        return [sorted(members, key=lambda p: (len(p.get("name") or ""), p.get("name") or ""))[:16]
+                for _arr, members in nearest[:limit]]
 
     def close(self) -> None:
         self._db.close()
@@ -355,8 +366,8 @@ class Store(Protocol):
     def match_producers(self, text: str, limit: int = 3) -> list[tuple[dict, float]]: ...
     def products_of(self, producer_id: str, limit: int | None = 8) -> list[dict]: ...
     def refresh_search_names(self, ids: Iterable[str] | None = None) -> int: ...
-    def nearest_by_sensory(self, vec: list[float], limit: int = 10, *,
-                           known: bool = False) -> list[dict[str, Any]]: ...
+    def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
+    def nearest_known(self, vec: list[float], limit: int = 10) -> list[list[dict[str, Any]]]: ...
     def close(self) -> None: ...
 
 

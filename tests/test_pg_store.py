@@ -143,11 +143,12 @@ def test_nearest_by_sensory_cosine(pg: PostgresStore):
     assert "Roasty Stout" in names
 
 
-def test_the_known_rows_are_reachable_through_the_floors_ties(pg: PostgresStore):
-    """The style floor puts thousands of rows on one centroid. Asked for the nearest rows
-    with a filter on the source, the full HNSW index visits its ef_search candidates, finds
-    every one a centroid, and answers nothing -- measured on the live catalog. The known rows
-    have their own partial index, and the `known=True` query is written on its predicate."""
+def test_the_known_vectors_are_reachable_through_the_floors_ties(pg: PostgresStore):
+    """The style floor puts thousands of rows on one centroid, so the nearest rows are all
+    floor; and a lineup profile puts one vector on every label variant of its beer, so the
+    nearest *known rows* are a few beers many times over (on the live catalog, the nearest
+    hundred were seven). `nearest_known` answers by distinct vector, from a view it rebuilds
+    when a known row has been written since."""
     from bcd_schema import SENSORY_AXES
     ax = {a: i for i, a in enumerate(SENSORY_AXES)}
     ideal = [0.0] * len(SENSORY_AXES)
@@ -159,24 +160,35 @@ def test_the_known_rows_are_reachable_through_the_floors_ties(pg: PostgresStore)
                     sensory=SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=0.35,
                                           axes={"tropical": 0.9, "citrus": 0.8}))
         batch.append((p.id, "product", p.model_dump(mode="json")))
+    # One lineup profile on forty label variants of one beer, nearer the ideal than Heady.
+    for i in range(40):
+        p = Product(id=f"vr{i}", brand_id="brand:x", producer_id="prod:x",
+                    category=Category.BEER,
+                    name="Voodoo Ranger" if i == 0 else f"Voodoo Ranger Imperial IPA {i}",
+                    sensory=SensoryVector(source=SensorySource.LLM_PROFILE, confidence=0.9,
+                                          axes={"tropical": 0.9, "citrus": 0.75,
+                                                "piney_resinous": 0.1}))
+        batch.append((p.id, "product", p.model_dump(mode="json")))
     pg.put_gold_many(batch)
     _seed_product(pg, "heady", "Heady Topper", {"tropical": 0.85, "citrus": 0.7,
                                                  "piney_resinous": 0.3})  # chemistry_prior
-    pg._conn.commit()
 
     assert all(r["name"].startswith("Registry") for r in pg.nearest_by_sensory(ideal, limit=5))
-    known = pg.nearest_by_sensory(ideal, limit=5, known=True)
-    assert [r["name"] for r in known] == ["Heady Topper"]
-    # ...and it is the partial index answering, not a scan the planner happened to prefer
-    # on a small table.
-    with pg._conn.cursor() as cur:
-        cur.execute("SET LOCAL enable_seqscan = off")
-        plan = "\n".join(r[0] for r in cur.execute(
-            "EXPLAIN SELECT record FROM gold WHERE entity_type='product' AND sensory IS NOT NULL "
-            "AND (record->'sensory'->>'source') <> 'style_prior' ORDER BY sensory <=> %s::vector "
-            "LIMIT 5", ("[" + ",".join(str(x) for x in ideal) + "]",)).fetchall())
-    pg._conn.rollback()
-    assert "ix_gold_sensory_known_hnsw" in plan
+    groups = pg.nearest_known(ideal, limit=5)
+    assert [len(g) for g in groups] == [16, 1]  # forty rows of one vector, capped; then Heady
+    assert groups[0][0]["name"] == "Voodoo Ranger"  # shortest name first
+    assert groups[1][0]["name"] == "Heady Topper"
+
+    # A known row written afterwards is in the next answer: the view is rebuilt, not stale.
+    _seed_product(pg, "sip", "Sip of Sunshine", {"tropical": 0.5, "citrus": 0.5,
+                                                    "piney_resinous": 0.5})
+    assert [g[0]["name"] for g in pg.nearest_known(ideal, limit=5)] == [
+        "Voodoo Ranger", "Heady Topper", "Sip of Sunshine"]
+    # ...and a write that touches no known row leaves it alone.
+    stamp = pg._known_stamp
+    pg.put_gold("floor0", "product", batch[0][2])
+    pg.nearest_known(ideal, limit=5)
+    assert pg._known_stamp == stamp
 
 
 def test_open_store_selects_postgres_from_url():
