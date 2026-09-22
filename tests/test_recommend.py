@@ -130,6 +130,20 @@ def test_the_known_vectors_are_asked_for_separately(store):
     assert all(r["sensory"]["source"] != "style_prior" for g in groups for r in g)
 
 
+def test_a_name_that_says_only_its_kind_cannot_stand_for_the_rest():
+    """One profile sits on hundreds of registry rows, and the plainest of them is spelled
+    "mezcal" -- which names none of them, and a filer's two fields ran together in the next.
+    The entry goes out under the plainest row that names a product."""
+    s = MedallionStore(root=tempfile.mkdtemp())
+    s.put_gold("prod:anon", "producer", {"id": "prod:anon", "name": "Anonymous"})
+    vec = _sv(SensorySource.LLM_PROFILE, 0.6, **IDEAL)
+    for pid, name in (("a", "mezcal"), ("b", "4b ,oaxaca"), ("c", "Madre Mezcal"),
+                      ("d", "Bruja Mezcal Artesanal")):
+        s.put_gold(pid, "product", _product(pid, name, "anon", vec))
+    assert [r["name"] for r in rank_catalog(s, Resolver(s), PROFILE, limit=5)] == ["Madre Mezcal"]
+    s.close()
+
+
 def test_no_taste_vector_yet_still_ranks_the_catalog(store):
     got = rank_catalog(store, Resolver(store), TasteProfile(user_id="new"), limit=3)
     assert len(got) == 3 and all(r["reason"] == "based on style" for r in got)
