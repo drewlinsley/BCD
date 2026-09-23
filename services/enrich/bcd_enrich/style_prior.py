@@ -89,9 +89,12 @@ _CENTROIDS: dict[str, dict[str, float]] = {
     "cold_ipa": {"citrus": 0.6, "piney_resinous": 0.55, "tropical": 0.45, "bitterness": 0.65,
                  "malty_bready": 0.25, "dryness_finish": 0.7, "carbonation": 0.6,
                  "body_fullness": 0.3},
-    "milk_stout": {"roasted_coffee_choc": 0.75, "sweet": 0.6, "caramel_toffee": 0.5,
+    "sweet_stout": {"roasted_coffee_choc": 0.75, "sweet": 0.6, "caramel_toffee": 0.5,
                    "body_fullness": 0.8, "malty_bready": 0.45, "nutty": 0.35, "bitterness": 0.35,
                    "carbonation": 0.3, "vanilla_oak": 0.25},
+    "oatmeal_stout": {"roasted_coffee_choc": 0.75, "caramel_toffee": 0.45, "malty_bready": 0.5,
+                      "body_fullness": 0.8, "nutty": 0.4, "bitterness": 0.45, "sweet": 0.4,
+                      "carbonation": 0.35},
     "barleywine": {"caramel_toffee": 0.75, "malty_bready": 0.65, "stone_fruit": 0.5,
                    "alcohol_warmth": 0.8, "sweet": 0.55, "body_fullness": 0.8,
                    "vanilla_oak": 0.35, "bitterness": 0.45, "nutty": 0.35, "carbonation": 0.3},
@@ -221,7 +224,8 @@ _ABV: dict[str, float] = {
     "brandy": 40.0, "triple_sec": 40.0, "anise": 40.0, "cream_liqueur": 17.0, "amaro": 25.0,
     "liqueur": 25.0, "spirit": 40.0, "wine": 12.5,
     "west_coast_ipa": 7.0, "black_ipa": 6.5, "session_ipa": 4.5, "brut_ipa": 6.5,
-    "cold_ipa": 6.5, "milk_stout": 5.5, "barleywine": 10.5, "scottish_ale": 7.5,
+    "cold_ipa": 6.5, "sweet_stout": 5.5, "oatmeal_stout": 5.4, "barleywine": 10.5,
+    "scottish_ale": 7.5,
     "winter_warmer": 7.0, "esb": 5.2, "rye_beer": 6.0, "dunkelweizen": 5.3,
     "schwarzbier": 4.9, "altbier": 4.8, "kolsch": 4.8, "festbier": 5.8,
     "cream_ale": 4.8,
@@ -243,11 +247,13 @@ _BEER_SPECIFIC: list[tuple[str, str, str | None]] = [
     ("brut_ipa", r"\bbrut (ipa|i\.p\.a)\b", None),
     ("cold_ipa", r"\bcold (ipa|i\.p\.a)\b", None),
     ("session_ipa", r"\bsession (ipa|i\.p\.a|india pale)\b", None),
-    ("west_coast_ipa", r"\bwest coast\b", r"\b(lager|pilsner|pils|stout|porter|sour)\b"),
+    ("west_coast_ipa",
+     r"\bwest coast\b(?=.*\b(ipa|i\.p\.a|india pale)\b)"
+     r"|\b(ipa|i\.p\.a|india pale)\b(?=.*\bwest coast\b)", None),
     # Lactose, oats or plain sweetness -- but "nitro" is how a beer is poured, not what is in
     # it, and Guinness is a dry stout on nitrogen.
-    ("milk_stout", r"\b(milk|sweet|oatmeal|oat|cream|lactose) stouts?\b",
-     r"\b(imperial|russian)\b"),
+    ("oatmeal_stout", r"\boat(meal)? stouts?\b", r"\b(imperial|russian)\b"),
+    ("sweet_stout", r"\b(milk|sweet|cream|lactose) stouts?\b", r"\b(imperial|russian)\b"),
     ("scottish_ale", r"\bwee heavy\b|\bscotch ale\b|\bscottish (ale|export)\b", None),
     ("winter_warmer", r"\bwinter warmer\b|\b(christmas|holiday|yule) ale\b", None),
     ("esb", r"\besb\b|\bextra special bitter\b|\bbest bitter\b|\bspecial bitter\b", None),
@@ -267,7 +273,8 @@ _BEER_SPECIFIC_RE = [(s, re.compile(p), re.compile(u) if u else None)
 # is still a stout, and reading the lactose off the name only sharpens it.
 _BEER_PARENT: dict[str, str] = {
     "west_coast_ipa": "ipa", "black_ipa": "ipa", "session_ipa": "ipa", "brut_ipa": "ipa",
-    "cold_ipa": "ipa", "milk_stout": "stout", "schwarzbier": "lager", "festbier": "lager",
+    "cold_ipa": "ipa", "sweet_stout": "stout", "oatmeal_stout": "stout",
+    "schwarzbier": "lager", "festbier": "lager",
     "kolsch": "ale", "altbier": "ale", "cream_ale": "ale", "esb": "ale", "scottish_ale": "ale",
     "winter_warmer": "ale", "barleywine": "ale", "rye_beer": "ale", "dunkelweizen": "wheat",
 }
@@ -445,7 +452,8 @@ _STYLE_NAMES: dict[str, str] = {
     "helles": "Helles", "radler": "Radler", "lager": "Lager", "beer": "Beer", "ale": "Ale",
     "west_coast_ipa": "West Coast IPA", "black_ipa": "Black IPA",
     "session_ipa": "Session IPA", "brut_ipa": "Brut IPA", "cold_ipa": "Cold IPA",
-    "milk_stout": "Milk Stout", "barleywine": "Barleywine",
+    "sweet_stout": "Sweet Stout", "oatmeal_stout": "Oatmeal Stout",
+    "barleywine": "Barleywine",
     "scottish_ale": "Scottish Ale", "winter_warmer": "Winter Warmer", "esb": "ESB",
     "rye_beer": "Rye Beer", "dunkelweizen": "Dunkelweizen",
     "schwarzbier": "Schwarzbier", "altbier": "Altbier", "kolsch": "Kölsch",
@@ -549,8 +557,11 @@ def readable_style(class_type: str | None, detected: str | None = None) -> str |
     its suffix dropped."""
     c = normalize_class(class_type)
     cls = class_style(class_type)
-    if detected and detected in _STYLE_NAMES and (cls is None or cls in _GENERIC_CLASS_STYLES) \
-            and detected not in _GENERIC_CLASS_STYLES:
+    # The same rule `detect_style` uses, so the words on the screen and the vector behind them
+    # cannot disagree: the name's style prints when the class is only a bucket, or when the name
+    # says a KIND of what was filed -- a "Milk Stout" filed as "Stout" prints as a milk stout.
+    if detected and detected in _STYLE_NAMES and detected not in _GENERIC_CLASS_STYLES and (
+            cls is None or cls in _GENERIC_CLASS_STYLES or _BEER_PARENT.get(detected) == cls):
         return _STYLE_NAMES[detected]
     if c in _CLASS_NAMES:
         return _CLASS_NAMES[c]

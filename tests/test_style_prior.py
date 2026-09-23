@@ -91,7 +91,8 @@ def test_abv_prior_reasonable():
     ("Sierra Nevada Bigfoot Barleywine", "barleywine"),
     ("21st Amendment Back in Black IPA", "black_ipa"),
     ("Founders All Day Session IPA", "session_ipa"),
-    ("Left Hand Milk Stout", "milk_stout"),
+    ("Left Hand Milk Stout", "sweet_stout"),
+    ("Samuel Smith Oatmeal Stout", "oatmeal_stout"),
     ("Uerige Altbier", "altbier"),
     ("Köstritzer Schwarzbier", "schwarzbier"),
     ("Fuller's ESB", "esb"),
@@ -114,7 +115,7 @@ def test_a_short_style_word_is_read_whole():
 def test_the_filed_class_wins_unless_the_name_says_a_kind_of_it():
     """A TTB class is a real filing, so it outranks a guess off the name -- but a "Milk Stout"
     filed as "Stout" is still a stout, and reading the lactose only sharpens it."""
-    assert detect_style("Milk Stout", Category.BEER, class_type="Stout") == "milk_stout"
+    assert detect_style("Milk Stout", Category.BEER, class_type="Stout") == "sweet_stout"
     # A barleywine filed as a stout is a conflict, not a refinement: trust the filing.
     assert detect_style("Barleywine", Category.BEER, class_type="Stout") == "stout"
 

@@ -74,6 +74,22 @@ def run(root: str = "./data", dry_run: bool = False, limit: int | None = None,
         product = Product.model_validate(rec)
         changed = False
         style_hint = product.style.value if product.style else None
+        # A previous run rewrote the filed class code into a person's words and kept the code
+        # at the end of the quote. Read the class from the CODE, never from our own output:
+        # deriving each run from the last one drifts, and the drift is downhill -- "Single Malt
+        # Scotch Whisky" became "Single Malt Scotch", then "Scotch Whisky" (2026-09-22).
+        #
+        # The quote also holds brand text this pass never wrote, so the last segment is only
+        # the code if it is one this pass would have turned into exactly what the row says now.
+        # That check is what makes it safe to read, and makes a re-run a no-op.
+        filed_code = ""
+        if product.style is not None and product.style.provenance.method.value == _FILED:
+            candidate = ((product.style.provenance.quote or "").rsplit(" / ", 1)[-1]).strip()
+            if candidate and candidate != product.style.value:
+                back = readable_style(candidate, detect_style(product.name, product.category,
+                                                              class_type=candidate))
+                if back == product.style.value:
+                    style_hint = filed_code = candidate
 
         # --- sensory: chemistry first, style prior as the universal fallback ---
         existing = product.sensory
@@ -96,14 +112,15 @@ def run(root: str = "./data", dry_run: bool = False, limit: int | None = None,
         # --- style: the registry's class code, in a person's words ---
         if restyle and product.style is not None and \
                 product.style.provenance.method.value == _FILED:
-            readable = readable_style(product.style.value, detected)
+            readable = readable_style(style_hint, detected)
             if readable and readable != product.style.value:
                 st = rec["style"]
                 if isinstance(st, dict):
                     prov = st.get("provenance") or {}
-                    # The code stays on the record, in the quote, for whoever needs it back.
+                    # The code stays on the record, in the quote, for whoever needs it back --
+                    # and it is what the next run reads, so it is written once and not again.
                     quote = prov.get("quote") or ""
-                    if product.style.value not in quote:
+                    if not filed_code:
                         prov["quote"] = f"{quote} / {product.style.value}".strip(" /")
                     st["value"] = readable
                     st["provenance"] = prov
