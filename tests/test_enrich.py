@@ -126,3 +126,50 @@ def test_every_registry_row_gets_a_vector_and_near_beer_no_warmth():
     assert sensory_from_style("Junmai", "sake", style_hint="Sake - Imported") is not None
     assert sensory_from_style("Munch-n-pump Strawberry", "other",
                               style_hint="Other Specialties & Proprietaries") is not None
+
+
+def test_a_second_pass_changes_nothing(tmp_path, capsys):
+    """The pass rewrote the registry's class code into a person's words and then, next time,
+    read its OWN words as if they were the code: "Single Malt Scotch Whisky" became "Single
+    Malt Scotch", then "Scotch Whisky"; "Straight Rye Whisky" became "Straight Rye", then
+    "Rye Whiskey" (2026-09-22). The code is kept at the end of the quote and is what the next
+    run reads, so the catalog can be re-enriched without knowing when it last was."""
+    import tempfile
+
+    from bcd_enrich.__main__ import run
+    from bcd_ingest.store import MedallionStore
+
+    root = tempfile.mkdtemp(dir=tmp_path)
+    store = MedallionStore(root=root)
+    prov = Provenance(source_id="ttb", method=ExtractionMethod.REGULATORY_FILING,
+                      confidence=1.0).model_dump(mode="json")
+    rows = [("s1", "Fragrant Drops Ex-bourbon Hogshead 24y", "spirit",
+             "Single Malt Scotch Whisky"),
+            ("s2", "Smokin Tails Road Trip", "spirit", "Straight Rye Whisky"),
+            ("b1", "Blend X Coffee Milk Stout", "beer", "Stout"),
+            ("b2", "Defiance Brewing Co. Moonta", "beer", "Ale")]
+    for pid, name, cat, filed in rows:
+        store.put_gold(pid, "product", {"id": pid, "name": name, "category": cat,
+                                        "brand_id": "brand:x", "producer_id": "prod:x",
+                                        "style": {"value": filed, "provenance": prov}})
+    store.close()
+
+    run(root=root, restyle=True)
+    first = {}
+    s = MedallionStore(root=root)
+    for pid, *_ in rows:
+        first[pid] = s.get_gold(pid)
+    s.close()
+    # a scotch stays a single malt and a rye stays straight, however often the pass runs
+    assert first["s1"]["style"]["value"] == "Single Malt Scotch"
+    assert first["s2"]["style"]["value"] == "Straight Rye"
+    assert first["b1"]["style"]["value"] == "Sweet Stout"
+
+    capsys.readouterr()
+    run(root=root, restyle=True)
+    out = capsys.readouterr().out
+    assert "rows written=0" in out, out.rsplit("─", 1)[-1]
+    s = MedallionStore(root=root)
+    for pid, *_ in rows:
+        assert s.get_gold(pid) == first[pid], pid
+    s.close()

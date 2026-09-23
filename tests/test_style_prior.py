@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import pytest
-from bcd_enrich.style_prior import abv_from_style, detect_style, sensory_from_style
+from bcd_enrich.style_prior import (
+    _CENTROIDS,
+    abv_from_style,
+    adjuncts,
+    detect_style,
+    sensory_from_style,
+)
 from bcd_schema import SENSORY_AXES, Category, SensorySource
 
 
@@ -73,3 +79,97 @@ def test_abv_prior_reasonable():
     assert abv_from_style("Lagunitas IPA", Category.BEER) == pytest.approx(6.5)
     assert abv_from_style("Tito's Vodka", Category.SPIRIT) == 40.0
     assert 4.0 <= abv_from_style("Bud Light Lager", Category.BEER) <= 5.5
+
+
+# --- what the name says is IN the beer, not just what kind it is (2026-09-22) ---
+
+@pytest.mark.parametrize("name, style", [
+    ("Firestone Walker Wee Heavy", "scottish_ale"),
+    ("Schlafly Kölsch", "kolsch"),
+    ("Ballast Point West Coast IPA", "west_coast_ipa"),
+    ("Founders Dirty Bastard Scotch Ale", "scottish_ale"),
+    ("Sierra Nevada Bigfoot Barleywine", "barleywine"),
+    ("21st Amendment Back in Black IPA", "black_ipa"),
+    ("Founders All Day Session IPA", "session_ipa"),
+    ("Left Hand Milk Stout", "sweet_stout"),
+    ("Samuel Smith Oatmeal Stout", "oatmeal_stout"),
+    ("Uerige Altbier", "altbier"),
+    ("Köstritzer Schwarzbier", "schwarzbier"),
+    ("Fuller's ESB", "esb"),
+    ("Weihenstephaner Dunkelweizen", "dunkelweizen"),
+    ("Paulaner Festbier", "festbier"),
+    ("Genesee Cream Ale", "cream_ale"),
+    ("Terrapin Rye Pale Ale", "rye_beer"),
+])
+def test_the_name_states_a_style_the_rules_had_no_centroid_for(name, style):
+    assert detect_style(name, Category.BEER) == style
+
+
+def test_a_short_style_word_is_read_whole():
+    """The spirits patterns taught this the hard way: a bare substring hides inside a longer
+    word. "esb" is in "Desby", "alt" in "Walter" -- so these rules are anchored."""
+    assert detect_style("Desby Brewing Pale Ale", Category.BEER) == "pale_ale"
+    assert detect_style("Walter's Amber", Category.BEER) == "amber"
+
+
+def test_the_filed_class_wins_unless_the_name_says_a_kind_of_it():
+    """A TTB class is a real filing, so it outranks a guess off the name -- but a "Milk Stout"
+    filed as "Stout" is still a stout, and reading the lactose only sharpens it."""
+    assert detect_style("Milk Stout", Category.BEER, class_type="Stout") == "sweet_stout"
+    # A barleywine filed as a stout is a conflict, not a refinement: trust the filing.
+    assert detect_style("Barleywine", Category.BEER, class_type="Stout") == "stout"
+
+
+def test_nitro_is_how_a_beer_is_poured_not_what_is_in_it():
+    """Guinness is a dry stout on nitrogen, not a sweet one -- so nitro softens the bubbles
+    and fills the body without adding the lactose sweetness of a milk stout."""
+    assert detect_style("Guinness Draught Nitro Stout", Category.BEER) == "stout"
+    flat = sensory_from_style("Draught Stout", Category.BEER)
+    nitro = sensory_from_style("Nitro Draught Stout", Category.BEER)
+    assert nitro.axes["carbonation"] < flat.axes["carbonation"]
+    assert nitro.axes["body_fullness"] > flat.axes["body_fullness"]
+    assert nitro.axes.get("sweet", 0) == flat.axes.get("sweet", 0)
+
+
+def test_an_adjunct_moves_the_styles_axes():
+    plain = sensory_from_style("Porter", Category.BEER)
+    loaded = sensory_from_style("Barrel-Aged Coconut Coffee Porter", Category.BEER)
+    assert adjuncts("Barrel-Aged Coconut Coffee Porter") == ["coffee", "coconut", "barrel"]
+    assert loaded.axes["roasted_coffee_choc"] > plain.axes["roasted_coffee_choc"]
+    assert loaded.axes["nutty"] > plain.axes["nutty"]
+    assert loaded.axes["vanilla_oak"] > plain.axes.get("vanilla_oak", 0)
+    # Still a guess about the product, however much the name says, and the recommender reads
+    # anything at or above 0.45 as knowing it.
+    assert plain.confidence < loaded.confidence < 0.45
+    assert all(0.0 <= v <= 1.0 for v in loaded.to_array())
+
+
+def test_the_prior_is_absolute_so_running_it_again_changes_nothing():
+    """The agave character pass added a delta to whatever the row already carried, so a second
+    run doubled it. This reads only the name and the style's own centroid: re-deriving it is a
+    no-op, and a row can be re-profiled without knowing whether it was profiled before."""
+    name = "Barrel-Aged Coconut Coffee Porter"
+    once = sensory_from_style(name, Category.BEER)
+    twice = sensory_from_style(name, Category.BEER)
+    assert once.axes == twice.axes and once.confidence == twice.confidence
+
+
+def test_a_fruit_in_somebody_s_name_is_not_a_fruit_in_the_beer():
+    """Blackberry Farm is a brewery in Tennessee; Pecan Street is in Austin. The word only
+    counts as an ingredient if some mention of it is not an address."""
+    assert adjuncts("Blackberry Farm Brewery Ampersand Saison") == []
+    assert adjuncts("Pecan Street Brewing Ride On Helles Lager") == []
+    assert adjuncts("Cocoa Beach Oktoberfest") == []
+    assert adjuncts("Blackberry Farm Strawberry Buckwheat") == ["berry_fruit"]
+    # Said twice, meant the second time.
+    assert "coconut" in adjuncts("Coconut Tree Barrel Aged Imperial Coconut Stout")
+
+
+def test_adjuncts_are_read_for_beer_only():
+    """A flavored spirit already has a centroid of its own -- `flavored_whiskey` is where the
+    honey went -- so reading the name again would count it twice."""
+    spirit = "Wild Turkey American Honey"
+    assert sensory_from_style(spirit, Category.SPIRIT).axes == \
+        _CENTROIDS[detect_style(spirit, Category.SPIRIT)]
+    assert sensory_from_style("Honey Wheat Ale", Category.BEER).axes["honey"] > \
+        sensory_from_style("Wheat Ale", Category.BEER).axes.get("honey", 0)
