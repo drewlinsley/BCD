@@ -23,39 +23,44 @@ from bcd_schema import Category, SensorySource, SensoryVector
 _CENTROIDS: dict[str, dict[str, float]] = {
     # --- beer ---
     "neipa": {"tropical": 0.85, "citrus": 0.7, "stone_fruit": 0.5, "bitterness": 0.4,
-              "body_fullness": 0.65, "malty_bready": 0.35, "dryness_finish": 0.2, "sweet": 0.3},
+              "body_fullness": 0.65, "malty_bready": 0.35, "dryness_finish": 0.2, "sweet": 0.3,
+                  "carbonation": 0.45},
     "dipa": {"citrus": 0.7, "tropical": 0.65, "piney_resinous": 0.6, "bitterness": 0.85,
              "malty_bready": 0.4, "caramel_toffee": 0.3, "alcohol_warmth": 0.5,
-             "dryness_finish": 0.6, "body_fullness": 0.55},
+             "dryness_finish": 0.6, "body_fullness": 0.55, "carbonation": 0.45},
     "ipa": {"citrus": 0.65, "tropical": 0.5, "piney_resinous": 0.55, "bitterness": 0.75,
-            "malty_bready": 0.35, "grassy": 0.3, "dryness_finish": 0.55, "body_fullness": 0.4},
+            "malty_bready": 0.35, "grassy": 0.3, "dryness_finish": 0.55, "body_fullness": 0.4,
+                "carbonation": 0.5},
     "pale_ale": {"citrus": 0.5, "piney_resinous": 0.4, "bitterness": 0.55, "malty_bready": 0.45,
-                 "caramel_toffee": 0.3, "floral": 0.3, "body_fullness": 0.4},
+                 "caramel_toffee": 0.3, "floral": 0.3, "body_fullness": 0.4, "carbonation": 0.5},
     "imperial_stout": {"roasted_coffee_choc": 0.9, "caramel_toffee": 0.55, "malty_bready": 0.5,
                        "bitterness": 0.55, "body_fullness": 0.85, "alcohol_warmth": 0.6,
-                       "sweet": 0.45, "vanilla_oak": 0.35, "nutty": 0.35},
+                       "sweet": 0.45, "vanilla_oak": 0.35, "nutty": 0.35, "carbonation": 0.3},
     "stout": {"roasted_coffee_choc": 0.85, "caramel_toffee": 0.45, "malty_bready": 0.5,
-              "bitterness": 0.5, "body_fullness": 0.7, "nutty": 0.35, "sweet": 0.35},
+              "bitterness": 0.5, "body_fullness": 0.7, "nutty": 0.35, "sweet": 0.35,
+                  "carbonation": 0.4},
     "porter": {"roasted_coffee_choc": 0.65, "caramel_toffee": 0.55, "malty_bready": 0.55,
-               "nutty": 0.4, "bitterness": 0.4, "body_fullness": 0.6, "sweet": 0.35},
+               "nutty": 0.4, "bitterness": 0.4, "body_fullness": 0.6, "sweet": 0.35,
+                   "carbonation": 0.45},
     "wheat": {"banana_ester": 0.7, "spicy_phenolic": 0.55, "citrus": 0.4, "malty_bready": 0.4,
               "carbonation": 0.6, "body_fullness": 0.45, "sweet": 0.3, "floral": 0.3},
     "tripel": {"spicy_phenolic": 0.55, "banana_ester": 0.5, "honey": 0.4, "caramel_toffee": 0.35,
-               "alcohol_warmth": 0.45, "sweet": 0.4, "body_fullness": 0.5, "dryness_finish": 0.4},
+               "alcohol_warmth": 0.45, "sweet": 0.4, "body_fullness": 0.5, "dryness_finish": 0.4,
+                   "carbonation": 0.75},
     "belgian_dark": {"caramel_toffee": 0.55, "stone_fruit": 0.45, "spicy_phenolic": 0.45,
                      "banana_ester": 0.4, "malty_bready": 0.5, "alcohol_warmth": 0.5,
-                     "sweet": 0.45, "body_fullness": 0.6},
+                     "sweet": 0.45, "body_fullness": 0.6, "carbonation": 0.65},
     "saison": {"spicy_phenolic": 0.6, "herbal": 0.45, "grassy": 0.4, "citrus": 0.35,
                "funk_brett": 0.3, "carbonation": 0.65, "dryness_finish": 0.65,
                "body_fullness": 0.35},
     "sour": {"sour_tart": 0.85, "funk_brett": 0.4, "citrus": 0.45, "berry": 0.45,
              "carbonation": 0.6, "dryness_finish": 0.55, "sweet": 0.25, "body_fullness": 0.3},
     "amber": {"caramel_toffee": 0.6, "malty_bready": 0.55, "nutty": 0.35, "bitterness": 0.4,
-              "body_fullness": 0.45, "floral": 0.25},
+              "body_fullness": 0.45, "floral": 0.25, "carbonation": 0.45},
     "brown": {"nutty": 0.6, "caramel_toffee": 0.55, "malty_bready": 0.55,
-              "roasted_coffee_choc": 0.3, "body_fullness": 0.45, "sweet": 0.3},
+              "roasted_coffee_choc": 0.3, "body_fullness": 0.45, "sweet": 0.3, "carbonation": 0.45},
     "bock": {"caramel_toffee": 0.6, "malty_bready": 0.6, "roasted_coffee_choc": 0.35, "nutty": 0.35,
-             "body_fullness": 0.6, "alcohol_warmth": 0.35, "sweet": 0.4},
+             "body_fullness": 0.6, "alcohol_warmth": 0.35, "sweet": 0.4, "carbonation": 0.45},
     "pilsner": {"malty_bready": 0.5, "grassy": 0.4, "herbal": 0.35, "floral": 0.3,
                 "bitterness": 0.45, "carbonation": 0.65, "dryness_finish": 0.55,
                 "body_fullness": 0.3},
@@ -67,6 +72,56 @@ _CENTROIDS: dict[str, dict[str, float]] = {
               "dryness_finish": 0.5, "body_fullness": 0.3},
     "beer": {"malty_bready": 0.45, "bitterness": 0.35, "carbonation": 0.55, "body_fullness": 0.4,
              "dryness_finish": 0.4, "grassy": 0.25},
+    # --- beer styles the name states and the rules had no centroid for (2026-09-22). Every
+    # one of these was sitting on its parent's centroid or on the broad "beer" fallback. ---
+    "west_coast_ipa": {"piney_resinous": 0.75, "citrus": 0.65, "bitterness": 0.8,
+                       "tropical": 0.35, "grassy": 0.35, "malty_bready": 0.3,
+                       "caramel_toffee": 0.2, "dryness_finish": 0.7, "body_fullness": 0.35,
+                           "carbonation": 0.55},
+    "black_ipa": {"citrus": 0.55, "piney_resinous": 0.55, "roasted_coffee_choc": 0.5,
+                  "bitterness": 0.7, "malty_bready": 0.4, "caramel_toffee": 0.3,
+                  "body_fullness": 0.5, "dryness_finish": 0.55, "carbonation": 0.5},
+    "session_ipa": {"citrus": 0.6, "tropical": 0.45, "piney_resinous": 0.45, "bitterness": 0.6,
+                    "grassy": 0.3, "malty_bready": 0.25, "body_fullness": 0.25,
+                    "dryness_finish": 0.6, "carbonation": 0.55},
+    "brut_ipa": {"citrus": 0.55, "tropical": 0.5, "floral": 0.4, "bitterness": 0.4,
+                 "dryness_finish": 0.9, "carbonation": 0.75, "body_fullness": 0.2, "sweet": 0.05},
+    "cold_ipa": {"citrus": 0.6, "piney_resinous": 0.55, "tropical": 0.45, "bitterness": 0.65,
+                 "malty_bready": 0.25, "dryness_finish": 0.7, "carbonation": 0.6,
+                 "body_fullness": 0.3},
+    "milk_stout": {"roasted_coffee_choc": 0.75, "sweet": 0.6, "caramel_toffee": 0.5,
+                   "body_fullness": 0.8, "malty_bready": 0.45, "nutty": 0.35, "bitterness": 0.35,
+                   "carbonation": 0.3, "vanilla_oak": 0.25},
+    "barleywine": {"caramel_toffee": 0.75, "malty_bready": 0.65, "stone_fruit": 0.5,
+                   "alcohol_warmth": 0.8, "sweet": 0.55, "body_fullness": 0.8,
+                   "vanilla_oak": 0.35, "bitterness": 0.45, "nutty": 0.35, "carbonation": 0.3},
+    "scottish_ale": {"caramel_toffee": 0.75, "malty_bready": 0.65, "sweet": 0.5, "nutty": 0.35,
+                     "body_fullness": 0.7, "alcohol_warmth": 0.5, "smoky_peat": 0.15,
+                     "bitterness": 0.25, "carbonation": 0.35},
+    "winter_warmer": {"spicy_phenolic": 0.6, "caramel_toffee": 0.6, "malty_bready": 0.55,
+                      "stone_fruit": 0.35, "sweet": 0.45, "alcohol_warmth": 0.5,
+                      "body_fullness": 0.6, "nutty": 0.3, "carbonation": 0.45},
+    "esb": {"caramel_toffee": 0.5, "malty_bready": 0.55, "bitterness": 0.5, "herbal": 0.4,
+            "nutty": 0.3, "floral": 0.3, "body_fullness": 0.45, "dryness_finish": 0.5,
+            "carbonation": 0.4},
+    "rye_beer": {"spicy_phenolic": 0.55, "malty_bready": 0.5, "bitterness": 0.5, "citrus": 0.35,
+                 "caramel_toffee": 0.3, "dryness_finish": 0.55, "body_fullness": 0.45,
+                     "carbonation": 0.5},
+    "dunkelweizen": {"banana_ester": 0.7, "spicy_phenolic": 0.5, "caramel_toffee": 0.45,
+                     "malty_bready": 0.5, "roasted_coffee_choc": 0.25, "carbonation": 0.6,
+                     "body_fullness": 0.5, "sweet": 0.35},
+    "schwarzbier": {"roasted_coffee_choc": 0.5, "malty_bready": 0.5, "caramel_toffee": 0.3,
+                    "bitterness": 0.35, "carbonation": 0.55, "body_fullness": 0.4,
+                    "dryness_finish": 0.5},
+    "altbier": {"malty_bready": 0.55, "caramel_toffee": 0.45, "nutty": 0.4, "bitterness": 0.5,
+                "body_fullness": 0.45, "carbonation": 0.5, "dryness_finish": 0.5},
+    "kolsch": {"malty_bready": 0.4, "floral": 0.3, "grassy": 0.3, "bitterness": 0.3,
+               "carbonation": 0.6, "dryness_finish": 0.55, "body_fullness": 0.3,
+               "stone_fruit": 0.2},
+    "festbier": {"malty_bready": 0.6, "caramel_toffee": 0.35, "honey": 0.3, "bitterness": 0.3,
+                 "carbonation": 0.55, "body_fullness": 0.45, "dryness_finish": 0.45},
+    "cream_ale": {"malty_bready": 0.45, "sweet": 0.35, "body_fullness": 0.35, "carbonation": 0.55,
+                  "bitterness": 0.25, "dryness_finish": 0.4, "grassy": 0.2},
     # --- spirits ---
     "peated_scotch": {"smoky_peat": 0.9, "vanilla_oak": 0.5, "malty_bready": 0.35, "honey": 0.3,
                       "alcohol_warmth": 0.7, "dryness_finish": 0.55, "body_fullness": 0.5},
@@ -165,6 +220,11 @@ _ABV: dict[str, float] = {
     "white_rum": 40.0, "rum": 40.0, "gin": 42.0, "vodka": 40.0, "mezcal": 45.0, "tequila": 40.0,
     "brandy": 40.0, "triple_sec": 40.0, "anise": 40.0, "cream_liqueur": 17.0, "amaro": 25.0,
     "liqueur": 25.0, "spirit": 40.0, "wine": 12.5,
+    "west_coast_ipa": 7.0, "black_ipa": 6.5, "session_ipa": 4.5, "brut_ipa": 6.5,
+    "cold_ipa": 6.5, "milk_stout": 5.5, "barleywine": 10.5, "scottish_ale": 7.5,
+    "winter_warmer": 7.0, "esb": 5.2, "rye_beer": 6.0, "dunkelweizen": 5.3,
+    "schwarzbier": 4.9, "altbier": 4.8, "kolsch": 4.8, "festbier": 5.8,
+    "cream_ale": 4.8,
     "ale": 5.5, "flavored_malt": 5.0, "malt_liquor": 7.5, "na_beer": 0.4, "sake": 15.0,
     "cider": 5.5, "flavored_vodka": 35.0, "flavored_gin": 30.0, "flavored_rum": 35.0,
     "flavored_whiskey": 35.0,
@@ -173,6 +233,58 @@ _ABV: dict[str, float] = {
 }
 
 # (style, keyword-substrings). Order = priority; most specific first, within each category.
+# Styles the name states outright, read as whole words and before the substring rules below.
+# The old rules match on bare substrings, which is right for a loose word like "stout" and
+# wrong for a short one -- "esb" inside "Desby", "alt" inside "Walter". These are anchored, and
+# each may name what disqualifies it: an imperial milk stout is an imperial stout first.
+_BEER_SPECIFIC: list[tuple[str, str, str | None]] = [
+    ("barleywine", r"\bbarley ?wines?\b", None),
+    ("black_ipa", r"\bblack (ipa|i\.p\.a)\b|\bcascadian dark\b", None),
+    ("brut_ipa", r"\bbrut (ipa|i\.p\.a)\b", None),
+    ("cold_ipa", r"\bcold (ipa|i\.p\.a)\b", None),
+    ("session_ipa", r"\bsession (ipa|i\.p\.a|india pale)\b", None),
+    ("west_coast_ipa", r"\bwest coast\b", r"\b(lager|pilsner|pils|stout|porter|sour)\b"),
+    # Lactose, oats or plain sweetness -- but "nitro" is how a beer is poured, not what is in
+    # it, and Guinness is a dry stout on nitrogen.
+    ("milk_stout", r"\b(milk|sweet|oatmeal|oat|cream|lactose) stouts?\b",
+     r"\b(imperial|russian)\b"),
+    ("scottish_ale", r"\bwee heavy\b|\bscotch ale\b|\bscottish (ale|export)\b", None),
+    ("winter_warmer", r"\bwinter warmer\b|\b(christmas|holiday|yule) ale\b", None),
+    ("esb", r"\besb\b|\bextra special bitter\b|\bbest bitter\b|\bspecial bitter\b", None),
+    ("dunkelweizen", r"\bdunkel ?wei(s|z|ss)en\b|\bdunkel ?weisse\b", None),
+    ("schwarzbier", r"\bschwarz ?bier\b|\bblack lager\b", None),
+    ("altbier", r"\balt ?bier\b|\bsticke\b", None),
+    ("kolsch", r"\bk(o|\u00f6|oe)lsch\b", None),
+    ("festbier", r"\bfest ?bier\b", None),
+    ("cream_ale", r"\bcream ale\b", None),
+    ("rye_beer", r"\brye (ale|beer|lager|pale ale)\b|\broggen\w*\b", None),
+]
+_BEER_SPECIFIC_RE = [(s, re.compile(p), re.compile(u) if u else None)
+                     for s, p, u in _BEER_SPECIFIC]
+
+# What each anchored style is a kind of. A specific TTB class is a real filing and outranks the
+# name, except where the name says a KIND of what was filed -- a "Milk Stout" filed as "Stout"
+# is still a stout, and reading the lactose off the name only sharpens it.
+_BEER_PARENT: dict[str, str] = {
+    "west_coast_ipa": "ipa", "black_ipa": "ipa", "session_ipa": "ipa", "brut_ipa": "ipa",
+    "cold_ipa": "ipa", "milk_stout": "stout", "schwarzbier": "lager", "festbier": "lager",
+    "kolsch": "ale", "altbier": "ale", "cream_ale": "ale", "esb": "ale", "scottish_ale": "ale",
+    "winter_warmer": "ale", "barleywine": "ale", "rye_beer": "ale", "dunkelweizen": "wheat",
+}
+
+
+def _specific_beer_style(n: str, cls: str | None) -> str | None:
+    """The anchored style the name states, or None. A specific class filed with the label wins
+    unless the name names a kind of it."""
+    for style, pat, unless in _BEER_SPECIFIC_RE:
+        if not pat.search(n) or (unless is not None and unless.search(n)):
+            continue
+        if cls is None or cls in _GENERIC_CLASS_STYLES or _BEER_PARENT.get(style) == cls:
+            return style
+        return None
+    return None
+
+
 _BEER_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("neipa", ("hazy", "juicy", "neipa", "new england", "haze")),
     ("dipa", ("double ipa", "dipa", "imperial ipa", "triple ipa", "double i.p.a",
@@ -331,6 +443,13 @@ _STYLE_NAMES: dict[str, str] = {
     "tripel": "Tripel", "belgian_dark": "Belgian Dark Ale", "saison": "Saison", "sour": "Sour Ale",
     "amber": "Amber Ale", "brown": "Brown Ale", "bock": "Bock", "pilsner": "Pilsner",
     "helles": "Helles", "radler": "Radler", "lager": "Lager", "beer": "Beer", "ale": "Ale",
+    "west_coast_ipa": "West Coast IPA", "black_ipa": "Black IPA",
+    "session_ipa": "Session IPA", "brut_ipa": "Brut IPA", "cold_ipa": "Cold IPA",
+    "milk_stout": "Milk Stout", "barleywine": "Barleywine",
+    "scottish_ale": "Scottish Ale", "winter_warmer": "Winter Warmer", "esb": "ESB",
+    "rye_beer": "Rye Beer", "dunkelweizen": "Dunkelweizen",
+    "schwarzbier": "Schwarzbier", "altbier": "Altbier", "kolsch": "Kölsch",
+    "festbier": "Festbier", "cream_ale": "Cream Ale",
     "flavored_malt": "Flavored Malt Beverage", "malt_liquor": "Malt Liquor",
     "na_beer": "Non-Alcoholic Beer", "peated_scotch": "Peated Scotch", "scotch": "Scotch Whisky",
     "irish_whiskey": "Irish Whiskey", "bourbon": "Bourbon", "rye": "Rye Whiskey",
@@ -478,6 +597,10 @@ def detect_style(name: str, category: Category | str | None,
     cat = category.value if isinstance(category, Category) else (category or "")
     cat = str(cat).lower()
     cls = class_style(class_type)
+    if cat == "beer":
+        specific = _specific_beer_style(n, cls)
+        if specific is not None:
+            return specific
     if cls is not None and cls not in _GENERIC_CLASS_STYLES:
         return cls
     rules = (_BEER_RULES if cat == "beer" else
@@ -492,6 +615,99 @@ def detect_style(name: str, category: Category | str | None,
             "sake": "sake", "cider": "cider", "mead": "wine", "rtd": "flavored_malt"}.get(cat)
 
 
+# What a beer's name says was PUT IN IT, over and above its style. A coconut coffee stout and a
+# plain stout are not the same drink, and until now they shared a centroid -- one vector stood
+# for 100,953 beer rows. Each adjunct nudges the style's own axes, so the answer is a function
+# of (style, name) alone: re-running the prior recomputes it from the centroid and lands in the
+# same place, rather than adding a second helping to whatever the row already carried.
+#
+# An entry may name what disqualifies it, because a fruit word is usually a place: Orange
+# County brews no orange beer.
+_ADJUNCTS: list[tuple[str, str, str | None]] = [
+    ("coffee", r"\b(coffee|espresso|cold brew|mocha|latte|cappuccino|affogato)\b", None),
+    ("chocolate", r"\b(chocolate|cocoa|cacao|fudge|brownie)\b", None),
+    ("vanilla", r"\bvanilla\b", None),
+    ("coconut", r"\bcoconut\b", None),
+    ("nut", r"\b(peanut|pecan|hazelnut|almond|walnut|pistachio|nut brown|hazel ?nut)\b", None),
+    ("maple", r"\bmaple\b", r"\bmaple (street|ave|avenue|road|lane|leaf|city|grove|valley)\b"),
+    ("honey", r"\bhoney\b", r"\bhoney (badger|bee|moon|hole|do)\b"),
+    ("pumpkin", r"\bpumpkins?\b", None),
+    ("spice", r"\b(cinnamon|nutmeg|clove|chai|gingerbread|allspice|cardamom|jalapeno|habanero"
+              r"|chipotle|chili|chile|ancho|ginger)\b", r"\bginger ?(bread )?man\b"),
+    ("citrus_fruit", r"\b(lemon|lime|orange|grapefruit|tangerine|yuzu|citrus|clementine"
+                     r"|mandarin|blood orange)\b",
+     r"\b(orange|lemon|lime) (county|street|st|ave|avenue|road|blossom|glen|hill|grove|crush)\b"),
+    ("tropical_fruit", r"\b(mango|guava|passion ?fruit|pineapple|papaya|lychee|dragon ?fruit"
+                       r"|tropical)\b", None),
+    ("berry_fruit", r"\b(raspberry|strawberry|blueberry|blackberry|cranberry|boysenberry"
+                    r"|currant|berries|berry|acai|elderberry)\b",
+     r"\b(berry|blueberry|strawberry) (hill|farm|street|lane|road)\b"),
+    ("stone_fruit", r"\b(peach|apricot|cherry|plum|nectarine|cherries)\b",
+     r"\b(cherry|peach) (hill|street|st|creek|tree|blossom|grove|lane|point|wood)\b"),
+    ("banana", r"\bbananas?\b", None),
+    ("barrel", r"\bbarrel[- ]?aged\b|\b(bourbon|whiskey|whisky|rum|wine|tequila|brandy) barrel"
+               r"\b|\bbarrel[- ]?ag(e|ing)\b", None),
+    ("smoked", r"\bsmoked\b|\brauch\w*\b", None),
+    ("pastry", r"\b(pastry|smoothie|slushy|slushie|milkshake|dessert|cheesecake|cobbler|sundae"
+               r"|donut|doughnut|pancake|tiramisu|s'?mores)\b", None),
+    ("nitro", r"\bnitro\b", None),
+    ("dry_hopped", r"\bddh\b|\bdouble dry[- ]?hopped\b|\bdry[- ]?hopped\b", None),
+]
+_ADJUNCTS_RE = [(k, re.compile(p), re.compile(u) if u else None) for k, p, u in _ADJUNCTS]
+
+# axis -> how far the adjunct moves it, from the style's centroid. Clamped into 0..1.
+_ADJUNCT_DELTAS: dict[str, dict[str, float]] = {
+    "coffee": {"roasted_coffee_choc": +0.25, "bitterness": +0.10, "dryness_finish": +0.05},
+    "chocolate": {"roasted_coffee_choc": +0.22, "sweet": +0.12, "body_fullness": +0.08},
+    "vanilla": {"vanilla_oak": +0.30, "sweet": +0.12, "body_fullness": +0.05},
+    "coconut": {"nutty": +0.25, "sweet": +0.12, "body_fullness": +0.08, "vanilla_oak": +0.08},
+    "nut": {"nutty": +0.30, "sweet": +0.08},
+    "maple": {"caramel_toffee": +0.20, "sweet": +0.18},
+    "honey": {"honey": +0.30, "sweet": +0.12},
+    "pumpkin": {"spicy_phenolic": +0.25, "malty_bready": +0.10, "sweet": +0.10},
+    "spice": {"spicy_phenolic": +0.25},
+    "citrus_fruit": {"citrus": +0.30, "sour_tart": +0.10, "dryness_finish": +0.05},
+    "tropical_fruit": {"tropical": +0.30, "sweet": +0.10},
+    "berry_fruit": {"berry": +0.32, "sour_tart": +0.10},
+    "stone_fruit": {"stone_fruit": +0.30, "sweet": +0.08},
+    "banana": {"banana_ester": +0.25, "sweet": +0.08},
+    "barrel": {"vanilla_oak": +0.30, "caramel_toffee": +0.15, "alcohol_warmth": +0.15,
+               "body_fullness": +0.10},
+    "smoked": {"smoky_peat": +0.40},
+    "pastry": {"sweet": +0.25, "body_fullness": +0.15, "vanilla_oak": +0.10,
+               "bitterness": -0.10, "dryness_finish": -0.15},
+    "nitro": {"body_fullness": +0.15, "carbonation": -0.30},
+    "dry_hopped": {"citrus": +0.12, "tropical": +0.12, "grassy": +0.08, "piney_resinous": +0.08},
+}
+
+
+# A fruit word followed by one of these is a place, and the place is somebody's name: Blackberry
+# Farm brews no blackberry beer, Pecan Street Brewing no pecan one, and "Nutmeg State" is
+# Connecticut. Checked on EVERY occurrence, not the first -- Highland Park's "Coconut Tree Barrel
+# Aged Imperial Coconut Stout" says coconut twice and means it the second time.
+_PLACE_AFTER = re.compile(
+    r"^[ \-',]*(farms?|hills?|street|st|ave|avenue|roads?|rd|lane|county|valley|creeks?|groves?"
+    r"|ridge|points?|springs?|city|mountains?|islands?|bays?|parks?|works|trails?|cellars?"
+    r"|tavern|pub|district|station|junction|landing|crossing|corners?|square|trees?|woods?"
+    r"|blossom|gardens?|alley|rivers?|lakes?|beach|state|cove|glen|heights|manor|meadows?"
+    r"|orchard|brewing|brewery|brewhouse|brewers)\b")
+
+
+def adjuncts(name: str) -> list[str]:
+    """What the name says went into the beer, in table order -- `[]` when it says nothing."""
+    n = _norm(name)
+    out = []
+    for k, pat, unless in _ADJUNCTS_RE:
+        spans = [m for m in pat.finditer(n)]
+        if not spans or (unless is not None and unless.search(n)):
+            continue
+        # every mention is somebody's address, so nobody put it in the beer
+        if all(_PLACE_AFTER.match(n[m.end():]) for m in spans):
+            continue
+        out.append(k)
+    return out
+
+
 def sensory_from_style(name: str, category: Category | str | None,
                        style_hint: str | None = None) -> SensoryVector | None:
     """A STYLE_PRIOR SensoryVector for the product, or None when no style can be inferred. A
@@ -502,11 +718,24 @@ def sensory_from_style(name: str, category: Category | str | None,
     if style is None:
         return None
     axes = dict(_CENTROIDS[style])
+    # What the name says is in it, on top of the style. Read off the name alone -- the TTB
+    # class says "Flavored Malt Beverage", never which fruit -- and only for beer, where the
+    # adjunct is the difference between two rows that would otherwise share a vector.
+    cat = category.value if isinstance(category, Category) else (category or "")
+    added = adjuncts(name) if str(cat).lower() == "beer" else []
+    for key in added:
+        for axis, delta in _ADJUNCT_DELTAS[key].items():
+            axes[axis] = round(min(1.0, max(0.0, axes.get(axis, 0.0) + delta)), 3)
     if is_non_alcoholic(name) or style == "na_beer":
         axes["alcohol_warmth"] = 0.0
         axes["body_fullness"] = round(axes.get("body_fullness", 0.3) * 0.7, 3)
-    # Broad category fallbacks are even weaker than a named style.
+    # Broad category fallbacks are even weaker than a named style; a name that states what is
+    # in the beer is a better-determined guess than one that states only a style, and ranks
+    # ahead of it -- but it is still a guess, and stays under the 0.45 the recommender reads
+    # as knowing the product.
     conf = 0.25 if style in ("beer", "spirit", "wine") else 0.35
+    if added:
+        conf = min(0.44, conf + 0.05)
     return SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=conf, axes=axes)
 
 
