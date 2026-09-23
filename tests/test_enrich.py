@@ -230,7 +230,11 @@ def test_the_agave_catch_all_lets_the_name_decide(tmp_path, capsys):
     assert axes["a4"]["smoky_peat"] == 0.35
     assert axes["a9"].get("smoky_peat", 0.0) == 0.0
     assert axes["a4"] != axes["a9"], "the catch-all still carries tequila's centroid"
-    assert axes["a4"]["herbal"] > axes["a9"]["herbal"]
+    # The herbal claim is about the CENTROIDS. Asserting it on two finished rows stopped being
+    # right once a label's own words could move them: "Tequila Ocho Plata" says blanco, blanco
+    # adds herbal, and it lands on the catch-all's 0.6 from below.
+    from bcd_enrich.style_prior import _CENTROIDS
+    assert _CENTROIDS["agave_spirit"]["herbal"] > _CENTROIDS["tequila"]["herbal"]
 
     # and the pass is still a fixed point over its own output
     capsys.readouterr()

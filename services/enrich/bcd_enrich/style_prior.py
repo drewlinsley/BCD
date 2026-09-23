@@ -791,6 +791,138 @@ def adjuncts(name: str) -> list[str]:
     return out
 
 
+# What an agave label says BEYOND its style, and it says a great deal: 61% of the 17,286 agave
+# rows state a maturation, an agave varietal or a way of making. Until now they did not use it --
+# 11,889 tequila rows shared 7 vectors, 3,912 mezcal rows shared 3 -- and the recommender shows
+# one entry per vector, so the whole category answered with a handful of cards (2026-09-22).
+#
+# Same contract as the beer adjuncts: each mark nudges the STYLE'S OWN centroid, so the answer is
+# a function of (style, name) and re-running recomputes it rather than adding a second helping.
+#
+# Marks are grouped into families. An `age` or `cask` family takes only its FIRST match, in table
+# order, because a bottle rested once: that ordering is what stops "Cinco Blancos Anejo" reading
+# as a blanco and "Don Ramon Plata Cristalino" as a plata -- the shape that once read the PLATA in
+# "Rio de Plata Tequila Anejo" as an expression. Varietals and processes stack, because an
+# ensamble really is several agaves and a pechuga really is also a capon.
+_AGAVE_EXCLUSIVE = frozenset({"age", "cask"})
+
+# `oro` is a BRAND word far more often than an expression -- "Agave de Oro Reposado", "Alma de
+# Oro Anejo", "Doble Oro Anejo" -- so gold sits last in its family, after every stated
+# maturation, and yields "de oro" outright. Unanchored it is worse still: `oro` inside "adoro"
+# claims 200 more rows than `\boro\b` does.
+_AGAVE_MARKS: list[tuple[str, str, str, str | None]] = [
+    ("age", "extra_anejo", r"\bextra\s+a[nñ]ejos?\b|\bultra\s+a[nñ]ejos?\b", None),
+    ("age", "cristalino", r"\bcristalinos?\b", None),
+    ("age", "anejo", r"\ba[nñ]ejos?\b", None),
+    ("age", "reposado", r"\breposad[oa]s?\b|\brested\b", None),
+    ("age", "blanco", r"\bblancos?\b|\bsilver\b|\bplata\b|\bjovens?\b|\bplatinum\b", None),
+    ("age", "gold", r"\bgold\b|\boro\b", r"\bde\s+oro\b"),
+    ("cask", "cask", r"\b(barrel|cask)[- ]?(aged|finish\w*|rested|select\w*)\b"
+                     r"|\bfinished\s+in\b|\b(sherry|port|cognac|wine)\s+cask\b"
+                     r"|\bsingle\s+barrel\b", None),
+    ("varietal", "espadin", r"\bespadin\w*\b|\bespadilla\b", None),
+    ("varietal", "tobala", r"\btobala\b|\bpotatorum\b", None),
+    ("varietal", "tepeztate", r"\btepe(z|x)tate\b", None),
+    ("varietal", "arroqueno", r"\barroqueno\b", None),
+    ("varietal", "jabali", r"\bjabali\w*\b", None),
+    ("varietal", "karwinskii", r"\bcui(sh|x)e\b|\b(madre|bi)cui(sh|x)e\b|\btoba(x|s|z)iche\b"
+                               r"|\bbarril\b|\bkarwinskii\b", None),
+    ("varietal", "cupreata", r"\bcupreata\b|\bpapalote\b|\bpapalome\w*\b", None),
+    ("varietal", "salmiana", r"\bsalmiana\b", None),
+    ("varietal", "mexicano", r"\bmexicano\b|\bcoyota\b|\bcoyote\b|\bsierra negra\b", None),
+    ("process", "pechuga", r"\bpechugas?\b", None),
+    ("process", "puntas", r"\bpuntas\b", None),
+    ("process", "clay", r"\bancestral\b|\bbarro\b|\bclay\b", None),
+    ("process", "tahona", r"\btahonas?\b", None),
+    ("process", "capon", r"\bcapon\w*\b", None),
+    # bottled at what came off the still rather than cut to 40%
+    ("process", "high_proof", r"\b(still|cask|barrel)\s+strength\b|\b(over|high)[- ]?proof\b"
+                              r"|\bfuerte\b", None),
+    ("flavor", "coffee", r"\b(cafe|coffee|mocha)\b", None),
+    ("flavor", "citrus_flavor", r"\b(lime|lima|limon|naranja|orange|grapefruit)\b", None),
+    ("flavor", "tropical_flavor", r"\b(mango|pineapple|pina|coconut|coco)\b", None),
+    ("flavor", "berry_flavor",
+     r"\b(strawberry|fresa|raspberr(y|ies)|berry|berries|frambuesa|blueberry|blackberry"
+     r"|pomegranate|granada)\b", None),
+    ("flavor", "chili", r"\b(jalapeno|habanero|chipotle|chile|chili|picante|pepper)\b", None),
+    ("flavor", "cream", r"\b(cream|crema|horchata|almendra|almond)\b", None),
+]
+_AGAVE_MARKS_RE = [(f, k, re.compile(p), re.compile(u) if u else None)
+                   for f, k, p, u in _AGAVE_MARKS]
+
+# axis -> how far the mark moves it from the style's centroid. Clamped into 0..1. Oak is the
+# big one: a blanco and an extra anejo are the same distillate and nothing like the same drink.
+_AGAVE_MARK_DELTAS: dict[str, dict[str, float]] = {
+    "blanco": {"grassy": +0.10, "herbal": +0.05, "citrus": +0.05, "dryness_finish": +0.05},
+    "reposado": {"vanilla_oak": +0.30, "caramel_toffee": +0.20, "sweet": +0.12, "honey": +0.10,
+                 "body_fullness": +0.10, "grassy": -0.10, "dryness_finish": -0.05},
+    "anejo": {"vanilla_oak": +0.45, "caramel_toffee": +0.32, "sweet": +0.18, "honey": +0.12,
+              "body_fullness": +0.20, "nutty": +0.10, "grassy": -0.20, "herbal": -0.10,
+              "dryness_finish": -0.08},
+    "extra_anejo": {"vanilla_oak": +0.55, "caramel_toffee": +0.42, "sweet": +0.22,
+                    "body_fullness": +0.28, "nutty": +0.15, "roasted_coffee_choc": +0.10,
+                    "grassy": -0.25, "herbal": -0.15, "dryness_finish": -0.10},
+    # aged, then filtered colourless: the oak sweetness stays, the smoke and the green do not
+    "cristalino": {"vanilla_oak": +0.28, "sweet": +0.22, "caramel_toffee": +0.15, "honey": +0.10,
+                   "body_fullness": +0.10, "grassy": -0.12, "smoky_peat": -0.10},
+    "gold": {"sweet": +0.25, "caramel_toffee": +0.20, "vanilla_oak": +0.12,
+             "body_fullness": +0.05},
+    "cask": {"vanilla_oak": +0.22, "caramel_toffee": +0.14, "body_fullness": +0.08,
+             "alcohol_warmth": +0.05},
+    "espadin": {"herbal": +0.05, "citrus": +0.05},
+    "tobala": {"stone_fruit": +0.25, "floral": +0.20, "tropical": +0.10, "sweet": +0.10},
+    "tepeztate": {"grassy": +0.30, "herbal": +0.25, "piney_resinous": +0.15},
+    "arroqueno": {"body_fullness": +0.20, "nutty": +0.15, "roasted_coffee_choc": +0.12,
+                  "smoky_peat": +0.08},
+    "jabali": {"sour_tart": +0.15, "citrus": +0.15, "floral": +0.12, "bitterness": +0.10},
+    "karwinskii": {"grassy": +0.20, "herbal": +0.15, "piney_resinous": +0.12,
+                   "dryness_finish": +0.10},
+    "cupreata": {"citrus": +0.18, "floral": +0.15, "spicy_phenolic": +0.12, "stone_fruit": +0.10},
+    "salmiana": {"grassy": +0.28, "herbal": +0.20, "bitterness": +0.12},
+    "mexicano": {"herbal": +0.15, "citrus": +0.12, "floral": +0.10},
+    "pechuga": {"stone_fruit": +0.20, "nutty": +0.12, "sweet": +0.12, "body_fullness": +0.12,
+                "spicy_phenolic": +0.10},
+    "puntas": {"alcohol_warmth": +0.20, "dryness_finish": +0.12, "bitterness": +0.08},
+    "clay": {"smoky_peat": +0.10, "nutty": +0.10, "body_fullness": +0.08},
+    "tahona": {"body_fullness": +0.10, "grassy": +0.08, "herbal": +0.05},
+    "capon": {"sweet": +0.15, "honey": +0.12, "stone_fruit": +0.10},
+    "high_proof": {"alcohol_warmth": +0.18, "body_fullness": +0.10, "dryness_finish": +0.08},
+    "coffee": {"roasted_coffee_choc": +0.35, "sweet": +0.15},
+    "citrus_flavor": {"citrus": +0.30, "sour_tart": +0.10},
+    "tropical_flavor": {"tropical": +0.30, "sweet": +0.15},
+    "berry_flavor": {"berry": +0.30, "sweet": +0.15},
+    "chili": {"spicy_phenolic": +0.30, "bitterness": +0.05},
+    "cream": {"sweet": +0.30, "body_fullness": +0.25, "vanilla_oak": +0.15},
+}
+
+#: The styles an agave label's marks apply to. Gated on the STYLE, not the category: "reposado"
+#: on a whiskey is somebody else's word.
+_AGAVE_STYLES = frozenset({"agave_spirit", "mezcal", "tequila"})
+
+
+def agave_marks(name: str) -> list[str]:
+    """What an agave label states beyond its style, in table order -- `[]` when it states
+    nothing. One mark per exclusive family; varietals and processes stack."""
+    n = _norm(name)
+    out: list[str] = []
+    claimed: set[str] = set()
+    for family, key, pat, unless in _AGAVE_MARKS_RE:
+        if family in claimed or not pat.search(n):
+            continue
+        if unless is not None and unless.search(n):
+            continue
+        out.append(key)
+        if family in _AGAVE_EXCLUSIVE:
+            claimed.add(family)
+    return out
+
+
+def _nudge(axes: dict[str, float], deltas: dict[str, float]) -> None:
+    """Move a centroid's axes by `deltas`, clamped into 0..1."""
+    for axis, delta in deltas.items():
+        axes[axis] = round(min(1.0, max(0.0, axes.get(axis, 0.0) + delta)), 3)
+
+
 def sensory_from_style(name: str, category: Category | str | None,
                        style_hint: str | None = None) -> SensoryVector | None:
     """A STYLE_PRIOR SensoryVector for the product, or None when no style can be inferred. A
@@ -807,8 +939,13 @@ def sensory_from_style(name: str, category: Category | str | None,
     cat = category.value if isinstance(category, Category) else (category or "")
     added = adjuncts(name) if str(cat).lower() == "beer" else []
     for key in added:
-        for axis, delta in _ADJUNCT_DELTAS[key].items():
-            axes[axis] = round(min(1.0, max(0.0, axes.get(axis, 0.0) + delta)), 3)
+        _nudge(axes, _ADJUNCT_DELTAS[key])
+    # The agave half of the same idea: a label states how long it rested, which agave it was
+    # made from and how it was cooked, and those are the difference between rows that would
+    # otherwise be one vector. Gated on the style, so "reposado" on a whiskey is not read here.
+    marks = agave_marks(name) if style in _AGAVE_STYLES else []
+    for key in marks:
+        _nudge(axes, _AGAVE_MARK_DELTAS[key])
     if is_non_alcoholic(name) or style == "na_beer":
         axes["alcohol_warmth"] = 0.0
         axes["body_fullness"] = round(axes.get("body_fullness", 0.3) * 0.7, 3)
@@ -817,7 +954,7 @@ def sensory_from_style(name: str, category: Category | str | None,
     # ahead of it -- but it is still a guess, and stays under the 0.45 the recommender reads
     # as knowing the product.
     conf = 0.25 if style in ("beer", "spirit", "wine") else 0.35
-    if added:
+    if added or marks:
         conf = min(0.44, conf + 0.05)
     return SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=conf, axes=axes)
 

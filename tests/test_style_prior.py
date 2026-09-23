@@ -6,6 +6,7 @@ from bcd_enrich.style_prior import (
     _CENTROIDS,
     abv_from_style,
     adjuncts,
+    agave_marks,
     detect_style,
     sensory_from_style,
 )
@@ -173,3 +174,64 @@ def test_adjuncts_are_read_for_beer_only():
         _CENTROIDS[detect_style(spirit, Category.SPIRIT)]
     assert sensory_from_style("Honey Wheat Ale", Category.BEER).axes["honey"] > \
         sensory_from_style("Wheat Ale", Category.BEER).axes.get("honey", 0)
+
+
+def test_an_agave_label_states_its_maturation_and_the_vector_follows():
+    """61% of the 17,286 agave rows say how long they rested, which agave, or how they were
+    made -- and none of it reached the vector: 11,889 tequila rows shared 7 vectors, 3,912
+    mezcal rows shared 3, and the recommender shows one entry per vector (2026-09-22). Oak is
+    the big one; a blanco and an extra añejo are the same distillate and not the same drink."""
+    def oak(n):
+        return sensory_from_style(n, Category.SPIRIT, style_hint="Tequila Fb").axes
+
+    # a blanco carries no oak axis at all -- nothing in it ever touched wood
+    ladder = [oak(f"Casa Probe {e}").get("vanilla_oak", 0.0)
+              for e in ("Blanco", "Gold", "Reposado", "Anejo", "Extra Anejo")]
+    assert ladder == sorted(ladder), ladder
+    assert ladder[0] == 0.0 and ladder[-1] > 0.5
+    # and the raw agave goes the other way
+    assert oak("Casa Probe Blanco")["grassy"] > oak("Casa Probe Extra Anejo")["grassy"]
+
+
+def test_a_bottle_rested_once_so_only_one_maturation_is_read():
+    """Ordering inside the `age` family is what keeps a brand word from being read as an
+    expression -- the shape that once read the PLATA in "Rio de Plata Tequila Añejo"."""
+    age = {"blanco", "reposado", "anejo", "extra_anejo", "cristalino", "gold"}
+    for name, want in [("Cinco Blancos Anejo", "anejo"),
+                       ("Cinco Blancos Reposado", "reposado"),
+                       ("Don Ramon Plata Cristalino Platinum", "cristalino"),
+                       ("Corrido Cristalino Blanco", "cristalino"),
+                       ("Herrncia De Plata Anejo", "anejo"),
+                       ("Degollado Silver 100% Agave", "blanco")]:
+        assert [m for m in agave_marks(name) if m in age] == [want], name
+
+
+def test_oro_is_somebody_s_name_before_it_is_a_colour():
+    """`oro` unanchored hides inside "adoro" (200 extra rows); anchored it is still a brand
+    word far more often than an expression, so gold yields to any stated maturation and to
+    "de oro" outright."""
+    assert agave_marks("Carreta De Oro Añejo") == ["anejo"]
+    assert agave_marks("Gran Cava De Oro Blanco") == ["blanco"]
+    assert agave_marks("Cava De Oro 25th Anniversary Limited Edition") == []
+    assert agave_marks("Adoro Silver") == ["blanco"]
+    assert agave_marks("Sombrero Gold") == ["gold"]
+
+
+def test_varietals_and_processes_stack_but_a_whiskey_is_not_read_this_way():
+    """An ensamble really is several agaves, and a pechuga really is also a capón. But
+    "reposado" on a whiskey is somebody else's word, so the marks are gated on the STYLE."""
+    marks = agave_marks("5 Sentidos Espadin y Tobala Pechuga")
+    assert "espadin" in marks and "tobala" in marks and "pechuga" in marks
+    whiskey = "Old Probe Reposado Barrel Finished"
+    assert detect_style(whiskey, Category.SPIRIT, class_type="Straight Bourbon Whisky") == "bourbon"
+    assert sensory_from_style(whiskey, Category.SPIRIT, style_hint="Straight Bourbon Whisky") \
+        .axes == _CENTROIDS["bourbon"]
+
+
+def test_reading_a_label_twice_lands_in_the_same_place():
+    """Each mark moves the STYLE'S OWN centroid, so the answer is a function of (style, name)
+    and re-running the enrichment recomputes it instead of adding a second helping."""
+    n, hint = "Real Minero Arroqueño Pechuga Anejo", "Agave Spirits"
+    first = sensory_from_style(n, Category.SPIRIT, style_hint=hint).axes
+    assert sensory_from_style(n, Category.SPIRIT, style_hint=hint).axes == first
+    assert all(0.0 <= v <= 1.0 for v in first.values())
