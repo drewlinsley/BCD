@@ -173,3 +173,67 @@ def test_a_second_pass_changes_nothing(tmp_path, capsys):
     for pid, *_ in rows:
         assert s.get_gold(pid) == first[pid], pid
     s.close()
+
+
+def test_the_agave_catch_all_lets_the_name_decide(tmp_path, capsys):
+    """The registry files mezcal, raicilla, sotol, bacanora and every wild-agave distillate
+    that may NOT legally be called tequila under one catch-all class, "Agave Spirits" -- and
+    the bare keyword "agave" mapped that class straight to `tequila`, so 2,381 live rows were
+    printed and vectored as a spirit they are legally not (2026-09-22).
+
+    The class now has a centroid of its own and the NAME decides what sits on it. Reading the
+    name has to be anchored, not substring: "tequilana" is the agave SPECIES and every one of
+    the 15 catalog rows containing "tequila" is that species rather than the category."""
+    import tempfile
+
+    from bcd_enrich.__main__ import run
+    from bcd_ingest.store import MedallionStore
+
+    root = tempfile.mkdtemp(dir=tmp_path)
+    store = MedallionStore(root=root)
+    prov = Provenance(source_id="ttb", method=ExtractionMethod.REGULATORY_FILING,
+                      confidence=1.0).model_dump(mode="json")
+    rows = [
+        # the name says mezcal, or an agave only mezcal is made from
+        ("a1", "Palenqueros Madrecuishe", "Agave Spirits", "Mezcal"),
+        ("a2", "Cinco Sentidos Maguey De Pulque", "Agave Spirits", "Mezcal"),
+        ("a3", "Mezcalosfera Tobala", "Agave Spirits", "Mezcal"),
+        # agave tequilana is a PLANT: a distillate of it filed here is not tequila
+        ("a4", "Coatlan Tequilana", "Agave Spirits", "Agave Spirit"),
+        # its own denomination, its own plant -- not mezcal however the label reads
+        ("a5", "Balam Bacanora", "Agave Spirits", "Agave Spirit"),
+        ("a6", "Oroza Raicilla Ensamble", "Agave Spirits", "Agave Spirit"),
+        # names the loose spirit keywords used to misread: "oro" in Teodoro, "gin" in Original
+        ("a7", "Mezonte Teodoro", "Agave Spirits", "Agave Spirit"),
+        ("a8", "The Original Pullman Distilling Co.", "Agave Spirits", "Agave Spirit"),
+        # only the word itself claims tequila -- and a real filing outranks any name
+        ("a9", "Tequila Ocho Plata", "Agave Spirits", "Tequila"),
+        ("a10", "Palenqueros Madrecuishe", "Tequila Fb", "Tequila"),
+    ]
+    for pid, name, filed, _want in rows:
+        store.put_gold(pid, "product", {"id": pid, "name": name, "category": "spirit",
+                                        "brand_id": "brand:x", "producer_id": "prod:x",
+                                        "style": {"value": filed, "provenance": prov}})
+    store.close()
+
+    run(root=root, restyle=True)
+    s = MedallionStore(root=root)
+    got = {pid: s.get_gold(pid) for pid, *_ in rows}
+    s.close()
+    for pid, name, _filed, want in rows:
+        assert got[pid]["style"]["value"] == want, f"{name}: {got[pid]['style']['value']}"
+
+    # the words on the screen and the vector behind them agree: a mezcal is smoky, the
+    # catch-all only somewhat, and neither is tequila's cooked-agave profile
+    axes = {pid: got[pid]["sensory"]["axes"] for pid, *_ in rows}
+    assert axes["a1"]["smoky_peat"] == 0.65
+    assert axes["a4"]["smoky_peat"] == 0.35
+    assert axes["a9"].get("smoky_peat", 0.0) == 0.0
+    assert axes["a4"] != axes["a9"], "the catch-all still carries tequila's centroid"
+    assert axes["a4"]["herbal"] > axes["a9"]["herbal"]
+
+    # and the pass is still a fixed point over its own output
+    capsys.readouterr()
+    run(root=root, restyle=True)
+    out = capsys.readouterr().out
+    assert "rows written=0" in out, out.rsplit("─", 1)[-1]

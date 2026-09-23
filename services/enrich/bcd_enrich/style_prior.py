@@ -155,6 +155,17 @@ _CENTROIDS: dict[str, dict[str, float]] = {
                "alcohol_warmth": 0.7, "dryness_finish": 0.5, "grassy": 0.35},
     "tequila": {"herbal": 0.55, "spicy_phenolic": 0.4, "citrus": 0.4, "grassy": 0.35,
                 "alcohol_warmth": 0.7, "dryness_finish": 0.55, "floral": 0.3},
+    # The registry's "Agave Spirits" is a catch-all, not a style: mezcal, raicilla, sotol,
+    # bacanora and every wild-agave distillate that may not legally be called tequila file
+    # under it, and all 2,381 of them were being handed tequila's centroid (2026-09-22).
+    # This sits where the bucket's middle actually is -- nearer mezcal than tequila, because
+    # most of what files here is pit-roasted rather than autoclaved: some smoke, more raw
+    # vegetal agave, and not the floral roundness a column-distilled tequila gets. A name
+    # that says mezcal or tequila outright is refined off this by `_AGAVE_SPECIFIC`; what
+    # stays is what the label would not narrow.
+    "agave_spirit": {"herbal": 0.6, "grassy": 0.45, "smoky_peat": 0.35, "spicy_phenolic": 0.4,
+                     "citrus": 0.35, "alcohol_warmth": 0.72, "dryness_finish": 0.55,
+                     "floral": 0.2},
     "brandy": {"vanilla_oak": 0.6, "stone_fruit": 0.55, "caramel_toffee": 0.5, "honey": 0.4,
                "sweet": 0.45, "alcohol_warmth": 0.7, "body_fullness": 0.45},
     "triple_sec": {"citrus": 0.85, "sweet": 0.7, "floral": 0.35, "alcohol_warmth": 0.4},
@@ -221,6 +232,7 @@ _ABV: dict[str, float] = {
     "lager": 4.8, "beer": 5.0, "peated_scotch": 43.0, "scotch": 43.0, "irish_whiskey": 40.0,
     "bourbon": 45.0, "rye": 45.0, "whiskey": 43.0, "spiced_rum": 37.5, "aged_rum": 40.0,
     "white_rum": 40.0, "rum": 40.0, "gin": 42.0, "vodka": 40.0, "mezcal": 45.0, "tequila": 40.0,
+    "agave_spirit": 45.0,
     "brandy": 40.0, "triple_sec": 40.0, "anise": 40.0, "cream_liqueur": 17.0, "amaro": 25.0,
     "liqueur": 25.0, "spirit": 40.0, "wine": 12.5,
     "west_coast_ipa": 7.0, "black_ipa": 6.5, "session_ipa": 4.5, "brut_ipa": 6.5,
@@ -317,6 +329,49 @@ _BEER_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("lager", ("lager", "light", "lite", "premium", "especial", "cerveza", "pale lager",
                "blonde", "blond", "pils", "birra", "bier", "biere")),
 ]
+# The two agave spirits the catch-all class does NOT get to swallow, read as whole words.
+# Anchoring is the whole point here: the bare substring "tequila" is inside `tequilana`, the
+# agave SPECIES, and all 15 rows in the catch-all whose name contains "tequila" are that
+# species, not the category -- a mezcal from agave tequilana is still a mezcal. `\btequilas?\b`
+# matches none of them, which is the only honest way to ask the question.
+#
+# Mezcal is claimed by the word itself or by an agave varietal only mezcal is made from.
+# Raicilla, sotol and bacanora are NOT mezcal -- different plants, different places, their own
+# denominations -- so they are named as what disqualifies a varietal reading and keep the
+# catch-all centroid. That guard is earned: "Oroza Raicilla Ensamble" is a raicilla.
+_AGAVE_SPECIFIC: list[tuple[str, str, str | None]] = [
+    ("mezcal", r"\b(mez|mes)cal\w*\b", None),
+    ("mezcal",
+     r"\b(espadin\w*|espadilla|tobala|toba(x|s|z)iche|cui(sh|x)e|(madre|bi)cui(sh|x)e"
+     r"|tepe(z|x)tate|arroqueno|papalome\w*|papalote|maguey\w*|cupreata|salmiana|karwinskii"
+     r"|potatorum|jabali|sierra negra|coyota|mexicano|ensamble|barril)\b",
+     r"\b(raicilla|sotol\w*|bacanora)\b"),
+    ("tequila", r"\btequilas?\b", None),
+]
+_AGAVE_SPECIFIC_RE = [(s, re.compile(p), re.compile(u) if u else None)
+                      for s, p, u in _AGAVE_SPECIFIC]
+
+#: What each agave style is a kind of -- the same parent rule `_BEER_PARENT` states for beer.
+_AGAVE_PARENT: dict[str, str] = {"mezcal": "agave_spirit", "tequila": "agave_spirit"}
+
+#: Beer and agave together: the one map `detect_style` and `readable_style` both read, so a
+#: sub-style the name states can never print one thing and vector another.
+_PARENT_STYLE: dict[str, str] = {**_BEER_PARENT, **_AGAVE_PARENT}
+
+
+def _specific_agave_style(n: str, cls: str | None) -> str | None:
+    """The agave spirit the name states, or None. A real Tequila or Mezcal filing outranks the
+    name; the catch-all class does not, which is the whole point. The parent check is what says
+    so, and is kept even though `detect_style` only calls this for the catch-all today."""
+    for style, pat, unless in _AGAVE_SPECIFIC_RE:
+        if not pat.search(n) or (unless is not None and unless.search(n)):
+            continue
+        if cls is None or cls in _GENERIC_CLASS_STYLES or _AGAVE_PARENT.get(style) == cls:
+            return style
+        return None
+    return None
+
+
 _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("peated_scotch", ("islay", "peated", "peat", "laphroaig", "lagavulin", "ardbeg", "smoky",
                        "smoke")),
@@ -376,9 +431,16 @@ _CLASS_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("flavored_whiskey", ("whisky (flavored)", "whiskey (flavored)", "flavored whisk",
                           "liqueurs (whisky)", "liqueurs (whiskey)")),
     ("whiskey", ("whisk", "canadian", "single malt")),
-    # agave
+    # agave. "Agave Spirits" covered every agave distillate that is NOT tequila and was
+    # mapped to `tequila` by the bare "agave" keyword. It is a bucket -- but a bucket of one
+    # family, so it keeps a centroid of its own rather than joining `_GENERIC_CLASS_STYLES`:
+    # turning the loose spirit keywords loose on these names read "Teodoro" as gold rum,
+    # "Derrumbes" as rum, "Glenns Creek" as Scotch and "The Original" as gin. The name is
+    # read instead by the anchored `_AGAVE_SPECIFIC` rules. Tequila and mezcal are real
+    # filings and stay specific; "agave" is matched last so they win the ones they name.
     ("mezcal", ("mezcal",)),
-    ("tequila", ("tequila", "agave")),
+    ("tequila", ("tequila",)),
+    ("agave_spirit", ("agave",)),
     # rum
     ("flavored_rum", ("rum other flavored", "flavored rum", "liqueurs (rum)", "spiced rum")),
     ("white_rum", ("rum (white)", "rum white", "white rum")),
@@ -466,6 +528,7 @@ _STYLE_NAMES: dict[str, str] = {
     "gin": "Gin", "flavored_gin": "Flavored Gin", "vodka": "Vodka",
     "flavored_vodka": "Flavored Vodka",
     "neutral_spirit": "Neutral Spirit", "mezcal": "Mezcal", "tequila": "Tequila",
+    "agave_spirit": "Agave Spirit",
     "brandy": "Brandy", "triple_sec": "Orange Liqueur", "anise": "Anise Spirit",
     "cream_liqueur": "Cream Liqueur", "coffee_liqueur": "Coffee Liqueur",
     "chocolate_liqueur": "Chocolate Liqueur", "mint_liqueur": "Mint Liqueur",
@@ -561,7 +624,7 @@ def readable_style(class_type: str | None, detected: str | None = None) -> str |
     # cannot disagree: the name's style prints when the class is only a bucket, or when the name
     # says a KIND of what was filed -- a "Milk Stout" filed as "Stout" prints as a milk stout.
     if detected and detected in _STYLE_NAMES and detected not in _GENERIC_CLASS_STYLES and (
-            cls is None or cls in _GENERIC_CLASS_STYLES or _BEER_PARENT.get(detected) == cls):
+            cls is None or cls in _GENERIC_CLASS_STYLES or _PARENT_STYLE.get(detected) == cls):
         return _STYLE_NAMES[detected]
     if c in _CLASS_NAMES:
         return _CLASS_NAMES[c]
@@ -610,6 +673,15 @@ def detect_style(name: str, category: Category | str | None,
     cls = class_style(class_type)
     if cat == "beer":
         specific = _specific_beer_style(n, cls)
+        if specific is not None:
+            return specific
+    # Only the agave catch-all asks the name. Replaying the whole catalog showed why the
+    # wider gate is wrong: a name may MENTION an agave spirit without being one, and the
+    # spirit rules already read those right -- "Chattanooga Whiskey Tequila Barrel Finished"
+    # is a whiskey, "Voyager Series Mezcal Barrel Rested" a gin, "Luma Vodka Mexicano" a
+    # vodka. Every one of them kept its class and lost it to the anchored rules (2026-09-22).
+    if cls == "agave_spirit":
+        specific = _specific_agave_style(n, cls)
         if specific is not None:
             return specific
     if cls is not None and cls not in _GENERIC_CLASS_STYLES:
