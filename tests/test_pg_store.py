@@ -191,6 +191,31 @@ def test_the_known_vectors_are_reachable_through_the_floors_ties(pg: PostgresSto
     assert pg._known_stamp == stamp
 
 
+def test_the_rebuild_does_not_block_a_reader_of_the_view(pg: PostgresStore):
+    """A plain REFRESH holds ACCESS EXCLUSIVE for its whole run, so a reader already inside
+    a transaction on the view deadlocks the first recommend after a profile pass. The
+    rebuild is CONCURRENTLY, which needs the unique index on `vec_key`."""
+    import threading
+
+    _seed_product(pg, "heady", "Heady Topper", {"tropical": 0.85, "citrus": 0.7})
+    ideal = [0.0] * 25
+    pg.nearest_known(ideal, limit=1)
+
+    reader = psycopg.connect(_normalize_dsn(_URL), connect_timeout=3)  # NOT autocommit
+    try:
+        with reader.cursor() as cur:
+            cur.execute(f"SET search_path TO {_SCHEMA},public")
+            cur.execute("SELECT count(*) FROM gold_known_vectors").fetchone()  # holds it open
+        pg._known_stamp = None  # force the rebuild
+        done: list[bool] = []
+        th = threading.Thread(target=lambda: (pg.nearest_known(ideal, limit=1), done.append(True)))
+        th.start()
+        th.join(timeout=20)
+        assert done, "the rebuild blocked behind a reader parked in a transaction"
+    finally:
+        reader.close()
+
+
 def test_open_store_selects_postgres_from_url():
     """Factory picks Postgres when a database URL is supplied, SQLite otherwise."""
     try:

@@ -18,8 +18,10 @@ the beers we know never appear. This ranks on three things, in order:
 
 Rows carrying the same vector are the same recommendation -- a lineup profile stamped on a beer's
 label variants across a maker's permits, or ten thousand registry IPAs on one centroid -- and
-collapse to one entry, under the best-evidenced and then plainest-named row, so a list of ten is
-ten different drinks, and the floor appears once per style rather than filling the list.
+collapse to one entry, under the best-evidenced and then plainest-named row that names a product
+at all: the registry files rows spelled "mezcal" and "Tequila blanco", and the plainest row of a
+group is often one of them, which would stand for none of the rest. So a list of ten is ten
+different drinks, and the floor appears once per style rather than filling the list.
 Candidates come from two nearest-neighbour queries: the nearest *known* vectors, each with the
 rows that carry it, which the floor's ties would otherwise keep out of any top-N (and which,
 asked row by row, were seven beers in the nearest hundred rows); and the nearest rows overall,
@@ -78,6 +80,27 @@ def _plain_name(name: str, maker: str | None) -> str:
     return " ".join(out.split()) or (name or "")
 
 
+# The words a label uses to say what kind of drink it is, and the filler between them. A name
+# left with nothing else -- "mezcal", "Tequila blanco", "Gold Rum" -- names no product.
+_KIND = re.compile(
+    r"\b(tequila|mezcal|mescal|rum|ron|rhum|cacha[cç]a|vodka|gin|whisky|whiskey|scotch|bourbon"
+    r"|rye|soju|shochu|baijiu|sake|agave|spirit|spirits|liqueur|beer|ale|lager|stout|ipa|cider"
+    r"|blanco|plata|plato|silver|white|joven|reposado|a[ñn]ejo|cristalino|gold|dark|light|aged"
+    r"|old|extra|spiced|flavou?red|single|malt|blend|blended|straight|premium|proof|pure|dry"
+    r"|kentucky|tennessee|irish|japanese|canadian|american|london|caribbean|100|de|of|the|and"
+    r"|y)\b", re.I)
+
+
+def _legible(name: str) -> int:
+    """How well a name can stand for every row that shares its vector, smallest first: a name a
+    drinker could repeat, then a registry row whose two fields ran together ("4b ,plantation"),
+    then one that says no more than its own kind ("mezcal") and so names none of them. The whole
+    name is read, maker and all: "Odell Brewing Company IPA" names a beer, "IPA" does not."""
+    if not re.sub(r"[^a-z0-9]", "", _KIND.sub(" ", name).lower()):
+        return 2
+    return 1 if " ," in name else 0
+
+
 def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None, *,
                  limit: int = 10) -> list[dict]:
     """The `limit` products to recommend, best first, each with its maker, its score, its
@@ -123,9 +146,11 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
         return makers[pid]
 
     def _plainness(entry: tuple[tuple, Product, float, str, bool]) -> tuple:
-        # the rank key up to (not including) the name, then the plainness, then the name
-        plain = _plain_name(entry[1].name or "", _maker(entry[1]))
-        return (*entry[0][:-1], len(plain.split()), len(plain), entry[1].name or "")
+        # the rank key up to (not including) the name, then whether the name can stand for the
+        # others at all, then the plainness, then the name
+        name = entry[1].name or ""
+        plain = _plain_name(name, _maker(entry[1]))
+        return (*entry[0][:-1], _legible(name), len(plain.split()), len(plain), name)
 
     chosen = [min(members, key=_plainness) if len(members) > 1 else members[0]
               for members in groups.values()]

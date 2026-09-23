@@ -260,14 +260,29 @@ class PostgresStore:
             # `nearest_known` rebuilds it when a known row has been written since (the
             # partial index makes that check one probe, and the rebuild a scan of the known
             # rows rather than the table) and then scans it exactly: 1.4k vectors today.
+            # `vec_key` is what makes the rebuild concurrent: REFRESH CONCURRENTLY wants a
+            # unique index on a COLUMN of the view (an expression index is refused), and it
+            # joins old to new on it, which a vector cannot do -- pgvector's `=` is neither
+            # merge- nor hash-joinable. The vector's own text is exact and joins fine.
             cur.execute(
                 f"""
                 CREATE INDEX IF NOT EXISTS ix_gold_known_updated
                     ON gold (updated_at) WHERE {self._KNOWN};
+                DO $$ BEGIN
+                    IF to_regclass('gold_known_vectors') IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM pg_attribute
+                            WHERE attrelid = 'gold_known_vectors'::regclass
+                              AND attname = 'vec_key' AND NOT attisdropped) THEN
+                        DROP MATERIALIZED VIEW gold_known_vectors;  -- built before the key
+                    END IF;
+                END $$;
                 CREATE MATERIALIZED VIEW IF NOT EXISTS gold_known_vectors AS
-                    SELECT sensory, count(*) AS n, max(updated_at) AS updated_at,
+                    SELECT sensory::text AS vec_key, sensory, count(*) AS n,
+                           max(updated_at) AS updated_at,
                            (array_agg(id ORDER BY length(name), name))[1:16] AS ids
                     FROM gold WHERE {self._KNOWN} GROUP BY sensory;
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_gold_known_vectors
+                    ON gold_known_vectors (vec_key);
                 -- superseded by the view; the query that used it asked row by row
                 DROP INDEX IF EXISTS ix_gold_sensory_known_hnsw;
                 """
@@ -732,11 +747,16 @@ class PostgresStore:
     def _freshen_known_vectors(self, cur: psycopg.Cursor) -> None:
         """Rebuild `gold_known_vectors` when a known row has been written since it was
         built. Writes move `updated_at`, so the latest one is the view's version; reading
-        it is one probe of the partial index."""
+        it is one probe of the partial index.
+
+        CONCURRENTLY costs about 40ms more than the plain rebuild (0.19s against 0.15s on
+        2k vectors) and takes no exclusive lock: a plain REFRESH holds ACCESS EXCLUSIVE for
+        its whole run, so every other reader of the view waits behind the first recommend
+        after a profile pass -- and a reader already inside a transaction deadlocks it."""
         (stamp,) = cur.execute(
             f"SELECT max(updated_at) FROM gold WHERE {self._KNOWN}").fetchone()
         if stamp is None or stamp != self._known_stamp:
-            cur.execute("REFRESH MATERIALIZED VIEW gold_known_vectors")
+            cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY gold_known_vectors")
             self._known_stamp = stamp
 
     def close(self) -> None:
