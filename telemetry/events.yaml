@@ -178,6 +178,25 @@ events:
       - {name: to_version, type: int}
       - {name: n_predictions, type: int}
 
+  # ---- recommendations ----
+  # Whether the list the user is looking at is theirs or the seed profile's is the one thing
+  # worth knowing about it, so `n_rated` rides along: a list shown at 0 ratings is a starting
+  # point, and reading engagement without that distinction would flatter it.
+  - name: recommendations_shown
+    tier: analytics
+    pii: none
+    properties:
+      - {name: n_results, type: int}
+      - {name: n_rated, type: int}
+      - {name: top_evidence, type: enum, values: [rated, known, guessed]}
+  - name: recommendation_opened
+    tier: analytics
+    pii: none
+    properties:
+      - {name: product_id, type: string}
+      - {name: rank, type: int}
+      - {name: evidence, type: enum, values: [rated, known, guessed]}
+
   # ---- coarse-to-fine scan pipeline ----
   - name: scan_object_resolution
     tier: analytics
