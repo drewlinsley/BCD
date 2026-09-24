@@ -9,6 +9,8 @@ public protocol APIClientProtocol: Sendable {
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
     func submitFeedback(_ req: FeedbackRequest, userId: String) async throws -> FeedbackResponse
+    /// Drinks to suggest, best first, for the person this client speaks for.
+    func recommend(limit: Int) async throws -> [Recommendation]
     /// Catalog vocabulary for the on-device recognizer's custom-words hint.
     func fetchLexicon() async throws -> [String]
 }
@@ -26,6 +28,13 @@ extension APIClientProtocol {
     /// that never exercises it reports the route as unimplemented rather than pretending the
     /// camera frame went nowhere useful.
     public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
+        throw APIError.http(501)
+    }
+
+    /// Same reasoning again: a stub that never asks for recommendations reports the route as
+    /// unimplemented rather than returning an empty list, which a caller would read as "the
+    /// server has nothing to suggest".
+    public func recommend(limit: Int) async throws -> [Recommendation] {
         throw APIError.http(501)
     }
 
@@ -124,6 +133,19 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
                        query: [URLQueryItem(name: "user_id", value: userId)])
     }
 
+    /// What to drink next. `user_id` is the same pseudonymous install id the scan sends, and
+    /// it is what makes the list this person's rather than anyone's: the server answers with
+    /// their learned profile once they have rated anything, and with its seed profile before
+    /// that — so a fresh install gets a real ranking rather than an empty screen, and the
+    /// caller is the one that has to say which of those the user is looking at.
+    public func recommend(limit: Int = 12) async throws -> [Recommendation] {
+        let resp: RecommendResponse = try await post(
+            "/v1/recommend", body: EmptyBody(),
+            query: [URLQueryItem(name: "user_id", value: installId),
+                    URLQueryItem(name: "limit", value: String(limit))])
+        return resp.results
+    }
+
     // MARK: - plumbing
 
     private func post<B: Encodable, R: Decodable>(
@@ -161,3 +183,7 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
 }
 
 struct EmptyAck: Codable {}
+
+/// `/v1/recommend` takes its arguments in the query string and no body, but it is a
+/// POST, and `post` always sends one.
+struct EmptyBody: Codable {}

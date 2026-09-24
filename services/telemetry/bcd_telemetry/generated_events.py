@@ -25,6 +25,8 @@ EVENT_NAMES: frozenset[str] = frozenset({
     "paywall_shown",
     "paywall_converted",
     "weekly_profile_delta_shown",
+    "recommendations_shown",
+    "recommendation_opened",
     "scan_object_resolution",
 })
 
@@ -50,5 +52,7 @@ EVENT_TIERS: dict[str, str] = {
     "paywall_shown": "analytics",
     "paywall_converted": "analytics",
     "weekly_profile_delta_shown": "personalization",
+    "recommendations_shown": "analytics",
+    "recommendation_opened": "analytics",
     "scan_object_resolution": "analytics",
 }

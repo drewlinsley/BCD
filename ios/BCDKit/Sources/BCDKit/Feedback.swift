@@ -103,6 +103,14 @@ public final class ReactionLog: @unchecked Sendable {
         return Reaction(rawValue: raw)
     }
 
+    /// How many verdicts this install has given. The recommendation list needs it to say
+    /// whose taste it is showing: with nothing rated, the server answers from its seed
+    /// profile, and calling that "for you" would be a lie.
+    public var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return (defaults.dictionary(forKey: key) ?? [:]).count
+    }
+
     public func record(_ reaction: Reaction, for productId: String) {
         lock.lock(); defer { lock.unlock() }
         var all = defaults.dictionary(forKey: key) ?? [:]

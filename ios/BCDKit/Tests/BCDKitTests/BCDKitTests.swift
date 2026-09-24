@@ -1560,3 +1560,85 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         #expect(ys.allSatisfy { $0 > 0 && $0 < 1 })
     }
 }
+
+@Suite struct RecommendContract {
+    /// Exact JSON `POST /v1/recommend` emits, copied from the live service.
+    @Test func decodesRecommendResponseFromServerJSON() throws {
+        let json = """
+        {
+          "user_id": "probe",
+          "results": [
+            {
+              "product_id": "ttb:22235001000253",
+              "name": "Other Half Brewing Ddh Citra + Nelson",
+              "producer": "Other Half Brewing",
+              "score": 0.908,
+              "reason": "matches your tropical preference",
+              "cold_start": true,
+              "evidence": "known"
+            },
+            {
+              "product_id": "ttb:1", "name": "Registry IPA", "producer": null,
+              "score": 0.92, "reason": "based on style",
+              "cold_start": true, "evidence": "guessed"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let resp = try JSONDecoder().decode(RecommendResponse.self, from: json)
+        try #require(resp.results.count == 2)
+        #expect(resp.userId == "probe")
+        let first = resp.results[0]
+        #expect(first.productId == "ttb:22235001000253")
+        #expect(first.producer == "Other Half Brewing")
+        #expect(first.score == 0.908)
+        #expect(first.evidence == .known)
+        #expect(first.coldStart)
+        // The registry files rows with no producer of their own, so it has to be optional.
+        #expect(resp.results[1].producer == nil)
+        #expect(resp.results[1].evidence == .guessed)
+    }
+
+    /// A tier the client has not heard of must not lose the whole list.
+    @Test func anUnknownEvidenceTierReadsAsAGuess() throws {
+        let json = """
+        {"user_id": "u", "results": [
+          {"product_id": "p", "name": "N", "evidence": "sommelier_verified"}]}
+        """.data(using: .utf8)!
+        let resp = try JSONDecoder().decode(RecommendResponse.self, from: json)
+        #expect(resp.results.first?.evidence == .guessed)
+        #expect(resp.results.first?.score == 0)
+        #expect(resp.results.first?.reason == "")
+    }
+
+    @Test func evidenceSaysWhereTheAnswerCameFrom() {
+        #expect(Recommendation.Evidence.rated.blurb.contains("rated"))
+        #expect(Recommendation.Evidence.known.blurb != Recommendation.Evidence.guessed.blurb)
+    }
+
+    /// The list is shown in the server's order, which weighs evidence as well as score, so a
+    /// client that re-sorted on `score` would undo the ranking.
+    @Test func theServerOrderIsNotTheScoreOrder() throws {
+        let json = """
+        {"user_id": "u", "results": [
+          {"product_id": "a", "name": "Rated", "score": 0.85, "evidence": "rated"},
+          {"product_id": "b", "name": "Guessed", "score": 0.92, "evidence": "guessed"}]}
+        """.data(using: .utf8)!
+        let got = try JSONDecoder().decode(RecommendResponse.self, from: json).results
+        #expect(got.map(\.productId) == ["a", "b"])
+        #expect(got[0].score < got[1].score)
+    }
+
+    /// A stub that does not implement the route says so, rather than answering "nothing".
+    @Test func anUnimplementedStubReportsTheRoute() async {
+        struct Stub: APIClientProtocol {
+            func resolveScan(_: ScanResolveRequest) async throws -> ScanResolveResponse {
+                ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: 0)
+            }
+            func searchProducts(_: String) async throws -> [ResolvedProduct] { [] }
+            func sendTelemetry(_: TelemetryBatch) async throws {}
+        }
+        await #expect(throws: APIError.self) { _ = try await Stub().recommend(limit: 5) }
+    }
+}
