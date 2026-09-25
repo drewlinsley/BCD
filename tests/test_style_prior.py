@@ -9,6 +9,7 @@ from bcd_enrich.style_prior import (
     agave_marks,
     detect_style,
     sensory_from_style,
+    whisky_marks,
 )
 from bcd_schema import SENSORY_AXES, Category, SensorySource
 
@@ -167,11 +168,12 @@ def test_a_fruit_in_somebody_s_name_is_not_a_fruit_in_the_beer():
 
 
 def test_adjuncts_are_read_for_beer_only():
-    """A flavored spirit already has a centroid of its own -- `flavored_whiskey` is where the
-    honey went -- so reading the name again would count it twice."""
-    spirit = "Wild Turkey American Honey"
-    assert sensory_from_style(spirit, Category.SPIRIT).axes == \
-        _CENTROIDS[detect_style(spirit, Category.SPIRIT)]
+    """The beer table is beer's OWN vocabulary. A spirit's name is read by the spirit tables
+    instead, so no word is ever counted twice from two tables. "Pumpkin" is a beer adjunct and
+    no whisky's mark, so on a bourbon it must move nothing at all."""
+    spirit = "Old Probe Pumpkin Bourbon"
+    assert adjuncts(spirit) == ["pumpkin"] and whisky_marks(spirit) == []
+    assert sensory_from_style(spirit, Category.SPIRIT).axes == _CENTROIDS["bourbon"]
     assert sensory_from_style("Honey Wheat Ale", Category.BEER).axes["honey"] > \
         sensory_from_style("Wheat Ale", Category.BEER).axes.get("honey", 0)
 
@@ -222,7 +224,7 @@ def test_varietals_and_processes_stack_but_a_whiskey_is_not_read_this_way():
     "reposado" on a whiskey is somebody else's word, so the marks are gated on the STYLE."""
     marks = agave_marks("5 Sentidos Espadin y Tobala Pechuga")
     assert "espadin" in marks and "tobala" in marks and "pechuga" in marks
-    whiskey = "Old Probe Reposado Barrel Finished"
+    whiskey = "Old Probe Reposado Bourbon"
     assert detect_style(whiskey, Category.SPIRIT, class_type="Straight Bourbon Whisky") == "bourbon"
     assert sensory_from_style(whiskey, Category.SPIRIT, style_hint="Straight Bourbon Whisky") \
         .axes == _CENTROIDS["bourbon"]
@@ -235,3 +237,54 @@ def test_reading_a_label_twice_lands_in_the_same_place():
     first = sensory_from_style(n, Category.SPIRIT, style_hint=hint).axes
     assert sensory_from_style(n, Category.SPIRIT, style_hint=hint).axes == first
     assert all(0.0 <= v <= 1.0 for v in first.values())
+
+
+def test_a_whisky_label_states_its_age_and_its_cask():
+    """The catalog's worst collapse: 42,147 style-prior whisky rows held 12 vectors between
+    seven styles, and all 4,527 single malt Scotches shared one (2026-09-24). Only 21% of these
+    names state anything -- but the ones that do are the bottles people ask for."""
+    def ax(n):
+        return sensory_from_style(n, Category.SPIRIT, style_hint="Single Malt Scotch Whisky").axes
+
+    ladder = [ax(f"Probe {a}").get("vanilla_oak", 0.0)
+              for a in ("5 Year", "12 Year", "18 Year", "30 Year")]
+    assert ladder == sorted(ladder), ladder
+    # a sherry cask puts fruit in it that no bare centroid has
+    assert ax("Probe 12 Year Oloroso Sherry Cask")["stone_fruit"] > ax("Probe 12 Year")\
+        .get("stone_fruit", 0.0)
+    # an unpeated Scotch carries no smoke axis at all
+    assert ax("Probe Heavily Peated")["smoky_peat"] > ax("Probe").get("smoky_peat", 0.0)
+
+
+def test_an_age_statement_is_a_number_and_the_largest_one_is_the_claim():
+    """"Batch No. 2 21 Yr" is a 21-year whisky. The catalog states ages up to 49."""
+    assert whisky_marks("Ad Rattray Batch No. 2 21 Yr") == ["age_vintage"]
+    assert whisky_marks("Alexander Murray Highland 49 Yo") == ["age_vintage"]
+    assert whisky_marks("Probe 12 Year Old") == ["age_mid"]
+    assert whisky_marks("Probe 6 Yr") == ["age_young"]
+    # a bare number is not an age
+    assert whisky_marks("Old Charter 8") == []
+
+
+def test_the_whisky_guards_are_the_ones_the_catalog_earned():
+    """Each of these is a real row that a looser pattern claimed. `char\\w*` reaches "Charles"
+    and "Charlottesville"; `peat\\w*` reaches "Peatside"; and "Port Dundas" is a distillery in
+    Glasgow, so port has to sit next to a cask word to count as one."""
+    assert whisky_marks("Cape Charles Distillery") == []
+    assert whisky_marks("Bowman Brothers Charlottesville") == []
+    assert whisky_marks("Ad Rattray Peatside 6 Yr") == ["age_young"]
+    assert whisky_marks("Barrel To Bottle Port Dundas") == []
+    assert whisky_marks("1876 Port Barrel Finish") == ["port"]
+    assert whisky_marks("Buzzard's Roost Char #1") == ["charred_oak"]
+
+
+def test_a_whisky_rested_in_one_cask_at_one_strength():
+    """`cask`, `strength`, `peat` and `grain` are exclusive families: table order decides, so a
+    named cask beats the generic "finished in" and Islay beats a bare "peated"."""
+    m = whisky_marks("15 Stars Sherry Cask Finished")
+    assert "sherry" in m and "cask_finish" not in m
+    assert "heavily_peated" in whisky_marks("12 Yr Old 100% Islay Single Cask")
+    assert "peated" not in whisky_marks("Abomination Heavily Peated Malt")
+    # but a flavoured bottling may state several flavours at once
+    assert set(whisky_marks("Austin Peppered Maple Blood Orange Bourbon")) >= \
+        {"maple", "pepper_flavor", "citrus_flavor"}
