@@ -7,15 +7,20 @@ import BCDKit
 /// it sends one.
 @MainActor
 final class ConsentStore: ObservableObject {
-    @Published var analytics: Bool { didSet { persist("analytics", analytics) } }
-    @Published var personalization: Bool { didSet { persist("personalization", personalization) } }
-    @Published var dataSharing: Bool { didSet { persist("data_sharing", dataSharing) } }
+    @Published var analytics: Bool { didSet { changed("analytics", analytics) } }
+    @Published var personalization: Bool { didSet { changed("personalization", personalization) } }
+    @Published var dataSharing: Bool { didSet { changed("data_sharing", dataSharing) } }
     /// Whether a photo of the label may be sent for identification when text alone fails.
     ///
     /// Deliberately not folded into `dataSharing`. That toggle reads "ads & insights" and is
     /// about what is done with a taste profile; this is a picture of whatever the camera is
     /// pointed at, which is a different thing to agree to and belongs on its own switch.
-    @Published var labelPhotos: Bool { didSet { persist("label_photos", labelPhotos) } }
+    @Published var labelPhotos: Bool { didSet { changed("label_photos", labelPhotos) } }
+
+    /// Called after a tier settles, so whoever is gating on consent can be told. The
+    /// telemetry queue is the one that has to hear it: built with a snapshot, it went on
+    /// dropping personalization events for the rest of the run after the user said yes.
+    var onChange: ((ConsentState) -> Void)?
 
     private let defaults: UserDefaults
     private static let prefix = "bcd.consent."
@@ -35,7 +40,9 @@ final class ConsentStore: ObservableObject {
                      dataSharing: dataSharing)
     }
 
-    private func persist(_ key: String, _ value: Bool) {
+    /// `didSet`, so the new value is already stored and `state` reads true.
+    private func changed(_ key: String, _ value: Bool) {
         defaults.set(value, forKey: Self.prefix + key)
+        onChange?(state)
     }
 }

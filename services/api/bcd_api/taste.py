@@ -95,6 +95,32 @@ def signals_from_events(
     return {pid: w for pid, w in signals.items() if w}
 
 
+def rated_products(
+    store: Any, events: Iterable[dict[str, Any]], install_id: str
+) -> set[str]:
+    """Products this person has already passed a verdict on.
+
+    A recommendation is something to drink next, and a drink you have rated is not one --
+    "For you" led with a beer whose own row on the same screen showed the face for `spat it
+    out` (2026-09-24). Ids are canonicalised the way `rebuild_profile` canonicalises them,
+    so a verdict given before a merge still covers the row that survived it.
+
+    Consent-gated exactly as the signals are: a rating that may not shape the profile may
+    not quietly shape the list either. The client keeps its own copy of those and can hide
+    them itself.
+    """
+    out: set[str] = set()
+    for ev in _canonical(store, events):
+        if ev.get("name") != _RATING_EVENT or ev.get("install_id") != install_id:
+            continue
+        if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
+            continue
+        pid = ev.get("product_id")
+        if pid:
+            out.add(pid)
+    return out
+
+
 def _rating_weight(rating: float) -> float:
     """1-5 star rating -> signed weight in [-1, 1], neutral at 3."""
     return max(-1.0, min(1.0, (rating - _RATING_NEUTRAL) / _RATING_SPAN))

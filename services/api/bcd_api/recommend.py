@@ -31,6 +31,7 @@ which the ties fill and which stand for the styles.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 
 from bcd_ingest.store import Store
 from bcd_schema import Product, SensorySource, SensoryVector, TasteProfile
@@ -102,9 +103,15 @@ def _legible(name: str) -> int:
 
 
 def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None, *,
-                 limit: int = 10) -> list[dict]:
+                 limit: int = 10, exclude: Collection[str] = ()) -> list[dict]:
     """The `limit` products to recommend, best first, each with its maker, its score, its
-    one-line reason, the cold-start flag and what the evidence behind it is."""
+    one-line reason, the cold-start flag and what the evidence behind it is.
+
+    `exclude` is what the person has already judged (see `taste.rated_products`). Applied to
+    whole vector groups rather than to the rows named in it, because this module's own rule
+    is that rows sharing a vector are the same recommendation: dropping only the rated row
+    would put a sibling in its place, which is the same suggestion under another name.
+    """
     if profile is not None and profile.sensory_ideal is not None:
         ideal = profile.sensory_ideal.to_array()
         # Over-fetch so the re-rank has room, and ask the known vectors separately: on the
@@ -152,8 +159,10 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
         plain = _plain_name(name, _maker(entry[1]))
         return (*entry[0][:-1], _legible(name), len(plain.split()), len(plain), name)
 
+    skip = set(exclude)
     chosen = [min(members, key=_plainness) if len(members) > 1 else members[0]
-              for members in groups.values()]
+              for members in groups.values()
+              if not (skip and any(e[1].id in skip for e in members))]
     chosen.sort(key=lambda e: e[0])
 
     return [{"product_id": product.id, "name": product.name, "producer": _maker(product),

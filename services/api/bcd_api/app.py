@@ -35,7 +35,7 @@ from fastapi import FastAPI, Query
 from .index import IndexedStore, LabelIndex
 from .recommend import rank_catalog
 from .resolver import Resolver
-from .taste import TASTE_EVENTS, load_profile, rebuild_profile
+from .taste import TASTE_EVENTS, load_profile, rated_products, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
 from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 
@@ -303,8 +303,11 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
     Postgres, python cosine on the SQLite dev store), `rank_catalog` scores and orders them
     -- a match before a partial one, what drinkers rated before what we know before what we
     guess, then the score -- and says which of those each result is (`evidence`)."""
-    results = rank_catalog(_state["store"], _state["resolver"], _profile_for(user_id),
-                           limit=limit)
+    collector: TelemetryCollector = _state["telemetry"]
+    store: Store = _state["store"]
+    results = rank_catalog(store, _state["resolver"], _profile_for(user_id), limit=limit,
+                           exclude=rated_products(store, collector.iter_events(TASTE_EVENTS),
+                                                  user_id))
     return {"user_id": user_id, "results": results}
 
 

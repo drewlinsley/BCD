@@ -37,6 +37,8 @@ struct ReactionPicker: View {
     @State private var picked: Reaction?
     @State private var sending = false
     @State private var failed = false
+    /// Whether to ask before the first verdict leaves the phone.
+    @State private var asking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -83,6 +85,19 @@ struct ReactionPicker: View {
         }
         .padding(.vertical, 4)
         .task { picked = env.reactions.reaction(for: productId) }
+        // The first rating is where consent actually becomes a question, so it is asked
+        // here rather than left as a line of small print under the picker. Before this, a
+        // tap on a fresh install recorded locally and went nowhere: the profile never
+        // moved, the Discover list kept saying "Somewhere to start", and nothing on screen
+        // said the rating had not been sent unless you read the caption (2026-09-24).
+        .alert("Use your ratings?", isPresented: $asking) {
+            Button("Yes, learn what I like") { allow() }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Your verdicts shape what BCD suggests. They are kept against a random id "
+                 + "for this install \u{2014} not your name, email, or anything about you "
+                 + "\u{2014} and you can turn this off any time under You.")
+        }
     }
 
     @ViewBuilder private var readout: some View {
@@ -110,9 +125,18 @@ struct ReactionPicker: View {
 
     private func choose(_ reaction: Reaction) {
         picked = reaction
+        // Recorded locally either way: it is the user's own answer about their own drink,
+        // and it is what the Seal and the search rows read back.
         env.reactions.record(reaction, for: productId)
-        guard consent.personalization else { return }
-        send(reaction)
+        if consent.personalization { send(reaction) } else { asking = true }
+    }
+
+    /// Yes. Flipping the store is what lets the queue take personalization events too --
+    /// `ConsentStore.onChange` carries it to the queue -- so this is the whole of turning
+    /// the loop on.
+    private func allow() {
+        consent.personalization = true
+        if let picked { send(picked) }
     }
 
     private func turnOnAndSend(_ reaction: Reaction) {
@@ -129,6 +153,8 @@ struct ReactionPicker: View {
                 _ = try await env.api.submitFeedback(
                     FeedbackRequest(productId: productId, reaction: reaction),
                     userId: env.installId)
+                // The profile has moved, so anything ranking with it is now stale.
+                env.ratingAccepted()
                 try? await env.telemetry.log(
                     "rating_submitted", tier: .personalization,
                     ["product_id": .string(productId), "rating": .int(reaction.rawValue)])
@@ -136,6 +162,40 @@ struct ReactionPicker: View {
                 failed = true
             }
         }
+    }
+}
+
+/// The rating sheet — `ReactionPicker` with a name on it and a way out.
+///
+/// A sheet rather than a push because rating is an aside to the screen that opened it: you
+/// came to decide whether to drink the thing, and this is you reporting back on one you
+/// already did. It closes itself once a verdict is in, so the answer to "how was it?" takes
+/// exactly one tap.
+struct RatingSheet: View {
+    let productId: String
+    let productName: String
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var env: AppEnvironment
+    @EnvironmentObject var consent: ConsentStore
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                // The picker asks "How was it?" itself -- it has to, because the Rate tab
+                // stacks several of them -- so the bar carries the drink's name instead of
+                // asking the same question twice.
+                ReactionPicker(productId: productId).padding(20)
+            }
+            .background(Brand.surface)
+            .navigationTitle(productName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

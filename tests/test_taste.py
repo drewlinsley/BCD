@@ -11,10 +11,12 @@ from bcd_api.taste import (
     _rating_weight,
     build_profile,
     load_profile,
+    rated_products,
     rebuild_profile,
     save_profile,
     signals_from_events,
 )
+from bcd_ingest.merge import put_redirect
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
     Category,
@@ -284,3 +286,31 @@ class _EmptyStore:
 
     def get_gold(self, *_a, **_k):
         return None
+
+
+# --- which drinks have been judged at all ---------------------------------------------
+
+
+def test_rated_products_is_this_persons_verdicts_only():
+    """What the recommender takes out of the list. Someone else's rating, an unconsented
+    one, and a list-add are all not this person's verdict on this drink."""
+    store = MedallionStore(root=tempfile.mkdtemp())
+    events = [
+        _ev(product_id="a", rating=5.0),
+        _ev(product_id="b", rating=1.0),
+        _ev(install="someone-else", product_id="c", rating=5.0),
+        _ev(tier="analytics", product_id="d", rating=5.0),
+        _ev(name="list_add", product_id="e", list_kind="wishlist"),
+        _ev(product_id=None, rating=4.0),
+    ]
+    assert rated_products(store, events, "demo") == {"a", "b"}
+    store.close()
+
+
+def test_a_verdict_survives_the_row_being_merged_away():
+    """Same reasoning as `_canonical` in the profile rebuild: the catalog being tidied must
+    not hand someone back a drink they have already told us they hate."""
+    store = MedallionStore(root=tempfile.mkdtemp())
+    put_redirect(store, "old", "new")
+    assert rated_products(store, [_ev(product_id="old", rating=1.0)], "demo") == {"new"}
+    store.close()
