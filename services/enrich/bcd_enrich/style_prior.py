@@ -900,27 +900,187 @@ _AGAVE_MARK_DELTAS: dict[str, dict[str, float]] = {
 _AGAVE_STYLES = frozenset({"agave_spirit", "mezcal", "tequila"})
 
 
-def agave_marks(name: str) -> list[str]:
-    """What an agave label states beyond its style, in table order -- `[]` when it states
-    nothing. One mark per exclusive family; varietals and processes stack."""
-    n = _norm(name)
+#: A compiled mark table: (family, key, pattern, what disqualifies it).
+_MarkTable = list[tuple[str, str, re.Pattern[str], re.Pattern[str] | None]]
+
+
+def _read_marks(n: str, table: _MarkTable, exclusive: frozenset[str]) -> list[str]:
+    """The marks a normalised name states, in table order. A family in `exclusive` yields only
+    its FIRST match, which is how table order encodes "this happened once"."""
     out: list[str] = []
     claimed: set[str] = set()
-    for family, key, pat, unless in _AGAVE_MARKS_RE:
+    for family, key, pat, unless in table:
         if family in claimed or not pat.search(n):
             continue
         if unless is not None and unless.search(n):
             continue
         out.append(key)
-        if family in _AGAVE_EXCLUSIVE:
+        if family in exclusive:
             claimed.add(family)
     return out
+
+
+def agave_marks(name: str) -> list[str]:
+    """What an agave label states beyond its style, in table order -- `[]` when it states
+    nothing. One mark per exclusive family; varietals and processes stack."""
+    return _read_marks(_norm(name), _AGAVE_MARKS_RE, _AGAVE_EXCLUSIVE)
 
 
 def _nudge(axes: dict[str, float], deltas: dict[str, float]) -> None:
     """Move a centroid's axes by `deltas`, clamped into 0..1."""
     for axis, delta in deltas.items():
         axes[axis] = round(min(1.0, max(0.0, axes.get(axis, 0.0) + delta)), 3)
+
+
+# What a whisky label says beyond its style. This family is the catalog's worst collapse:
+# 42,147 style-prior rows across SEVEN styles held 12 vectors between them, and every single
+# malt Scotch in the catalog -- 4,527 of them -- had the same vector as every other
+# (2026-09-24). Only 21% of these names state anything a rule can read, far less than agave's
+# 61%, but the ones that do are the bottles a person actually asks for: a 12-year sherry-cask
+# single malt is a product, "Barrel Select #4821" is registry noise.
+#
+# Same contract as the beer adjuncts and the agave marks: each mark nudges the STYLE'S OWN
+# centroid, so the answer is a function of (style, name) and re-running recomputes it.
+_WHISKY_EXCLUSIVE = frozenset({"cask", "strength", "batch", "peat", "grain"})
+
+# Anchoring earned every guard here. `char\w*` claims "Charles", "Charlottesville" and "Cape
+# Charles Distillery" -- 186 rows for a word that means charred oak in maybe a third of them, so
+# only `charred` and the cooperage grades (`char #1`) count. `peat\w*` claims "Peatside".
+# `port` is a wine cask in "tawny port barrel finished" and a PLACE in "Port Dundas", so it has
+# to sit next to a cask word. And a fruit or a sweet word is somebody's address often enough
+# that the beer table's place guard is reused here.
+_WHISKY_MARKS: list[tuple[str, str, str, str | None]] = [
+    ("cask", "sherry", r"\b(oloroso|pedro ximenez|\bpx\b)\b|\bsherr(y|ied)\b", None),
+    ("cask", "port", r"\b(tawny\s+)?port\s+(cask|barrel|pipe|finish\w*|aged)\b"
+                     r"|\bfinished\s+in\s+\w*\s*port\b", None),
+    ("cask", "madeira", r"\bmadeira\b", None),
+    ("cask", "cognac_cask", r"\b(cognac|armagnac|calvados)\s+(cask|barrel|finish\w*)\b", None),
+    ("cask", "rum_cask", r"\brum\s+(cask|barrel|finish\w*)\b", None),
+    ("cask", "wine_cask", r"\b(wine|cabernet|zinfandel|chardonnay|sauternes)\s+"
+                          r"(cask|barrel|finish\w*)\b", None),
+    ("cask", "mizunara", r"\bmizunara\b|\bjapanese oak\b", None),
+    ("cask", "charred_oak", r"\bcharred\b|\bchar\s*#?\s*\d\b", None),
+    ("cask", "toasted_oak", r"\btoasted\b", None),
+    ("cask", "virgin_oak", r"\bvirgin oak\b|\bnew oak\b", None),
+    ("cask", "double_oak", r"\bdouble\s+(oak\w*|barrel\w*)\b|\btriple\s+(cask|wood|oak)\b", None),
+    ("cask", "cask_finish", r"\b(cask|barrel)\s+finish\w*\b|\bfinished\s+in\b", None),
+    ("strength", "cask_strength", r"\b(cask|barrel|still)\s+strength\b|\bbarrel\s+proof\b"
+                                  r"|\bover\s?proof\b", None),
+    ("strength", "bonded", r"\bbottled[- ]in[- ]bond\b|\bbonded\b", None),
+    ("batch", "single_barrel", r"\bsingle\s+(barrel|cask)\b", None),
+    ("batch", "small_batch", r"\bsmall\s+batch\b", None),
+    ("peat", "heavily_peated", r"\bheavily\s+peated\b|\bislay\b", None),
+    ("peat", "peated", r"\bpeat(ed|y)?\b", None),
+    ("peat", "smoked", r"\bsmok(e|ed|y|ey)\b", None),
+    ("grain", "single_malt", r"\bsingle\s+malt\b", None),
+    ("grain", "high_rye", r"\bhigh\s+rye\b|\bmalted\s+rye\b", None),
+    ("grain", "wheated", r"\bwheat(ed)?\b", None),
+    ("grain", "four_grain", r"\b(four|4)\s+grain\b|\bfive\s+grain\b", None),
+    ("grain", "single_grain", r"\bsingle\s+grain\b", None),
+    ("grain", "blended", r"\bblend(ed)?\b", None),
+    # flavoured bottlings -- these stack, a "peppered maple" is both
+    ("flavor", "honey_flavor", r"\bhoney\b", r"\bhoney\s+(badger|bee|moon|hole|do)\b"),
+    ("flavor", "cinnamon", r"\bcinnamon\b|\bfireball\b|\bred hot\b", None),
+    ("flavor", "apple", r"\bapples?\b", None),
+    ("flavor", "peach", r"\bpeach(es)?\b", r"\bpeach\s+(tree|street|st|grove|orchard)\b"),
+    ("flavor", "cherry", r"\bcherr(y|ies)\b", r"\bcherry\s+(hill|street|st|creek|tree|blossom"
+                                              r"|grove|lane|point|wood)\b"),
+    ("flavor", "maple", r"\bmaple\b", r"\bmaple\s+(street|ave|avenue|road|lane|leaf|city|grove)\b"),
+    ("flavor", "chocolate", r"\b(chocolate|cocoa|cacao)\b", None),
+    ("flavor", "coffee", r"\b(coffee|espresso|mocha)\b", None),
+    ("flavor", "vanilla_flavor", r"\bvanilla\b", None),
+    ("flavor", "caramel_flavor", r"\b(caramel|butterscotch|toffee)\b", None),
+    ("flavor", "pepper_flavor", r"\bpepper(ed)?\b|\bjalapeno\b|\bhabanero\b", None),
+    ("flavor", "citrus_flavor", r"\b(lemon|orange|lime|grapefruit)\b",
+     r"\b(orange|lemon)\s+(county|street|st|ave|avenue|road|blossom|grove)\b"),
+]
+_WHISKY_MARKS_RE = [(f, k, re.compile(p), re.compile(u) if u else None)
+                    for f, k, p, u in _WHISKY_MARKS]
+
+# An age statement is a NUMBER, not a word, so it is read on its own and bucketed: 10 and 12
+# years are the same claim about wood, 12 and 30 are not. The catalog states ages up to 49.
+_WHISKY_AGE = re.compile(r"\b(\d{1,2})\s*(?:years?|yrs?|yo)\b")
+
+
+def _whisky_age(n: str) -> str | None:
+    """The age bracket a name states, or None. The largest number wins: "Batch No. 2 21 Yr" is
+    a 21-year whisky, and the age statement is the headline a label leads with."""
+    found = [int(m.group(1)) for m in _WHISKY_AGE.finditer(n)]
+    if not found:
+        return None
+    y = max(found)
+    return ("age_vintage" if y >= 21 else "age_old" if y >= 15
+            else "age_mid" if y >= 9 else "age_young")
+
+
+_WHISKY_MARK_DELTAS: dict[str, dict[str, float]] = {
+    # time in wood, the axis this family is really about
+    "age_young": {"malty_bready": +0.08, "alcohol_warmth": +0.05, "vanilla_oak": -0.10,
+                  "dryness_finish": +0.05},
+    "age_mid": {"vanilla_oak": +0.10, "caramel_toffee": +0.08, "body_fullness": +0.08,
+                "nutty": +0.05},
+    "age_old": {"vanilla_oak": +0.20, "caramel_toffee": +0.15, "body_fullness": +0.15,
+                "nutty": +0.12, "stone_fruit": +0.10, "roasted_coffee_choc": +0.05},
+    "age_vintage": {"vanilla_oak": +0.28, "caramel_toffee": +0.22, "body_fullness": +0.22,
+                    "nutty": +0.18, "stone_fruit": +0.15, "roasted_coffee_choc": +0.10,
+                    "honey": +0.10},
+    "sherry": {"stone_fruit": +0.25, "berry": +0.15, "nutty": +0.15, "caramel_toffee": +0.12,
+               "sweet": +0.10, "body_fullness": +0.08},
+    "port": {"berry": +0.28, "stone_fruit": +0.15, "sweet": +0.15, "caramel_toffee": +0.10},
+    "madeira": {"stone_fruit": +0.20, "nutty": +0.18, "caramel_toffee": +0.12, "sweet": +0.10},
+    "cognac_cask": {"stone_fruit": +0.22, "floral": +0.12, "caramel_toffee": +0.10,
+                    "sweet": +0.08},
+    "rum_cask": {"caramel_toffee": +0.20, "sweet": +0.18, "banana_ester": +0.12,
+                 "vanilla_oak": +0.08},
+    "wine_cask": {"berry": +0.20, "stone_fruit": +0.12, "sour_tart": +0.10},
+    "mizunara": {"floral": +0.22, "spicy_phenolic": +0.15, "vanilla_oak": +0.12, "herbal": +0.10},
+    "charred_oak": {"roasted_coffee_choc": +0.18, "caramel_toffee": +0.15, "smoky_peat": +0.10,
+                    "vanilla_oak": +0.10},
+    "toasted_oak": {"caramel_toffee": +0.18, "nutty": +0.15, "roasted_coffee_choc": +0.10,
+                    "vanilla_oak": +0.10},
+    "virgin_oak": {"vanilla_oak": +0.22, "caramel_toffee": +0.12, "spicy_phenolic": +0.10},
+    "double_oak": {"vanilla_oak": +0.20, "caramel_toffee": +0.15, "body_fullness": +0.10},
+    "cask_finish": {"vanilla_oak": +0.12, "caramel_toffee": +0.08, "body_fullness": +0.05},
+    "cask_strength": {"alcohol_warmth": +0.20, "body_fullness": +0.15, "dryness_finish": +0.08},
+    "bonded": {"alcohol_warmth": +0.12, "body_fullness": +0.10, "vanilla_oak": +0.08},
+    "single_barrel": {"body_fullness": +0.10, "vanilla_oak": +0.10, "alcohol_warmth": +0.05},
+    "small_batch": {"body_fullness": +0.08, "vanilla_oak": +0.08},
+    "heavily_peated": {"smoky_peat": +0.45, "dryness_finish": +0.10, "herbal": +0.08},
+    "peated": {"smoky_peat": +0.35, "dryness_finish": +0.08},
+    "smoked": {"smoky_peat": +0.25},
+    "single_malt": {"malty_bready": +0.15, "honey": +0.08, "body_fullness": +0.05},
+    "single_grain": {"malty_bready": +0.08, "sweet": +0.08, "body_fullness": -0.05},
+    "blended": {"body_fullness": -0.08, "malty_bready": -0.05, "sweet": +0.05},
+    # a wheated mash has no rye in it, which is exactly what you taste
+    "wheated": {"sweet": +0.12, "malty_bready": +0.10, "body_fullness": +0.08,
+                "spicy_phenolic": -0.15},
+    "high_rye": {"spicy_phenolic": +0.25, "dryness_finish": +0.10, "herbal": +0.10},
+    "four_grain": {"malty_bready": +0.10, "spicy_phenolic": +0.08, "nutty": +0.08},
+    "honey_flavor": {"honey": +0.30, "sweet": +0.18},
+    "cinnamon": {"spicy_phenolic": +0.35, "sweet": +0.15},
+    "apple": {"stone_fruit": +0.25, "sour_tart": +0.10, "sweet": +0.12},
+    "peach": {"stone_fruit": +0.30, "sweet": +0.15},
+    "cherry": {"berry": +0.25, "stone_fruit": +0.15, "sweet": +0.12},
+    "maple": {"caramel_toffee": +0.25, "sweet": +0.20},
+    "chocolate": {"roasted_coffee_choc": +0.30, "sweet": +0.15},
+    "coffee": {"roasted_coffee_choc": +0.32, "bitterness": +0.10},
+    "vanilla_flavor": {"vanilla_oak": +0.25, "sweet": +0.15},
+    "caramel_flavor": {"caramel_toffee": +0.28, "sweet": +0.18},
+    "pepper_flavor": {"spicy_phenolic": +0.32, "bitterness": +0.05},
+    "citrus_flavor": {"citrus": +0.28, "sour_tart": +0.08},
+}
+
+#: The styles a whisky label's marks apply to -- gated on the STYLE, so "single barrel" on a
+#: tequila is read by the agave table instead and "sherry" on a brandy by neither.
+_WHISKY_STYLES = frozenset({"scotch", "peated_scotch", "bourbon", "rye", "whiskey",
+                            "irish_whiskey", "flavored_whiskey"})
+
+
+def whisky_marks(name: str) -> list[str]:
+    """What a whisky label states beyond its style -- age bracket first, then the table."""
+    n = _norm(name)
+    age = _whisky_age(n)
+    return ([age] if age else []) + _read_marks(n, _WHISKY_MARKS_RE, _WHISKY_EXCLUSIVE)
 
 
 def sensory_from_style(name: str, category: Category | str | None,
@@ -946,6 +1106,10 @@ def sensory_from_style(name: str, category: Category | str | None,
     marks = agave_marks(name) if style in _AGAVE_STYLES else []
     for key in marks:
         _nudge(axes, _AGAVE_MARK_DELTAS[key])
+    # And the whisky half: how long it sat, what it sat in, how strong it came out.
+    whisky = whisky_marks(name) if style in _WHISKY_STYLES else []
+    for key in whisky:
+        _nudge(axes, _WHISKY_MARK_DELTAS[key])
     if is_non_alcoholic(name) or style == "na_beer":
         axes["alcohol_warmth"] = 0.0
         axes["body_fullness"] = round(axes.get("body_fullness", 0.3) * 0.7, 3)
@@ -954,7 +1118,7 @@ def sensory_from_style(name: str, category: Category | str | None,
     # ahead of it -- but it is still a guess, and stays under the 0.45 the recommender reads
     # as knowing the product.
     conf = 0.25 if style in ("beer", "spirit", "wine") else 0.35
-    if added or marks:
+    if added or marks or whisky:
         conf = min(0.44, conf + 0.05)
     return SensoryVector(source=SensorySource.STYLE_PRIOR, confidence=conf, axes=axes)
 
