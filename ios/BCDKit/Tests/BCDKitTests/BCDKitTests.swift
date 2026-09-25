@@ -1663,3 +1663,45 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         await #expect(throws: APIError.self) { _ = try await Stub().recommend(limit: 5) }
     }
 }
+
+@Suite struct RecentSearchHistory {
+    private func store() -> RecentSearches {
+        let d = UserDefaults(suiteName: "recents.\(UUID().uuidString)")!
+        return RecentSearches(defaults: d)
+    }
+
+    @Test func mostRecentFirstAndNoRepeats() {
+        let r = store()
+        r.record("heady topper")
+        r.record("lagavulin")
+        r.record("Heady Topper")
+        // One entry, at the top, spelled the way it was last typed -- the history is a list of
+        // things looked for, not of keystrokes, and the same search twice is one thing.
+        #expect(r.all() == ["Heady Topper", "lagavulin"])
+    }
+
+    @Test func blankSearchesAreNotHistory() {
+        let r = store()
+        r.record("   ")
+        r.record("")
+        #expect(r.all().isEmpty)
+        r.record("  gray whale gin  ")
+        #expect(r.all() == ["gray whale gin"])   // stored trimmed, so it matches next time
+    }
+
+    @Test func theListStaysAShortcut() {
+        let r = store()
+        for i in 0..<(RecentSearches.limit + 6) { r.record("search \(i)") }
+        #expect(r.all().count == RecentSearches.limit)
+        #expect(r.all().first == "search \(RecentSearches.limit + 5)")
+    }
+
+    @Test func oneCanBeForgottenAndAllCanBe() {
+        let r = store()
+        ["a", "b", "c"].forEach(r.record)
+        r.remove("B")                       // case-insensitively, as it was matched going in
+        #expect(r.all() == ["c", "a"])
+        r.clear()
+        #expect(r.all().isEmpty)
+    }
+}

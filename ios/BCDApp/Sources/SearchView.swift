@@ -1,16 +1,16 @@
 import SwiftUI
 import BCDKit
 
-// Search, and — on the empty screen you land on before typing — what the server suggests.
+// Looking something up by name, and getting back to what you looked up before.
 //
-// The tab used to show a placeholder ("Type a beer or spirit name") on a catalog of 534k
-// products with a ranker already built for it. `/v1/recommend` answers the question that
-// placeholder was standing in for, so it fills the same space.
+// This tab used to be two screens wearing one icon: what the server suggests until you typed,
+// and search results after. Discover has its own tab now, so this one only does the thing its
+// magnifying glass promises — and the space before you type belongs to your own history
+// rather than to a placeholder.
 //
-// The header is careful about whose taste it is. The server answers from a learned profile
-// once you have rated something and from its seed profile before that, and both come back
-// looking identical — so the client, which is the only side that knows how many verdicts
-// this install has given, says which one you are reading.
+// Recent searches earn that space because the catalog has 534k rows and the registry files a
+// lot of near-names: the words that found a drink last week are worth more than remembering
+// which of three spellings was the one that worked.
 
 struct SearchView: View {
     @EnvironmentObject var env: AppEnvironment
@@ -21,130 +21,93 @@ struct SearchView: View {
     /// not searching: keyed on `query` alone the screen told you "No matches" for a word you
     /// had not submitted, which is a claim about the catalog rather than about the screen.
     @State private var submitted: String?
-
-    @State private var picks: [Recommendation] = []
-    @State private var picksState = PicksState.idle
-    /// The row whose product is being fetched, so it can show it is working. A recommendation
-    /// carries a name and an id, not a whole product, and the detail screen needs the product.
-    @State private var opening: String?
+    @State private var recents: [String] = []
     @State private var detail: ScoredCandidate?
-
-    enum PicksState: Equatable { case idle, loading, ready, failed }
-
-    private var showingPicks: Bool { submitted == nil }
 
     var body: some View {
         NavigationStack {
             Group {
-                if showingPicks { picksList } else { searchList }
+                if submitted == nil { recentsList } else { resultsList }
             }
-            .navigationTitle(showingPicks ? "Discover" : "Search")
-            .searchable(text: $query)
-            .onSubmit(of: .search) { Task { await run() } }
-            // Clearing the field puts the suggestions back rather than leaving a stale list.
+            .navigationTitle("Search")
+            .searchable(text: $query, prompt: "Beer or spirit name")
+            .onSubmit(of: .search) { Task { await run(query) } }
+            // Clearing the field puts the history back rather than leaving a stale list.
             .onChange(of: query) { _, new in
-                if new.isEmpty { results = []; submitted = nil }
+                if new.isEmpty { results = []; submitted = nil; recents = env.recents.all() }
             }
-            .task { await loadPicks() }
-            // A rating moves the profile this list is ranked with, so the list it produced a
-            // moment ago is no longer the answer. Reloaded here rather than left to a pull:
-            // watching the suggestions change is the whole point of having rated anything.
-            .onChange(of: env.ratingsVersion) { _, _ in Task { await loadPicks() } }
+            .task { recents = env.recents.all() }
             .sheet(item: $detail) { ProductDetailView(candidate: $0) }
         }
     }
 
-    // MARK: - what the server suggests
+    // MARK: - what you looked up before
 
-    @ViewBuilder private var picksList: some View {
-        switch picksState {
-        case .idle, .loading:
-            ProgressView("Finding something you'd like…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .failed:
-            ContentUnavailableView {
-                Label("Can't reach the server", systemImage: "wifi.exclamationmark")
-            } description: {
-                Text("Search still works if you know what you're after.")
-            } actions: {
-                Button("Try again") { Task { await loadPicks() } }
-            }
-        case .ready:
+    @ViewBuilder private var recentsList: some View {
+        if recents.isEmpty {
+            ContentUnavailableView(
+                "Search the catalog", systemImage: "magnifyingglass",
+                description: Text("534,000 beers and spirits. Type a name, or point the "
+                                  + "camera at a label from the Scan tab."))
+        } else {
             List {
                 Section {
-                    ForEach(Array(picks.enumerated()), id: \.element.id) { rank, pick in
-                        Button { Task { await open(pick, rank: rank) } } label: {
-                            PickRow(pick: pick,
-                                    mine: env.reactions.reaction(for: pick.productId),
-                                    busy: opening == pick.productId)
+                    ForEach(recents, id: \.self) { term in
+                        Button { query = term; Task { await run(term) } } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.callout)
+                                    .foregroundStyle(Brand.textMuted)
+                                Text(term).foregroundStyle(Brand.text)
+                                Spacer(minLength: 8)
+                            }
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
+                    .onDelete { offsets in
+                        for i in offsets { env.recents.remove(recents[i]) }
+                        recents.remove(atOffsets: offsets)
+                    }
                 } header: {
-                    Text(rated == 0 ? "Somewhere to start" : "For you")
-                } footer: {
-                    Text(rated == 0
-                         ? "These come from a starting profile, not yours yet. Rate a few "
-                           + "drinks and the list becomes your own."
-                         : "Built from the \(rated) drink\(rated == 1 ? "" : "s") you've rated.")
-                }
-            }
-            .refreshable { await loadPicks() }
-            .overlay { if picks.isEmpty { ContentUnavailableView(
-                "Nothing to suggest yet", systemImage: "sparkles",
-                description: Text("The catalog has no scored drinks for this profile.")) } }
-        }
-    }
-
-    private var rated: Int { env.reactions.count }
-
-    private func loadPicks() async {
-        if picksState != .ready { picksState = .loading }
-        do {
-            picks = try await env.api.recommend(limit: 15)
-            picksState = .ready
-            _ = await env.telemetry.log(
-                TelemetryEvent.recommendationsShown.rawValue, tier: .analytics,
-                ["n_results": .int(picks.count), "n_rated": .int(rated),
-                 "top_evidence": .string(picks.first?.evidence.rawValue ?? "guessed")])
-        } catch {
-            picksState = .failed
-        }
-    }
-
-    /// A recommendation is a name and an id; the detail screen wants the product. The name
-    /// goes back through the search route and the id picks the right row out of the answer --
-    /// names repeat in the registry, so matching on the name alone would sometimes open a
-    /// different beer than the one tapped.
-    private func open(_ pick: Recommendation, rank: Int) async {
-        opening = pick.productId
-        defer { opening = nil }
-        let hits = (try? await env.api.searchProducts(pick.name)) ?? []
-        guard let match = hits.first(where: { $0.product.id == pick.productId }) else { return }
-        detail = ScoredCandidate(resolved: match, matchScore: 1.0, personalScore: pick.score,
-                                 reason: pick.reason, coldStart: pick.coldStart)
-        _ = await env.telemetry.log(
-            TelemetryEvent.recommendationOpened.rawValue, tier: .analytics,
-            ["product_id": .string(pick.productId), "rank": .int(rank),
-             "evidence": .string(pick.evidence.rawValue)])
-    }
-
-    // MARK: - search
-
-    private var searchList: some View {
-        List(results) { rp in
-            HStack(spacing: 12) {
-                VStack(alignment: .leading) {
-                    Text(rp.product.name).font(.headline)
-                    Text(rp.producer.name).font(.caption).foregroundStyle(.secondary)
-                    if let abv = rp.product.spec.abvPct {
-                        Text("\(abv.value, specifier: "%.1f")% ABV").font(.caption2)
+                    HStack {
+                        Text("Recent")
+                        Spacer()
+                        Button("Clear") {
+                            env.recents.clear()
+                            recents = []
+                        }
+                        .font(.caption)
+                        .textCase(nil)
                     }
                 }
-                Spacer()
-                // Recall: your own verdict, at the 24pt list size (the heavier stroke).
-                ReactionBadge(reaction: env.reactions.reaction(for: rp.product.id))
             }
+        }
+    }
+
+    // MARK: - results
+
+    private var resultsList: some View {
+        List(results) { rp in
+            Button { open(rp) } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(DisplayName.label(rp.product.name, brand: rp.brand.name))
+                            .font(.headline).foregroundStyle(Brand.text)
+                        Text(DisplayName.producer(rp.producer.name))
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let abv = rp.product.spec.abvPct {
+                            Text("\(abv.value, specifier: "%.1f")% ABV")
+                                .font(.caption2).foregroundStyle(Brand.textMuted)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    // Recall: your own verdict, at the 24pt list size (the heavier stroke).
+                    ReactionBadge(reaction: env.reactions.reaction(for: rp.product.id))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .overlay {
             if searching {
@@ -158,75 +121,25 @@ struct SearchView: View {
         }
     }
 
-    private func run() async {
-        guard !query.isEmpty else { return }
+    /// A search result is already the whole product, so this opens straight from what is on
+    /// screen — unlike a recommendation, which is a name and an id and has to be fetched.
+    /// No personal score: nothing here was ranked for anyone, and a seal on the detail screen
+    /// would be inventing one.
+    private func open(_ rp: ResolvedProduct) {
+        detail = ScoredCandidate(resolved: rp, matchScore: 1.0)
+    }
+
+    private func run(_ term: String) async {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         searching = true
-        submitted = query
+        submitted = trimmed
         defer { searching = false }
-        results = (try? await env.api.searchProducts(query)) ?? []
-    }
-}
-
-/// One suggestion. The score is shown because the whole point is that it is a prediction
-/// about you, and the evidence chip because a guess from a style centroid and a profile of
-/// this exact drink are not the same claim.
-struct PickRow: View {
-    let pick: Recommendation
-    let mine: Reaction?
-    let busy: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(pick.name)
-                    .font(.headline).foregroundStyle(Brand.text)
-                    .lineLimit(2)
-                if let producer = pick.producer, !producer.isEmpty {
-                    Text(DisplayName.producer(producer))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 6) {
-                    Text(pick.reason)
-                        .font(.caption).foregroundStyle(Brand.amber)
-                        .lineLimit(1)
-                    EvidenceChip(evidence: pick.evidence)
-                }
-            }
-            Spacer(minLength: 8)
-            if busy {
-                ProgressView().controlSize(.small)
-            } else if mine != nil {
-                ReactionBadge(reaction: mine)
-            } else {
-                // Truncated, not rounded -- the detail screen prints `Int(score * 100)`,
-                // and a number that changes by one when you tap the row reads as a bug.
-                Text("\(Int(pick.score * 100))")
-                    .font(.callout.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(Brand.amber)
-            }
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-    }
-}
-
-struct EvidenceChip: View {
-    let evidence: Recommendation.Evidence
-
-    private var tint: Color {
-        switch evidence {
-        case .rated: return .green
-        case .known: return Brand.amber
-        case .guessed: return Brand.textMuted
-        }
-    }
-
-    var body: some View {
-        Text(evidence.rawValue)
-            .font(.caption2)
-            .padding(.horizontal, 5).padding(.vertical, 1)
-            .background(tint.opacity(0.15), in: Capsule())
-            .foregroundStyle(tint)
-            .accessibilityLabel(evidence.blurb)
+        results = (try? await env.api.searchProducts(trimmed)) ?? []
+        // Recorded whatever came back: "no matches" is a thing you may well want to try again
+        // later, spelled differently, and hiding it makes the history a record of the app's
+        // successes rather than of what you were after.
+        env.recents.record(trimmed)
+        recents = env.recents.all()
     }
 }
