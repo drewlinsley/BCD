@@ -32,6 +32,9 @@ final class AppEnvironment: ObservableObject {
     let reactions: ReactionLog
     /// Drinks the user has opened — the queue the Rate tab works through.
     let seen: SeenLog
+    /// What this install has searched for, so the Search tab opens on your own history
+    /// rather than on a placeholder.
+    let recents: RecentSearches
     /// Pseudonymous per-install id. The only identity the server keys a profile on.
     let installId: String
 
@@ -51,6 +54,7 @@ final class AppEnvironment: ObservableObject {
          consent: ConsentStore = ConsentStore(),
          reactions: ReactionLog = ReactionLog(),
          seen: SeenLog = SeenLog(),
+         recents: RecentSearches = RecentSearches(),
          installId: String = InstallIdentity.current) {
         self.api = api
         self.llm = llm
@@ -59,6 +63,7 @@ final class AppEnvironment: ObservableObject {
         self.consent = consent
         self.reactions = reactions
         self.seen = seen
+        self.recents = recents
         self.installId = installId
     }
 
