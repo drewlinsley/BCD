@@ -288,3 +288,26 @@ def test_a_whisky_rested_in_one_cask_at_one_strength():
     # but a flavoured bottling may state several flavours at once
     assert set(whisky_marks("Austin Peppered Maple Blood Orange Bourbon")) >= \
         {"maple", "pepper_flavor", "citrus_flavor"}
+
+
+def test_smoke_is_a_mark_a_label_states_not_a_style():
+    """"smoky"/"smoke" were keywords for `peated_scotch`, so 520 rows reached an Islay centroid
+    at smoky_peat 0.9 with no peat on the label: "1930 Smoked Rum", "Archrival Smoked Gin",
+    "Alma Loca Original Smoked Margarita", the whole Ole Smoky moonshine line (2026-09-24).
+    Smoke now reaches the vector as a whisky MARK, on top of whatever the row really is."""
+    for name, hint, want in [("1930 Smoked Rum", "Rum Specialties", "rum"),
+                             ("Archrival Smoked Gin", "Distilled Gin", "gin"),
+                             ("Ole Smoky Dill Pickle Moonshine",
+                              "Other Specialties & Proprietaries", "herbal_liqueur"),
+                             ("Arby's Smoked Bourbon", "Bourbon Whisky", "bourbon")]:
+        assert detect_style(f"{hint} {name}", Category.SPIRIT, class_type=hint) == want, name
+    # peat itself, and the distilleries famous for it, still name a peated Scotch
+    for name in ("Whiskey Del Bac Ode To Islay", "Nikka Yoichi Peaty & Salty",
+                 "Laphroaig 10", "Westland Peat Week"):
+        assert detect_style(name, Category.SPIRIT) == "peated_scotch", name
+    # and a smoked bourbon is a bourbon WITH smoke in it, not a Scotch
+    smoked = sensory_from_style("Arby's Smoked Bourbon", Category.SPIRIT,
+                                style_hint="Bourbon Whisky").axes
+    assert "smoked" in whisky_marks("Arby's Smoked Bourbon")
+    assert smoked["smoky_peat"] == 0.25
+    assert smoked["vanilla_oak"] == _CENTROIDS["bourbon"]["vanilla_oak"]

@@ -373,8 +373,14 @@ def _specific_agave_style(n: str, cls: str | None) -> str | None:
 
 
 _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("peated_scotch", ("islay", "peated", "peat", "laphroaig", "lagavulin", "ardbeg", "smoky",
-                       "smoke")),
+    # "smoky"/"smoke" used to live here and claimed 520 rows that are not Scotch and mostly not
+    # whisky at all: "1930 Smoked Rum", "Archrival Smoked Gin", "Alma Loca Original Smoked
+    # Margarita", and the whole Ole Smoky moonshine line -- every one handed an Islay centroid
+    # at smoky_peat 0.9 (2026-09-24). Smoke is a MARK a label states, not a style: it reaches
+    # the vector through `_WHISKY_MARKS` instead, on top of whatever the row actually is, so a
+    # smoked bourbon is a bourbon with smoke in it. Only peat itself, and the distilleries
+    # famous for it, name a peated Scotch.
+    ("peated_scotch", ("islay", "peated", "peat", "laphroaig", "lagavulin", "ardbeg")),
     ("scotch", ("single malt", "scotch", "speyside", "highland", "glen", "macallan", "ecosse",
                 "chivas", "ballantine", "grant", "famous grouse", "johnnie walker")),
     ("irish_whiskey", ("irish", "jameson", "tullamore", "bushmills", "irlandais")),
