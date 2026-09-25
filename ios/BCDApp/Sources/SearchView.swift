@@ -46,6 +46,10 @@ struct SearchView: View {
                 if new.isEmpty { results = []; submitted = nil }
             }
             .task { await loadPicks() }
+            // A rating moves the profile this list is ranked with, so the list it produced a
+            // moment ago is no longer the answer. Reloaded here rather than left to a pull:
+            // watching the suggestions change is the whole point of having rated anything.
+            .onChange(of: env.ratingsVersion) { _, _ in Task { await loadPicks() } }
             .sheet(item: $detail) { ProductDetailView(candidate: $0) }
         }
     }

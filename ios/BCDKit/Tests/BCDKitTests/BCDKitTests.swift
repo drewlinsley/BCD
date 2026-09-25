@@ -110,6 +110,27 @@ import Foundation
         #expect(count == 1)
     }
 
+    @Test func sayingYesLaterTakesEffectOnTheNextEvent() async {
+        // The queue is built at launch, when personalization is off. Holding that answer as
+        // a constant, it went on refusing the tier for the rest of the run -- so the first
+        // rating a user ever gave, the one that turns the loop on, was dropped on its way
+        // out of the app and only a relaunch fixed it (2026-09-24).
+        let q = TelemetryQueue(consent: ConsentState(analytics: true, personalization: false))
+        #expect(!(await q.log("rating_submitted", tier: .personalization)))
+        await q.setConsent(ConsentState(analytics: true, personalization: true))
+        #expect(await q.log("rating_submitted", tier: .personalization))
+        #expect(await q.pendingCount == 1)
+    }
+
+    @Test func takingItBackStopsTheNextEvent() async {
+        // And it reads both ways, or "turn this off any time under You" would be a lie.
+        let q = TelemetryQueue(consent: ConsentState(analytics: true, personalization: true))
+        #expect(await q.log("rating_submitted", tier: .personalization))
+        await q.setConsent(ConsentState(analytics: true, personalization: false))
+        #expect(!(await q.log("rating_submitted", tier: .personalization)))
+        #expect(await q.pendingCount == 1)   // the one already accepted keeps its place
+    }
+
     @Test func flushClearsOnlyAfterSinkAccepts() async throws {
         let sink = CountingSink()
         let q = TelemetryQueue(consent: ConsentState(analytics: true), sink: sink)

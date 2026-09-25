@@ -147,3 +147,34 @@ def test_a_name_that_says_only_its_kind_cannot_stand_for_the_rest():
 def test_no_taste_vector_yet_still_ranks_the_catalog(store):
     got = rank_catalog(store, Resolver(store), TasteProfile(user_id="new"), limit=3)
     assert len(got) == 3 and all(r["reason"] == "based on style" for r in got)
+
+
+# --- what you have already judged is not a suggestion ---------------------------------
+
+
+def test_a_drink_you_have_rated_is_not_recommended(store):
+    """The list is what to drink next. "For you" led with a beer whose own row on the same
+    screen carried the face for `spat it out`, because nothing ever took a rated product
+    out of the ranking (2026-09-24)."""
+    all_names = [r["name"] for r in rank_catalog(store, Resolver(store), PROFILE, limit=10)]
+    assert "Sip of Sunshine" in all_names
+    got = rank_catalog(store, Resolver(store), PROFILE, limit=10, exclude={"sip"})
+    names = [r["name"] for r in got]
+    assert "Sip of Sunshine" not in names
+    # ...and the rest of the order is untouched: this removes an entry, it does not re-rank.
+    assert names == [n for n in all_names if n != "Sip of Sunshine"]
+
+
+def test_rating_one_row_of_a_beer_retires_the_beer(store):
+    """`Truth India Pale Ale` and `Rhinegeist Truth` are two registry rows of one beer on one
+    vector, and this module's own rule is that such rows are the same recommendation. Taking
+    out only the row the user rated would put its twin in the list under another name --
+    which is the same suggestion, and would read as the app ignoring the verdict."""
+    got = rank_catalog(store, Resolver(store), PROFILE, limit=10, exclude={"truth1"})
+    names = [r["name"] for r in got]
+    assert "Rhinegeist Truth" not in names and "Truth India Pale Ale" not in names
+
+
+def test_excluding_nothing_changes_nothing(store):
+    before = rank_catalog(store, Resolver(store), PROFILE, limit=10)
+    assert rank_catalog(store, Resolver(store), PROFILE, limit=10, exclude=set()) == before

@@ -3,6 +3,10 @@ import BCDKit
 
 // The rating surface: the drinks you've looked at, waiting for a verdict.
 //
+// No longer the only door. A product's own screen opens the same picker in a sheet, which is
+// where a verdict is actually given -- you have the drink in front of you. This is the
+// worklist for the ones you meant to come back to.
+//
 // Deliberately a thin host. Everything that matters happens in `ReactionPicker`, which knows
 // nothing about this screen — it takes a product id and talks to the profile. If rating later
 // belongs somewhere else (a "had it" list, a sheet off the scan HUD, a widget), moving it is a
@@ -62,7 +66,7 @@ struct RateView: View {
         ContentUnavailableView(
             "Nothing to rate yet",
             image: "Reaction3",
-            description: Text("Drinks you open from a scan show up here.")
+            description: Text("Drinks you open — from a scan or from Discover — show up here.")
         )
     }
 

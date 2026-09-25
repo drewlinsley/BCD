@@ -6,6 +6,12 @@ import BCDKit
 // it, how strong it is, what it is, where it's from, and what it tastes like. Rating
 // belongs to a drink you've already had, and lives in the Rate tab.
 //
+// Rating opens from here as a sheet rather than living on the page. The screen's job is
+// still the choice, and the five-glyph picker with its readout would be the loudest thing
+// on it; but the Rate tab was the *only* door, so a drink you had just identified could not
+// be rated without leaving the thing you were looking at, and in practice no verdict was
+// ever given (2026-09-24). One tap, same picker, same profile.
+//
 // Drawn as a label rather than a settings list. The catalog can't fill a table: `style`
 // exists on 9 of 915 products and a producer city on about one in eight, so a grid of
 // rows is mostly empty rows. A label has a shape that survives missing fields — the name
@@ -16,9 +22,10 @@ struct ProductDetailView: View {
     let candidate: ScoredCandidate
     @EnvironmentObject var env: AppEnvironment
 
-    /// This install's own verdict, if it has one. Read once on appear — the picker lives
-    /// in the Rate tab, so it cannot change while this screen is up.
+    /// This install's own verdict, if it has one. Re-read when the rating sheet closes,
+    /// because the Seal and the verdict line both change the moment one is given.
     @State private var myReaction: Reaction?
+    @State private var rating = false
 
     private var product: Product { candidate.resolved.product }
     private var producer: Producer { candidate.resolved.producer }
@@ -35,6 +42,7 @@ struct ProductDetailView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     label
                     verdict
+                    rateButton
                     taste
                     if !product.recipe.ingredients.isEmpty { ingredients }
                 }
@@ -43,6 +51,14 @@ struct ProductDetailView: View {
             .background(Brand.surface)
             .navigationTitle(productName)
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $rating) {
+                RatingSheet(productId: product.id, productName: productName)
+            }
+            // The sheet writes through `ReactionLog`, so the verdict is on disk by the time
+            // it closes; this is what puts it on the label.
+            .onChange(of: rating) { _, open in
+                if !open { myReaction = env.reactions.reaction(for: product.id) }
+            }
             .task {
                 // Opening a product is the deliberate act that earns it a place in the Rate
                 // queue; merely crossing the viewfinder does not.
@@ -178,6 +194,32 @@ struct ProductDetailView: View {
                 .foregroundStyle(Brand.textMuted)
                 .padding(.horizontal, 4)
         }
+    }
+
+    /// The one write this screen offers. Worded as the question it is — you can only rate
+    /// what you have drunk — so it reads as an invitation rather than a demand, and says
+    /// what it is for once a verdict exists.
+    private var rateButton: some View {
+        Button { rating = true } label: {
+            HStack(spacing: 8) {
+                if let mine = myReaction {
+                    ReactionGlyph(reaction: mine, size: 22)
+                    Text("Change your rating")
+                } else {
+                    Image(systemName: "hand.thumbsup")
+                    Text("Had it? Rate it")
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Brand.textMuted)
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(myReaction == nil ? Brand.amber : Brand.text)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .cardChrome()
     }
 
     // MARK: - what it tastes like

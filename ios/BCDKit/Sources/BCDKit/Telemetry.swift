@@ -80,7 +80,11 @@ public enum TelemetryValue: Codable, Sendable, Equatable {
 
 public actor TelemetryQueue {
     private var pending: [TelemetryEnvelope] = []
-    private let consent: ConsentState
+    /// Read live, not snapshotted. Held as a constant, a queue built at launch went on
+    /// refusing personalization-tier events for the rest of the run after the user turned
+    /// the toggle on -- so the rating that was meant to start the loop was dropped on its
+    /// way out, silently, and only a relaunch fixed it (2026-09-24).
+    private var consent: ConsentState
     private let sessionId: String
     private let flushThreshold: Int
     private let sink: APIClientProtocol?
@@ -99,6 +103,10 @@ public actor TelemetryQueue {
             pending = saved
         }
     }
+
+    /// The user changed their mind. Takes effect on the next event rather than the next
+    /// launch; already-queued events keep the tier they were accepted under.
+    public func setConsent(_ state: ConsentState) { consent = state }
 
     /// Enqueue an event. Returns false if consent for its tier is absent (dropped).
     @discardableResult

@@ -35,6 +35,17 @@ final class AppEnvironment: ObservableObject {
     /// Pseudonymous per-install id. The only identity the server keys a profile on.
     let installId: String
 
+    /// Bumped when the server has accepted a rating. The Discover list ranks with the taste
+    /// profile that rating just moved, so it is stale the moment one lands -- and a list that
+    /// still says "Somewhere to start" after you have told it what you think is the one thing
+    /// that makes the loop look broken when it is working.
+    @Published private(set) var ratingsVersion = 0
+
+    /// A rating reached the profile. Called by the picker, not by the local log: what moves
+    /// the ranking is the server accepting it, and a verdict kept on the phone changes
+    /// nothing the list would show.
+    func ratingAccepted() { ratingsVersion += 1 }
+
     init(api: APIClientProtocol, llm: LLMProvider, telemetry: TelemetryQueue,
          makeScanEngine: @escaping () -> ScanEngine,
          consent: ConsentStore = ConsentStore(),
@@ -57,6 +68,9 @@ final class AppEnvironment: ObservableObject {
         let consent = ConsentStore()
         let telemetry = TelemetryQueue(consent: consent.state, sink: api,
                                        storeURL: Self.telemetryStoreURL())
+        // ...and told when that answer changes. Without this the queue keeps the answer it
+        // was built with, so saying yes to personalization took effect on the next launch.
+        consent.onChange = { state in Task { await telemetry.setConsent(state) } }
         // Pick the LLM provider available on this device. Foundation Models is used only
         // where it exists AND is ready; otherwise the mock (or a cloud provider) stands in.
         let llm = Self.bestLLMProvider()
