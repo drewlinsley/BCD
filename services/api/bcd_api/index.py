@@ -97,6 +97,24 @@ CANDIDATES = 48
 #: three to them.
 PER_TOKEN = 8
 EXACT_WEIGHT, FUZZY_WEIGHT, PREFIX_WEIGHT = 1.0, 0.7, 0.6
+#: Widest a class may be and still tell rows apart: one row in twenty. See `_kind_lists`.
+KIND_MAX_SHARE = 0.05
+#: A category word ("GIN", "STOUT") names no product, so `identifying_tokens` drops it and
+#: it can never reach a row. But it is often the only thing that tells the rows a name word
+#: *did* reach apart, and when that name word is common the rows it reaches all tie: a bottle
+#: of Gray Whale Gin read as "WHALE GIN" put 508 rows on the one token `whale`, eleven of them
+#: strictly above `Gray Whale Gin` and a hundred and sixty-nine level with it, for the
+#: thirty-seven places left. Which of the tied went through was the order of a dict, and the
+#: gin -- a 1.00 against that line, and the top candidate the moment it is scored at all --
+#: lost its place to `Xhale Ale` and `Shale Pale Ale`. It went unresolved through all 122
+#: frames of a session while a Missouri ale called `Whale` was offered for it (2026-09-23).
+#:
+#: So it breaks the tie and does nothing else. Credited as *evidence* instead -- weighted like
+#: a name word, added to the sum -- it promoted every row whose name is mostly its category:
+#: `Cerveza Negra` took three frames of a Modelo Negra, `Draught Stout` thirteen of a
+#: Guinness, and `bière fruitée` eight more (measured over 1,817 logged frames, and reverted).
+#: A row that says less than the label cannot be allowed to win by saying it; a tie-break
+#: cannot reorder rows that are not tied, so it cannot.
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
@@ -194,6 +212,16 @@ def _windows(s: str, up_to: int = 0) -> tuple[frozenset[str], ...]:
     return tuple(out)
 
 
+def _in_sorted(lists: list[array], r: int) -> bool:
+    """Whether row `r` is in any of these posting lists. A list is built in row order, so it
+    is sorted, and a membership test is a bisect rather than a set of two hundred thousand."""
+    for rows in lists:
+        j = bisect.bisect_left(rows, r)
+        if j < len(rows) and rows[j] == r:
+            return True
+    return False
+
+
 def similarity(a: str, b: str) -> float:
     return _jaccard(_trigrams(a), _trigrams(b))
 
@@ -238,7 +266,9 @@ class LabelIndex:
     """Identifying-token postings over products and producers, plus what a match needs to
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
-    FORMAT = 4      # 2: suffix lookups; 3: aliases indexed and scored; 4: possessives one word
+    # 2: suffix lookups; 3: aliases indexed and scored; 4: possessives one word;
+    # 5: category words indexed
+    FORMAT = 5
 
     def __init__(self) -> None:
         self.signature: str = ""
@@ -271,6 +301,10 @@ class LabelIndex:
         # "IPA", "J&B", "1664" — keyed by flattened name and by their (generic) words
         self.by_flat_name: dict[str, array] = {}
         self.generic_post: dict[int, array] = {}
+        # ...and every product by the category words of its name and its filed style -- the
+        # word a label prints for what is in the bottle. Never a way to reach a row, only a
+        # way to order the rows a name word reached: see `_kind_lists` and `_token_stage`.
+        self.kind_post: dict[int, array] = {}
         self.built_at: float = 0.0
         self.build_seconds: float = 0.0
 
@@ -330,6 +364,15 @@ class LabelIndex:
                     ix.by_flat_name.setdefault(flat, array("i")).append(i)
                 for w in _words(qualified):
                     ix._post(ix.generic_post, w, i)
+            # What the row was *filed* as, and only that. Its name is already the string the
+            # trigram stage compares the line against, so the name's own category words are
+            # information the scoring has; the registered class is information it has never
+            # had. Taking both let a row named for its category win a tie on the strength of
+            # its name twice over: `Cerveza Negra`, a lager, took four frames of a Modelo
+            # Negra whose wordmark had been read as "odelo" (2026-09-23).
+            for tok in sorted({w for w in _words((rec.get("style") or {}).get("value") or "")
+                               if len(w) >= MIN_TOKEN and is_generic_token(w)}):
+                ix._post(ix.kind_post, tok, i)
 
         ix.sorted_tokens = sorted(ix.token_id)
         ix.sorted_reversed = sorted(t[::-1] for t in ix.token_id)
@@ -472,7 +515,15 @@ class LabelIndex:
         acc, reached = self._token_evidence(text, table, size)
         if len(acc) <= CANDIDATES:
             return sorted(acc, key=acc.__getitem__, reverse=True)
-        chosen = [r for r, _ in heapq.nlargest(CANDIDATES, acc.items(), key=lambda kv: kv[1])]
+        # Level rows are settled by whether the label's word for the drink is this row's own.
+        kinds = self._kind_lists(text) if table is self.product_post else []
+        if kinds:
+            def rank(kv: tuple[int, float]) -> tuple[float, bool]:
+                return kv[1], _in_sorted(kinds, kv[0])
+        else:
+            def rank(kv: tuple[int, float]) -> tuple[float, bool]:
+                return kv[1], False
+        chosen = [r for r, _ in heapq.nlargest(CANDIDATES, acc.items(), key=rank)]
         seen = set(chosen)
         for lists in reached:
             rows = {r for lst in lists for r in lst}
@@ -487,6 +538,28 @@ class LabelIndex:
                     seen.add(r)
                     chosen.append(r)
         return chosen
+
+    def _kind_lists(self, text: str) -> list[array]:
+        """Posting lists of the category words this line prints that actually divide the
+        catalog — the rows filed as what the label says the drink is.
+
+        A word that is the class of a quarter of everything sorts nothing. ALE is filed
+        against 154,000 rows, and reading it off "MIST-VERMONT ALE" -- a Heady Topper can,
+        ALCHEMIST VERMONT with the wordmark broken -- drew `U.s.s. Vermont Ale`, which shares
+        that word with every other ale in the catalog. STOUT is 3% and GIN 2%: those say which
+        rows the bottle could be. The line falls where the words every label of its kind
+        carries -- ale, beer, ipa -- stop being evidence and become the background.
+        """
+        cap = KIND_MAX_SHARE * len(self.ids)
+        out: list[array] = []
+        for w in dict.fromkeys(_words(text)):
+            if len(w) < MIN_TOKEN or not is_generic_token(w):
+                continue
+            tid = self.token_id.get(w)
+            rows = self.kind_post.get(tid) if tid is not None else None
+            if rows and len(rows) <= cap:
+                out.append(rows)
+        return out
 
     def _generic_stage(self, text: str) -> list[int]:
         """A line with nothing identifying in it can only name a product whose name is

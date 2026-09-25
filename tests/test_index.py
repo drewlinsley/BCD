@@ -9,6 +9,7 @@ import pytest
 from bcd_api.index import (
     IndexedStore,
     LabelIndex,
+    _in_sorted,
     identifying_tokens,
     match_score,
     similarity,
@@ -21,9 +22,12 @@ from bcd_schema import (
     Category,
     DetectedObject,
     DetectedText,
+    ExtractionMethod,
     Producer,
     Product,
+    Provenance,
     ScanResolveRequest,
+    Sourced,
 )
 
 
@@ -407,3 +411,96 @@ def test_the_plain_gin_is_not_east_until_bombay_is_read():
     resp = resolver.resolve(ScanResolveRequest(objects=[DetectedObject(id="o1", texts=[*lines, "BOMBAY"])]))
     assert resp.objects[0].status == "resolved"
     assert [c.resolved.product.id for c in resp.objects[0].candidates] == ["p:plain"]
+
+
+# --- the label's word for the drink, as a tie-break -----------------------------------
+
+
+_KIND_PROV = Provenance(source_id="ttb", method=ExtractionMethod.REGULATORY_FILING,
+                        confidence=1.0)
+
+
+def _whale_shelf() -> MedallionStore:
+    """A catalog shaped like the one around a bottle of Gray Whale Gin on 2026-09-23.
+
+    "WHALE" is one identifying word and hundreds of rows carry it; GIN, the other word on
+    the label, is a category word and reaches none of them. So the rows tie -- level on the
+    one token they share -- and which of them fills the last of the `CANDIDATES` places was
+    the order of a dict. The gin scores 1.00 against that line and was never scored at all.
+    """
+    s = MedallionStore(root=tempfile.mkdtemp())
+    s.put_gold("prod:x", "producer",
+               Producer(id="prod:x", name="Some House").model_dump(mode="json"))
+
+    def product(pid: str, name: str, cat: Category, style: str | None) -> None:
+        s.put_gold(pid, "product", Product(
+            id=pid, name=name, producer_id="prod:x", brand_id="brand:none", category=cat,
+            style=None if style is None else Sourced[str](value=style, provenance=_KIND_PROV),
+        ).model_dump(mode="json"))
+
+    # every one of these carries "whale" and nothing else the label says
+    for i in range(400):
+        product(f"p:whale{i}", f"Whale Q{i}ver", Category.BEER, "Ale")
+    product("p:whale", "Whale", Category.BEER, "Ale")
+    product("p:gin", "Gray Whale Gin", Category.SPIRIT, "Contemporary gin")
+    return s
+
+
+def test_the_labels_word_for_the_drink_settles_a_tie_between_level_rows():
+    """"WHALE GIN" off a bottle of Gray Whale Gin. Four hundred rows tie on `whale`, and the
+    gin is the only one the registry filed as a gin: the word the label prints for what is in
+    the bottle is the whole of the difference between them (2026-09-23)."""
+    index = LabelIndex.build(_whale_shelf())
+    ids = [pid for pid, _ in index.match_products("WHALE GIN", limit=3)]
+    assert "p:gin" in ids, ids
+
+
+def test_a_category_word_still_reaches_nothing_on_its_own():
+    """It sorts the rows a name word found; it does not find any. Otherwise GIN alone would
+    reach every gin in the catalog, which is the reason `identifying_tokens` drops it."""
+    index = LabelIndex.build(_whale_shelf())
+    assert index.match_products("GIN", limit=3) == []
+
+
+def test_a_class_a_quarter_of_the_catalog_shares_sorts_nothing():
+    """ALE is filed against 154,000 of the real catalog's rows. Reading it off "MIST-VERMONT
+    ALE" -- a Heady Topper can, ALCHEMIST VERMONT with the wordmark broken -- drew
+    `U.s.s. Vermont Ale`, which shares that word with every other ale there is (2026-09-23).
+    Here every filler row is an ale, so the word divides nothing and must not order anything.
+    """
+    index = LabelIndex.build(_whale_shelf())
+    assert index._kind_lists("WHALE ALE") == []
+    assert index._kind_lists("WHALE GIN"), "a class 1 row in 400 carries is still evidence"
+
+
+def test_a_category_word_in_a_rows_name_does_not_promote_it():
+    """`Cerveza Negra` is a lager. Its name carries CERVEZA, and a can of Modelo Negra prints
+    CERVEZA too, so counting the word off the *name* handed it four frames of the Modelo
+    whose wordmark had been read as "odelo" (measured over 1,817 logged frames, and
+    reverted). A row's name is already the string the trigram stage scores the line against;
+    only what the registry filed it as is new information, and that is all this reads."""
+    s = _whale_shelf()
+    s.put_gold("p:named", "product", Product(
+        id="p:named", name="Whale Gin Blossom", producer_id="prod:x", brand_id="brand:none",
+        category=Category.BEER, style=Sourced[str](value="Ale", provenance=_KIND_PROV),
+    ).model_dump(mode="json"))
+    index = LabelIndex.build(s)
+    pos = {pid: i for i, pid in enumerate(index.ids)}
+    rows = index._kind_lists("WHALE GIN")
+    assert rows, "the gin's own class is still read"
+    assert not _in_sorted(rows, pos["p:named"]), "an ale is not a gin"
+    assert _in_sorted(rows, pos["p:gin"])
+
+
+def test_the_tie_break_cannot_reorder_rows_that_are_not_tied():
+    """It is the second half of the sort key, so it settles equals and nothing else. A row
+    the line names two words of outranks one it names a word of however well the label and
+    the registry agree about the class -- which is what keeps a row that says less than the
+    label from winning by saying it."""
+    index = LabelIndex.build(_whale_shelf())
+    pos = {pid: i for i, pid in enumerate(index.ids)}
+    # "Q7VER" is `Whale Q7ver`'s own word: that row is named by two of the line's words and
+    # the gin by one, and only the gin is filed as what the line says the drink is.
+    acc, _ = index._token_evidence("WHALE Q7VER GIN", index.product_post, len(index.ids))
+    assert acc[pos["p:whale7"]] > acc[pos["p:gin"]]
+    assert [pid for pid, _ in index.match_products("WHALE Q7VER GIN", limit=1)] == ["p:whale7"]
