@@ -1705,3 +1705,39 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         #expect(r.all().isEmpty)
     }
 }
+
+@Suite struct SimilarProfileRoute {
+    /// The bug this exists for: ids carry colons, and percent-encoding one before handing it to
+    /// `appendingPathComponent` gets the `%` escaped in turn. The app sent
+    /// `ttb%253A94033604`, the server returned 404, and the view's `try?` turned that into "no
+    /// similar products" -- indistinguishable on screen from a row that genuinely has none.
+    @Test func anIdWithAColonSurvivesTheRoundTripThroughTheURL() throws {
+        let base = URL(string: "http://127.0.0.1:8000")!
+        let url = base.appendingPathComponent("v1/product")
+            .appendingPathComponent("ttb:94033604")
+            .appendingPathComponent("similar")
+        let comps = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        #expect(comps.path == "/v1/product/ttb:94033604/similar")
+        #expect(try #require(comps.url).absoluteString.contains("%253A") == false)
+    }
+
+    @Test func aStyleOnlyAnswerDecodesToAnEmptySection() throws {
+        let json = #"{"product_id":"x","basis":"style_only","results":[]}"#
+        let out = try JSONDecoder().decode(SimilarResponse.self, from: Data(json.utf8))
+        #expect(out.basis == .styleOnly)
+        #expect(out.results.isEmpty)
+    }
+
+    @Test func aNeighbourCarriesItsEvidenceAndHowManyTasteIdentical() throws {
+        let json = """
+        {"product_id":"a","basis":"profile","results":[
+          {"product_id":"b","name":"Big Peat","producer":"Monarch","evidence":"known","also":10}]}
+        """
+        let out = try JSONDecoder().decode(SimilarResponse.self, from: Data(json.utf8))
+        #expect(out.basis == .profile)
+        let row = try #require(out.results.first)
+        #expect(row.name == "Big Peat")
+        #expect(row.evidence == .known)
+        #expect(row.also == 10)
+    }
+}

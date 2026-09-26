@@ -7,7 +7,16 @@ from __future__ import annotations
 import tempfile
 
 import pytest
-from bcd_api.recommend import GUESSED, KNOWN, RATED, evidence_tier, rank_catalog, rank_key
+from bcd_api.recommend import (
+    GUESSED,
+    KNOWN,
+    RATED,
+    _legible,
+    evidence_tier,
+    rank_catalog,
+    rank_key,
+    similar_profile,
+)
 from bcd_api.resolver import Resolver
 from bcd_ingest.store import MedallionStore
 from bcd_schema import (
@@ -178,3 +187,54 @@ def test_rating_one_row_of_a_beer_retires_the_beer(store):
 def test_excluding_nothing_changes_nothing(store):
     before = rank_catalog(store, Resolver(store), PROFILE, limit=10)
     assert rank_catalog(store, Resolver(store), PROFILE, limit=10, exclude=set()) == before
+
+
+# ---- what else tastes like this -------------------------------------------------------------
+
+def test_a_row_carrying_its_styles_centroid_has_nothing_to_be_similar_to(store):
+    """507,341 of 534,103 products are in this state. Their vector is their style's average, so
+    the nearest rows are every other row of that style, all at distance zero -- a style filter
+    wearing a similarity list. Saying so is the honest answer."""
+    floor = Product.model_validate(store.get_gold("floor0"))
+    assert similar_profile(store, floor) == {"basis": "style_only", "results": []}
+
+
+def test_a_profiled_row_gets_its_neighbours_nearest_first(store):
+    """On the live catalog this is what earns the feature: Lagavulin 16 returns Bunnahabhain
+    Moine and Ardbeg An Oa, Campari returns Aperol and Calisaya."""
+    heady = Product.model_validate(store.get_gold("heady"))
+    out = similar_profile(store, heady)
+    assert out["basis"] == "profile"
+    names = [r["name"] for r in out["results"]]
+    assert "The Alchemist Heady Topper" not in names          # never itself
+    assert "Sip of Sunshine" in names                          # the nearest real profile
+    assert names.index("Sip of Sunshine") < names.index("Rated Stout")
+
+
+def test_one_row_per_maker(store):
+    """Guinness Draught's nearest are Guinness Dublin and Guinness 0.0%: the same drink
+    answering a question about what else to try."""
+    heady = Product.model_validate(store.get_gold("heady"))
+    makers = [r["producer"] for r in similar_profile(store, heady)["results"]]
+    assert len(makers) == len(set(makers))
+
+
+def test_the_name_shown_for_a_shared_vector_is_the_one_a_drinker_could_repeat(store):
+    """Two rows of one beer share a vector, so one stands for both -- and it has to be the
+    plainer name. The same rule `rank_catalog` uses, so the two lists cannot disagree about
+    what a vector is called."""
+    heady = Product.model_validate(store.get_gold("heady"))
+    hits = {r["name"]: r for r in similar_profile(store, heady)["results"]}
+    assert "Rhinegeist Truth" in hits
+    assert "Truth India Pale Ale" not in hits
+    assert hits["Rhinegeist Truth"]["also"] == 1               # says one more shares it
+
+
+def test_two_characters_is_not_a_name_a_vector_can_go_by():
+    """The rest of the sort prefers the shortest name -- "Truth" over "Truth India Pale Ale" --
+    which hands the slot to whatever registry stub is shortest of all. A vodka vector shared by
+    ten rows was standing as "PA" on the live catalog, and an Italian bitter as "Aper@it"."""
+    assert _legible("PA") == 2
+    assert _legible("Aper@it") == 0          # seven letters; odd, but it names something
+    assert _legible("Truth") == 0
+    assert _legible("mezcal") == 2
