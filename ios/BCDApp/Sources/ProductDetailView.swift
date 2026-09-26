@@ -100,8 +100,15 @@ struct ProductDetailView: View {
                 // Your own verdict replaces the prediction. Once you have actually had
                 // the thing, what a model guessed you would think is not the number worth
                 // the most prominent spot on the label.
+                //
+                // And once it is your verdict it is also the way to change it: the mark
+                // showing what you said is the obvious thing to press when you want to say
+                // something else. The row below stays as the labelled affordance -- a
+                // circle in a dark card does not announce that it is a button.
                 if let mine = myReaction {
-                    Seal(rated: mine)
+                    Button { rating = true } label: { Seal(rated: mine) }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Change your rating")
                 } else if let score = candidate.personalScore {
                     Seal(score: score)
                 }
@@ -165,15 +172,17 @@ struct ProductDetailView: View {
 
     /// One line saying why the seal reads what it reads. The number is on the label; this
     /// is the sentence that makes it arguable rather than oracular.
+    /// Nothing at all once you have rated it. A rating is knowledge and a score is a guess, so
+    /// the guess does not get to argue with it -- and the model's reason goes with it, because
+    /// it explains a prediction this screen is no longer making.
+    ///
+    /// It used to say "You rated this chugged it." here, which made the screen state one fact
+    /// three times: the Seal with your face on it, this sentence, and the row underneath
+    /// carrying the same glyph. The Seal is the one that survives, because it says it in the
+    /// spot the prediction used to hold and says it with the mark rather than about it.
     @ViewBuilder private var verdict: some View {
-        if let mine = myReaction {
-            // A rating is knowledge, a score is a guess, and the guess does not get to
-            // argue with it. The model's reason is withheld too: it explains a prediction
-            // this screen is no longer making.
-            Text("You rated this \(mine.label.lowercased()).")
-                .font(.subheadline)
-                .foregroundStyle(Brand.text)
-                .padding(.horizontal, 4)
+        if myReaction != nil {
+            EmptyView()
         } else if candidate.personalScore != nil {
             VStack(alignment: .leading, spacing: 6) {
                 if let reason = candidate.reason {
