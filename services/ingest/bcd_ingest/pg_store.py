@@ -405,9 +405,17 @@ class PostgresStore:
             cur.execute("DELETE FROM gold WHERE id=%s", (gid,))
 
     def iter_gold(self, entity_type: str) -> Iterator[dict[str, Any]]:
+        """Ordered by id, which costs a sort and buys a reproducible label index.
+
+        Unordered, this returns rows in Postgres heap order, so any pass that rewrites records
+        permutes it -- and the index numbers its rows in exactly this order, which is what breaks
+        ties in `_token_stage`. That is the "tie-order flips 1-3 frames per rebuild" that has
+        taxed every resolver measurement here: a catalog change and the reshuffle it causes were
+        not separable in a replay diff. They are now.
+        """
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
-                "SELECT record FROM gold WHERE entity_type=%s", (entity_type,)
+                "SELECT record FROM gold WHERE entity_type=%s ORDER BY id", (entity_type,)
             ).fetchall()
         for r in rows:
             yield r[0]
