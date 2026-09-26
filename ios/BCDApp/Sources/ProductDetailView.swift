@@ -26,6 +26,13 @@ struct ProductDetailView: View {
     /// because the Seal and the verdict line both change the moment one is given.
     @State private var myReaction: Reaction?
     @State private var rating = false
+    /// Neighbours in the sensory space. Nil until asked, so the section can stay off the screen
+    /// rather than flashing an empty card on every open.
+    @State private var similar: [SimilarProduct]?
+    @State private var openingSimilar: String?
+    /// A neighbour opened from this screen. Presented rather than pushed: this view owns a
+    /// `NavigationStack`, and nesting one inside another costs the back button.
+    @State private var drilldown: ScoredCandidate?
 
     private var product: Product { candidate.resolved.product }
     private var producer: Producer { candidate.resolved.producer }
@@ -44,6 +51,7 @@ struct ProductDetailView: View {
                     verdict
                     rateButton
                     taste
+                    similarProfile
                     if !product.recipe.ingredients.isEmpty { ingredients }
                 }
                 .padding(16)
@@ -54,6 +62,10 @@ struct ProductDetailView: View {
             .sheet(isPresented: $rating) {
                 RatingSheet(productId: product.id, productName: productName)
             }
+            .task(id: product.id) {
+                similar = (try? await env.api.similar(to: product.id, limit: 6))?.results ?? []
+            }
+            .sheet(item: $drilldown) { ProductDetailView(candidate: $0) }
             // The sheet writes through `ReactionLog`, so the verdict is on disk by the time
             // it closes; this is what puts it on the label.
             .onChange(of: rating) { _, open in
@@ -111,6 +123,8 @@ struct ProductDetailView: View {
                         .accessibilityHint("Change your rating")
                 } else if let score = candidate.personalScore {
                     Seal(score: score)
+                } else {
+                    Seal()
                 }
             }
             .padding(.top, 22)
@@ -197,12 +211,10 @@ struct ProductDetailView: View {
                 }
             }
             .padding(.horizontal, 4)
-        } else {
-            Text("Not scored for you yet")
-                .font(.subheadline)
-                .foregroundStyle(Brand.textMuted)
-                .padding(.horizontal, 4)
         }
+        // Nothing when there is no score either. It used to say "Not scored for you yet" in a
+        // bare line under the card, which is the one shape on this screen that is neither a
+        // label nor a tile -- and the Seal now says the same thing, in the spot that means it.
     }
 
     /// The one write this screen offers. Worded as the question it is — you can only rate
@@ -265,6 +277,51 @@ struct ProductDetailView: View {
     /// Shut by default. It is the longest block on the screen and the least load-bearing —
     /// the choice this page exists to serve is already made by the seal and the label, and
     /// a list of twelve malts underneath buries both.
+    /// What else tastes like this. The app's whole argument in one card: a drink nobody has
+    /// reviewed is still placed by what it is made of, so this is answerable for a bottle the
+    /// catalog has never seen a rating for.
+    ///
+    /// About the bottle, not about you — so no score and no "matches your…" line. Two people
+    /// reading this screen see the same list, which is what separates it from Discover.
+    ///
+    /// Silent when the server says `style_only`. 507,341 of 534,103 rows carry their style's
+    /// average rather than a vector of their own, and for those the nearest rows are simply
+    /// every other row of that style. A section listing them would be a style filter claiming
+    /// to be a similarity, so there is no section.
+    @ViewBuilder private var similarProfile: some View {
+        if let similar, !similar.isEmpty {
+            Tile(title: "Similar profile") {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(similar) { row in
+                        Button { Task { await openSimilar(row) } } label: {
+                            SimilarRow(row: row, busy: openingSimilar == row.productId)
+                        }
+                        .buttonStyle(.plain)
+                        if row.id != similar.last?.id {
+                            Divider().overlay(Brand.hairline)
+                        }
+                    }
+                }
+                Text("Nearest flavour profiles in the catalog — not what other people drank.")
+                    .font(.caption2)
+                    .foregroundStyle(Brand.textMuted)
+                    .padding(.top, 6)
+            }
+        }
+    }
+
+    /// A neighbour is a name and an id; the screen this opens wants the whole product. Same
+    /// round trip `DiscoverView` makes, and the id picks the right row out of the answer
+    /// because names repeat in the registry.
+    private func openSimilar(_ row: SimilarProduct) async {
+        openingSimilar = row.productId
+        defer { openingSimilar = nil }
+        let hits = (try? await env.api.searchProducts(row.name)) ?? []
+        guard let match = hits.first(where: { $0.product.id == row.productId })
+                ?? hits.first else { return }
+        drilldown = ScoredCandidate(resolved: match, matchScore: 1.0)
+    }
+
     private var ingredients: some View {
         DisclosureTile(title: "Ingredients & process",
                        count: product.recipe.ingredients.count) {
@@ -287,12 +344,17 @@ private struct Seal: View {
     enum Verdict {
         case predicted(Double)
         case rated(Reaction)
+        /// Nothing to say yet. A product reached by name rather than by the recommender has
+        /// no score for this reader, and the spot has to hold that rather than go empty --
+        /// a label with a hole where its stamp goes looks broken, not silent.
+        case unscored
     }
 
     let verdict: Verdict
 
     init(score: Double) { self.verdict = .predicted(score) }
     init(rated reaction: Reaction) { self.verdict = .rated(reaction) }
+    init() { self.verdict = .unscored }
 
     private var tint: Color {
         switch verdict {
@@ -301,6 +363,10 @@ private struct Seal: View {
                 : (score > 0.5 ? Reaction.fine.tint : Reaction.pouredItOut.tint)
         case .rated(let reaction):
             reaction.tint
+        // Muted, and the same grey the card's own secondary lines use: an absence should not
+        // be as loud as an answer.
+        case .unscored:
+            Brand.cream.opacity(0.45)
         }
     }
 
@@ -325,6 +391,15 @@ private struct Seal: View {
                         .tracking(1.1)
                         .foregroundStyle(tint)
                 }
+            case .unscored:
+                VStack(spacing: 1) {
+                    Text("?")
+                        .font(.system(size: 19, weight: .bold, design: .rounded))
+                    Text("NOT YET")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .tracking(1.1)
+                }
+                .foregroundStyle(tint)
             }
         }
         .frame(width: 68, height: 68)
@@ -337,6 +412,7 @@ private struct Seal: View {
         switch verdict {
         case .predicted(let score): "\(Int(score * 100)) percent likely you'll like it"
         case .rated(let reaction): "You rated this \(reaction.label.lowercased())"
+        case .unscored: "Not scored for you yet"
         }
     }
 }
@@ -390,6 +466,49 @@ private struct CardChrome: ViewModifier {
 
 extension View {
     fileprivate func cardChrome() -> some View { modifier(CardChrome()) }
+}
+
+/// One neighbour. No score: this list is about the bottle, so there is no number that belongs
+/// to the reader. The evidence chip stays, because a profile of this exact drink and a guess
+/// from its style are not the same claim -- the same ladder Discover shows.
+private struct SimilarRow: View {
+    let row: SimilarProduct
+    let busy: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(DisplayName.product(row.name, producer: row.producer ?? ""))
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Brand.text)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let producer = row.producer, !producer.isEmpty {
+                        Text(DisplayName.producer(producer))
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    // Admitted rather than hidden: a vector shared by nine rows is nine rows
+                    // the catalog cannot tell apart, and the reader is entitled to know the
+                    // one on screen was picked to stand for them.
+                    if row.also > 0 {
+                        Text("+\(row.also) alike")
+                            .font(.caption2).foregroundStyle(Brand.textMuted)
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                EvidenceChip(evidence: row.evidence)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Brand.textMuted)
+            }
+        }
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
 }
 
 private struct TileTitle: View {

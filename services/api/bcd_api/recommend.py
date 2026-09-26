@@ -31,6 +31,7 @@ which the ties fill and which stand for the styles.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Collection
 
 from bcd_ingest.store import Store
@@ -96,8 +97,15 @@ def _legible(name: str) -> int:
     """How well a name can stand for every row that shares its vector, smallest first: a name a
     drinker could repeat, then a registry row whose two fields ran together ("4b ,plantation"),
     then one that says no more than its own kind ("mezcal") and so names none of them. The whole
-    name is read, maker and all: "Odell Brewing Company IPA" names a beer, "IPA" does not."""
-    if not re.sub(r"[^a-z0-9]", "", _KIND.sub(" ", name).lower()):
+    name is read, maker and all: "Odell Brewing Company IPA" names a beer, "IPA" does not.
+
+    Two characters is also no name. The rest of the sort prefers the SHORTEST name, on the
+    grounds that "Truth" is plainer than "Truth India Pale Ale" -- which hands the slot to any
+    registry stub that happens to be shortest of all. A vodka vector shared by ten rows was
+    standing as "PA", and an Italian bitter as "Aper@it".
+    """
+    letters = re.sub(r"[^a-z0-9]", "", _KIND.sub(" ", name).lower())
+    if len(letters) < 3:
         return 2
     return 1 if " ," in name else 0
 
@@ -169,3 +177,67 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
              "score": score, "reason": reason, "cold_start": cold,
              "evidence": EVIDENCE[evidence_tier(product.sensory)]}
             for _key, product, score, reason, cold in chosen[:limit]]
+
+
+# ---- what else tastes like this -------------------------------------------------------------
+
+# A product's own neighbours, which is a different question from `rank_catalog`'s. That one asks
+# what to recommend to a *person*; this asks what sits near a *bottle* in the sensory space, with
+# nobody's profile involved. It is the app's own thesis applied to one row: a drink with no
+# reviews is still placed by what it is made of.
+#
+# Asked of `nearest_known` only. 507,341 of 534,103 products carry their style's centroid rather
+# than a vector of their own, so over the whole catalog the nearest rows to an IPA are simply
+# every other IPA -- 94,000 of them, all at distance zero, in registry order. That is not a
+# similarity list, it is a style filter wearing one.
+#
+# Measured on the live catalog: Lagavulin 16 returns Bunnahabhain Moine, Ardbeg An Oa, Compass
+# Box Peat Monster and Kilchoman Sanaig; Campari returns Gran Milano Bitter, Aperol and Calisaya;
+# Tito's returns Absolut, Sobieski and Belvedere. The data earns the feature.
+
+#: One row per maker. Without it Guinness Draught's nearest are Guinness Dublin and Guinness
+#: 0.0%, which is the same drink answering a question about what else to try.
+_PER_MAKER = 1
+
+
+def similar_profile(store: Store, product: Product, *, limit: int = 6) -> dict:
+    """The products whose flavour profile sits nearest this one's, nearest first.
+
+    Returns `{"basis": ..., "results": [...]}`. `basis` is "profile" when the row has a vector
+    of its own and "style_only" when it does not -- 95% of the catalog is the latter, and for
+    those rows there is nothing to be similar *to*: their vector is their style's average, so
+    the honest answer is to say so rather than to list the style back.
+    """
+    sensory = product.sensory
+    if sensory is None or evidence_tier(sensory) == GUESSED:
+        return {"basis": "style_only", "results": []}
+
+    makers: Counter[str] = Counter()
+    out: list[dict] = []
+    for members in store.nearest_known(sensory.to_array(), limit=limit * 4):
+        products = [Product.model_validate(r) for r in members]
+        # Rows sharing a vector are one suggestion, so one of them stands for the rest -- the
+        # same choice `rank_catalog` makes, by the same rule, so the two lists cannot disagree
+        # about which name a vector goes by.
+        if any(p.id == product.id for p in products):
+            continue                                  # itself, and anything tasting identical
+        maker = {p.id: _maker_name(store, p) for p in products}
+        pick = min(products, key=lambda p: (_legible(p.name or ""),
+                                            len(_plain_name(p.name or "", maker[p.id]).split()),
+                                            len(_plain_name(p.name or "", maker[p.id])),
+                                            p.name or ""))
+        key = (maker[pick.id] or pick.id).lower()
+        if makers[key] >= _PER_MAKER:
+            continue
+        makers[key] += 1
+        out.append({"product_id": pick.id, "name": pick.name, "producer": maker[pick.id],
+                    "evidence": EVIDENCE[evidence_tier(pick.sensory)],
+                    "also": len(products) - 1})
+        if len(out) >= limit:
+            break
+    return {"basis": "profile", "results": out}
+
+
+def _maker_name(store: Store, product: Product) -> str | None:
+    pid = product.producer_id or ""
+    return (store.get_gold(pid) or {}).get("name") if pid else None
