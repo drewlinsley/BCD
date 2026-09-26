@@ -13,6 +13,11 @@ tokens cost 36 frames their right answer, and one-word proofs were 14 for 14 wro
 Frames are keyed by timestamp in the diff, so a log that grew between the two runs only adds
 frames to the "new" line; a frame present in both is compared. The store and index come from
 the API's environment (.env is read), the same way the API gets them.
+
+To measure a CATALOG change rather than a code change, replay against a copy of the database
+(`createdb -T bcd bcd_scratch`) with `BCD_DATABASE_URL` and `BCD_LABEL_INDEX_PATH` both pointed
+at the copy -- the second one matters, or the index built for the copy is written over the one
+the live API loads at its next start.
 """
 from __future__ import annotations
 
@@ -45,7 +50,11 @@ def replay(out_path: str) -> None:
     os.chdir(ROOT)
     _load_dotenv()
     store = open_store(root="./data")
-    index = LabelIndex.for_store(store, os.path.join("./data", "label_index.pkl"))
+    # BCD_LABEL_INDEX_PATH so a replay against a COPY of the catalog cannot overwrite the
+    # index the live API will load at its next start: measuring a catalog change means building
+    # an index for the changed rows, and that index does not describe the catalog being served.
+    index = LabelIndex.for_store(store, os.environ.get(
+        "BCD_LABEL_INDEX_PATH", os.path.join("./data", "label_index.pkl")))
     resolver = Resolver(IndexedStore(store, index))
 
     rows = []

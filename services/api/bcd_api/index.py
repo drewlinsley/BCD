@@ -267,8 +267,8 @@ class LabelIndex:
     be scored and hydrated: ids, names, brand-qualified names, and who makes what."""
 
     # 2: suffix lookups; 3: aliases indexed and scored; 4: possessives one word;
-    # 5: category words indexed
-    FORMAT = 5
+    # 5: category words indexed; 6: rows numbered in id order, not Postgres heap order
+    FORMAT = 6
 
     def __init__(self) -> None:
         self.signature: str = ""
