@@ -290,22 +290,23 @@ struct ProductDetailView: View {
     /// to be a similarity, so there is no section.
     @ViewBuilder private var similarProfile: some View {
         if let similar, !similar.isEmpty {
-            Tile(title: "Similar profile") {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(similar) { row in
-                        Button { Task { await openSimilar(row) } } label: {
-                            SimilarRow(row: row, busy: openingSimilar == row.productId)
-                        }
-                        .buttonStyle(.plain)
-                        if row.id != similar.last?.id {
-                            Divider().overlay(Brand.hairline)
-                        }
+            // Shut until asked for, like Ingredients: the screen's job is still the choice in
+            // front of you, and six other drinks open on the page is an argument for leaving.
+            // The count in the header is the invitation.
+            DisclosureTile(title: "Similar profile", count: similar.count) {
+                ForEach(similar) { row in
+                    Button { Task { await openSimilar(row) } } label: {
+                        SimilarRow(row: row, busy: openingSimilar == row.productId)
+                    }
+                    .buttonStyle(.plain)
+                    if row.id != similar.last?.id {
+                        Divider().overlay(Brand.hairline)
                     }
                 }
                 Text("Nearest flavour profiles in the catalog — not what other people drank.")
                     .font(.caption2)
                     .foregroundStyle(Brand.textMuted)
-                    .padding(.top, 6)
+                    .padding(.top, 8)
             }
         }
     }
