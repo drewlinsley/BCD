@@ -8,6 +8,7 @@ from bcd_enrich.style_prior import (
     adjuncts,
     agave_marks,
     detect_style,
+    readable_style,
     sensory_from_style,
     whisky_marks,
 )
@@ -311,3 +312,55 @@ def test_smoke_is_a_mark_a_label_states_not_a_style():
     assert "smoked" in whisky_marks("Arby's Smoked Bourbon")
     assert smoked["smoky_peat"] == 0.25
     assert smoked["vanilla_oak"] == _CENTROIDS["bourbon"]["vanilla_oak"]
+
+
+def test_a_single_malt_is_not_a_scotch_unless_the_label_says_so():
+    """"single malt" was a keyword for `scotch`, so 566 rows printed "Scotch Whisky" on those
+    two words alone -- 259 saying American, Oregon or Texas on the label and 271 saying nothing
+    about origin at all (2026-09-25). Single malt is how a whisky is made, one distillery and
+    all malted barley. Scotch is a place."""
+    def style(name, code):
+        return detect_style(f"{code} {name}", Category.SPIRIT, class_type=code)
+
+    # made that way, somewhere else
+    assert style("Bull Run Distilling Co Oregon Single Malt", "Whisky") == "single_malt"
+    assert style("Westland American Single Malt", "Whisky") == "single_malt"
+    assert readable_style("Whisky", "single_malt") == "Single Malt Whisky"
+    # the registry files American single malts as their own thing; print what it filed
+    for code in ("American Single Malt Whiskey", "Straight American Single Malt"):
+        assert style("Probe Single Malt", code) == "single_malt"
+        assert readable_style(code, "single_malt") == "American Single Malt"
+    # a Scotch filing, a Scottish region, or the word itself still names a Scotch
+    assert style("Kilkerran Single Malt", "Scotch Whisky Fb") == "scotch"
+    assert style("Old Pulteney Highland Single Malt", "Whisky") == "scotch"
+    assert style("Loch Haim Single Malt Scotch Whisky", "Whisky") == "scotch"
+    assert readable_style("Single Malt Scotch Whisky", "scotch") == "Single Malt Scotch"
+    # and an origin the registry states outright wins over the method
+    assert style("Tyrconnel Single Malt Irish Whiskey", "Irish Whisky Fb") == "irish_whiskey"
+
+
+def test_a_pure_malt_is_a_blend_and_not_a_single_malt():
+    """A looser "malt whisky" keyword claims 155 names, 87 of which say PURE, BLENDED or VATTED
+    malt -- malts from several distilleries, the opposite of a single malt. Only the phrase
+    itself counts; the 81 rows filed as class "Malt Whisky" are read from the filing."""
+    assert detect_style("Japanese blended whisky Suntory Pure Malt Whiskey", Category.SPIRIT,
+                        class_type="Japanese blended whisky") == "whiskey"
+    assert detect_style("Whisky Koshiji Pure Malt Whisky 10 Years", Category.SPIRIT,
+                        class_type="Whisky") == "whiskey"
+    assert detect_style("Malt Whisky Foundry Single Malt", Category.SPIRIT,
+                        class_type="Malt Whisky") == "single_malt"
+    assert readable_style("Malt Whisky", "single_malt") == "Malt Whisky"
+
+
+def test_a_single_malt_carries_its_own_centroid_and_reads_its_own_label():
+    """It is not a Scotch's vector: more malt and more caramel, because what files here is
+    usually matured in new charred oak rather than a refill cask, and none of the honeyed
+    softness age in a used butt gives. And it is a whisky, so the whisky marks apply."""
+    assert _CENTROIDS["single_malt"] != _CENTROIDS["scotch"]
+    assert _CENTROIDS["single_malt"]["malty_bready"] > _CENTROIDS["scotch"]["malty_bready"]
+    assert _CENTROIDS["single_malt"]["honey"] < _CENTROIDS["scotch"]["honey"]
+    aged = sensory_from_style("Probe 18 Year Single Malt Sherry Cask", Category.SPIRIT,
+                              style_hint="Whisky").axes
+    young = sensory_from_style("Probe Single Malt", Category.SPIRIT, style_hint="Whisky").axes
+    assert aged["vanilla_oak"] > young["vanilla_oak"]
+    assert aged["stone_fruit"] > young["stone_fruit"]
