@@ -200,18 +200,22 @@ struct ProductDetailView: View {
     /// what you have drunk — so it reads as an invitation rather than a demand, and says
     /// what it is for once a verdict exists.
     ///
-    /// Un-rated, it shows the whole scale rather than one mark. A single glyph would have to
-    /// be one of the five verdicts, and every one of them answers the question the button is
-    /// asking: the top rung reads as "loved it", the pivot as "it was OK". The ramp answers
-    /// nothing and shows what you are being offered — which is also the row you are about to
-    /// see, so the button previews its own sheet. (It was `hand.thumbsup`, a borrowed mark
-    /// for a scale that is not thumbs: this app has five faces, not two directions.)
+    /// The label owns the left, the rating owns the right, in both states: un-rated that is the
+    /// whole ramp, rated it is your own face. Same slot, same kind of thing, so nothing jumps
+    /// across the row when you come back from the sheet.
+    ///
+    /// Un-rated it shows all five rather than one mark, because a single glyph would have to be
+    /// one of the five verdicts and every one of them answers the question the button is asking:
+    /// the top rung reads as "loved it", the pivot as "it was OK". The ramp answers nothing and
+    /// is the row the sheet is about to show, so the button previews itself. (It was
+    /// `hand.thumbsup`, a borrowed mark promising two directions for a five-rung scale.)
     private var rateButton: some View {
         Button { rating = true } label: {
             HStack(spacing: 8) {
+                Text(myReaction == nil ? "Had it? Rate it" : "Change your rating")
+                Spacer(minLength: 8)
                 if let mine = myReaction {
                     ReactionGlyph(reaction: mine, size: 22)
-                    Text("Change your rating")
                 } else {
                     // Tight, and below the `recall` floor, so five read as one object -- a
                     // scale -- rather than five buttons competing with the sheet's real ones.
@@ -220,9 +224,7 @@ struct ProductDetailView: View {
                     }
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Five point taste scale")
-                    Text("Had it? Rate it")
                 }
-                Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Brand.textMuted)
