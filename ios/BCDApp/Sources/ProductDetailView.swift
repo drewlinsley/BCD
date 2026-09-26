@@ -199,6 +199,13 @@ struct ProductDetailView: View {
     /// The one write this screen offers. Worded as the question it is — you can only rate
     /// what you have drunk — so it reads as an invitation rather than a demand, and says
     /// what it is for once a verdict exists.
+    ///
+    /// Un-rated, it shows the whole scale rather than one mark. A single glyph would have to
+    /// be one of the five verdicts, and every one of them answers the question the button is
+    /// asking: the top rung reads as "loved it", the pivot as "it was OK". The ramp answers
+    /// nothing and shows what you are being offered — which is also the row you are about to
+    /// see, so the button previews its own sheet. (It was `hand.thumbsup`, a borrowed mark
+    /// for a scale that is not thumbs: this app has five faces, not two directions.)
     private var rateButton: some View {
         Button { rating = true } label: {
             HStack(spacing: 8) {
@@ -206,7 +213,13 @@ struct ProductDetailView: View {
                     ReactionGlyph(reaction: mine, size: 22)
                     Text("Change your rating")
                 } else {
-                    Image(systemName: "hand.thumbsup")
+                    // Tight, and below the `recall` floor, so five read as one object -- a
+                    // scale -- rather than five buttons competing with the sheet's real ones.
+                    HStack(spacing: 1) {
+                        ForEach(Reaction.allCases) { ReactionGlyph(reaction: $0, size: 20) }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Five point taste scale")
                     Text("Had it? Rate it")
                 }
                 Spacer(minLength: 8)

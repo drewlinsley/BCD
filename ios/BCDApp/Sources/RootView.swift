@@ -21,8 +21,13 @@ struct RootView: View {
                 .tabItem { Label("Discover", systemImage: "lightbulb.max") }
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            // The pivot face, not the top one. A tab names a place, and every other rung is a
+            // verdict -- "Chugged it" on the bar would read as a tab full of drinks you liked.
+            // Rung 3 is the one that contributes no direction to the centroid, so it is the
+            // scale standing for itself. Also the app's own mark rather than SF Symbols'
+            // `hand.thumbsup`, which promised two directions for a five-rung scale.
             RateView()
-                .tabItem { Label("Rate", systemImage: "hand.thumbsup") }
+                .tabItem { Label("Rate", image: "Reaction3Small") }
             ProfileView()
                 .tabItem { Label("You", systemImage: "person.crop.circle") }
         }
