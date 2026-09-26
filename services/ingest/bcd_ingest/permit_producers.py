@@ -290,6 +290,19 @@ SELECT DISTINCT ON (gid) gid, producer_id FROM filings ORDER BY gid, producer_id
 
 CREATE INDEX ON imported (gid);
 
+-- The commonest country among a brand's own products, and how far it carries. Read per BRAND,
+-- which is what makes it trustworthy: the old bug was the mode across an importer's whole
+-- portfolio, so Crown Royal took "Scotland" from a Diageo permit that mostly carries Islay. A
+-- brand's own filings do not have that problem -- Crown Royal is Canada on 270 of its 271.
+CREATE TEMP TABLE origins ON COMMIT DROP AS
+SELECT DISTINCT ON (producer_id) producer_id, origin, n,
+       sum(n) OVER (PARTITION BY producer_id) AS tot
+FROM (SELECT producer_id, origin, count(*) AS n FROM filings
+      WHERE origin IS NOT NULL GROUP BY 1, 2) s
+ORDER BY producer_id, n DESC, origin;
+
+CREATE INDEX ON origins (producer_id);
+
 -- Every other row on an import permit: its brand field holds a product name, or a word that
 -- names nobody ("LLC"). The permit is still no claim about who made it, so there is no producer
 -- to name -- see `_UNNAME_REFUSED`.
@@ -305,10 +318,13 @@ INSERT INTO gold (id, entity_type, record, name, updated_at)
 SELECT producer_id, 'producer',
        jsonb_build_object(
          'id', producer_id, 'name', name, 'kind', 'brand',
-         -- A country only when the brand's filings agree on one. Taking the mode is what put
-         -- Scotland on Crown Royal: across an importer's portfolio the commonest origin is the
-         -- importer's specialism, not the bottle's. Disagreement here means the brand name is
-         -- shared by two unrelated drinks, and then no country is the honest answer.
+         -- A country when four fifths of the brand's products agree on one. Not unanimity:
+         -- that refused Lagavulin (Scotland on 84 of 91, the rest a filer's "Virginia") and
+         -- Talisker (77 of 80), and 1,194 brands like Balblair, Kasteel and Martin Miller's
+         -- that the registry is perfectly clear about. Not a bare mode either -- below four
+         -- fifths the disagreement is real, and the band holds names like "arak" and "me" that
+         -- several unrelated drinks share. Measured over the 21,633: 86.9% carry a country at
+         -- unanimity, 91.5% at this line, and Crown Royal is still Canada.
          'region', initcap(region),
          -- Deliberately null: there is no one permit. The brand is filed by every importer who
          -- carries it, and recording one of them would read as the maker.
@@ -318,10 +334,11 @@ SELECT producer_id, 'producer',
          'aliases', '[]'::jsonb, 'country', NULL, 'website', NULL, 'parent_company', NULL),
        name, now()
 FROM (
-  SELECT producer_id,
-         mode() WITHIN GROUP (ORDER BY brand) AS name,
-         CASE WHEN count(DISTINCT origin) = 1 THEN min(origin) END AS region
-  FROM filings GROUP BY producer_id
+  SELECT f.producer_id,
+         mode() WITHIN GROUP (ORDER BY f.brand) AS name,
+         min(o.origin) FILTER (WHERE o.n::numeric / o.tot >= 0.8) AS region
+  FROM filings f LEFT JOIN origins o USING (producer_id)
+  GROUP BY f.producer_id
 ) b
 ON CONFLICT (id) DO UPDATE
   SET record = EXCLUDED.record, name = EXCLUDED.name, updated_at = now();

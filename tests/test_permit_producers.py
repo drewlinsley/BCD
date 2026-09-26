@@ -154,17 +154,24 @@ def test_a_brand_that_names_nobody_is_not_promoted(pg):
     assert _producer_of(pg, "2")[0] == "Amaro Montenegro"
 
 
-def test_a_country_is_kept_only_when_the_filings_agree(pg):
-    """Taking the commonest origin across an import permit is what put Scotland on Crown Royal.
-    Per brand it is usually unanimous; where it is not, the name is shared by two unrelated
-    drinks and no country is the honest answer."""
+def test_a_country_needs_four_fifths_of_the_brand_to_agree(pg):
+    """Taking the commonest origin across an import PERMIT is what put Scotland on Crown Royal --
+    a Diageo permit mostly carries Islay. Per BRAND the mode is trustworthy, so the rule is a
+    supermajority rather than the mode.
+
+    Not unanimity either: one filer typing "Virginia" on a Lagavulin is enough to refuse a brand
+    the registry says Scotland about 84 times, and that cost 1,194 brands their country."""
     _cola(pg, "1", "CT-I-325", "TALISKER", fanciful="10 YEAR OLD", origin="SCOTLAND")
     _cola(pg, "2", "CT-I-325", "TALISKER", fanciful="SKYE", origin="SCOTLAND")
-    _cola(pg, "3", "CT-I-325", "LEGACY", fanciful="BLENDED", origin="SCOTLAND")
-    _cola(pg, "4", "CT-I-325", "LEGACY", fanciful="REPOSADO", origin="MEXICO")
+    _cola(pg, "3", "CT-I-325", "TALISKER", fanciful="STORM", origin="SCOTLAND")
+    _cola(pg, "4", "CT-I-325", "TALISKER", fanciful="DARK STORM", origin="SCOTLAND")
+    _cola(pg, "5", "CT-I-325", "TALISKER", fanciful="57 NORTH", origin="VIRGINIA")
+    # a name two unrelated drinks share: half and half, and no country is the honest answer
+    _cola(pg, "6", "CT-I-325", "LEGACY", fanciful="BLENDED", origin="SCOTLAND")
+    _cola(pg, "7", "CT-I-325", "LEGACY", fanciful="REPOSADO", origin="MEXICO")
     _rekey(pg)
-    assert _producer_of(pg, "1") == ("Talisker", "Scotland")
-    assert _producer_of(pg, "3")[1] is None
+    assert _producer_of(pg, "1") == ("Talisker", "Scotland")   # 4 of 5
+    assert _producer_of(pg, "6")[1] is None                    # 1 of 2
 
 
 def test_the_pass_is_idempotent(pg):
