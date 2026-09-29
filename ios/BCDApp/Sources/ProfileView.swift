@@ -15,6 +15,12 @@ import BCDKit
 // is no snapshot of last week, so "this week" was a claim the data could not support. When
 // history exists, predictions and a delta can come back -- `WeeklyProfileDelta` is still in
 // BCDKit waiting for it.
+//
+// "Export my data" and "Delete my data" were here too, both `Button(...) {}` with empty
+// closures. Removed rather than wired: there is nowhere to export to, and a control under a
+// Privacy heading that looks live and does nothing is worse than its absence -- someone who
+// taps Delete and sees no error has been told their data is gone. If either comes back it
+// comes back working.
 
 struct ProfileView: View {
     @EnvironmentObject var env: AppEnvironment
@@ -44,10 +50,6 @@ struct ProfileView: View {
                         .font(.caption).foregroundStyle(Brand.textMuted)
                     Text("Each tier is a separate opt-in. Raw camera frames are never uploaded.")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                Section {
-                    Button("Export my data") {}
-                    Button("Delete my data", role: .destructive) {}
                 }
             }
             .navigationTitle("You")
