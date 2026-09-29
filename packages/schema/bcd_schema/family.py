@@ -26,11 +26,13 @@ class Group(str, Enum):
 
     BEER = "beer"
     SPIRITS = "spirits"
-    OTHER = "other"
+    CIDER = "cider"
+    SAKE = "sake"
 
     @property
     def label(self) -> str:
-        return {Group.BEER: "Beer", Group.SPIRITS: "Spirits", Group.OTHER: "Other"}[self]
+        return {Group.BEER: "Beer", Group.SPIRITS: "Spirits",
+                Group.CIDER: "Cider", Group.SAKE: "Sake"}[self]
 
 
 class Family(str, Enum):
@@ -96,21 +98,23 @@ _LABELS: dict[Family, str] = {
     Family.SAKE: "Sake",
 }
 
-#: Which aisle each shelf is in. Cider and sake are their own thing and share an aisle with
-#: nothing: neither is a beer, and calling either a spirit would be worse than leaving it loose.
+#: Which aisle each shelf is in. Cider and sake are each their own aisle rather than sharing an
+#: "Other": neither is a beer and neither is a spirit, and a drinker looking for sake is looking
+#: for sake, not for the drawer of things that fitted nowhere. An aisle holding one shelf is
+#: shown as one row, not as a shelf inside an aisle of the same name.
 _GROUPS: dict[Family, Group] = {
     **{f: Group.BEER for f in (Family.IPA, Family.PALE_ALE, Family.STOUT, Family.PORTER,
                                Family.LAGER, Family.WHEAT, Family.SOUR, Family.BELGIAN)},
     **{f: Group.SPIRITS for f in (Family.VODKA, Family.GIN, Family.BOURBON, Family.RYE,
                                   Family.SCOTCH, Family.IRISH, Family.WHISKEY, Family.AGAVE,
                                   Family.RUM, Family.BRANDY, Family.LIQUEUR, Family.AMARO)},
-    Family.CIDER: Group.OTHER,
-    Family.SAKE: Group.OTHER,
+    Family.CIDER: Group.CIDER,
+    Family.SAKE: Group.SAKE,
 }
 
 #: Aisles in the order they are read when nothing is known about the drinker. The catalog is
-#: 337k beer against 158k spirits.
-GROUPS: tuple[Group, ...] = (Group.BEER, Group.SPIRITS, Group.OTHER)
+#: 337k beer against 158k spirits, and cider and sake are small but are not leftovers.
+GROUPS: tuple[Group, ...] = (Group.BEER, Group.SPIRITS, Group.CIDER, Group.SAKE)
 
 
 def families_in(group: Group) -> tuple[Family, ...]:

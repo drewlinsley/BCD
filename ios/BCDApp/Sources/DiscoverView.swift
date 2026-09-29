@@ -100,32 +100,27 @@ struct DiscoverView: View {
             // around every shelf, which turned a list you scan into a list you scroll.
             Section {
                 ForEach(aisles) { aisle in
-                    DisclosureGroup(isExpanded: expansion(of: aisle.id)) {
-                        ForEach(aisle.families) { shelf in
-                            DisclosureGroup(isExpanded: expansion(of: shelf.id)) {
-                                ForEach(Array(shelf.results.enumerated()),
-                                        id: \.element.id) { rank, pick in
-                                    Button { Task { await openShelfPick(pick, rank: rank) } } label: {
-                                        ShelfRow(pick: pick,
-                                                 mine: env.reactions.reaction(for: pick.productId),
-                                                 busy: opening == pick.productId,
-                                                 personal: shelf.isPersonal)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                if !shelf.isPersonal {
-                                    Text("Nothing here is scored for you \u{2014} rate one and "
-                                         + "this shelf becomes yours.")
-                                        .font(.caption).foregroundStyle(Brand.textMuted)
-                                }
-                            } label: {
-                                ShelfHeader(shelf: shelf)
-                            }
+                    // Cider and Sake are an aisle holding one shelf of the same name. Nesting
+                    // them would make the reader open "Cider" to find "Cider", so a lone shelf
+                    // is shown at the aisle's own level and opens straight onto its drinks.
+                    if aisle.families.count == 1, let only = aisle.families.first {
+                        DisclosureGroup(isExpanded: expansion(of: aisle.id)) {
+                            shelfBody(only)
+                        } label: {
+                            aisleLabel(aisle)
                         }
-                    } label: {
-                        Text(aisle.label)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(aisle.ratedIn ? Brand.text : Brand.textMuted)
+                    } else {
+                        DisclosureGroup(isExpanded: expansion(of: aisle.id)) {
+                            ForEach(aisle.families) { shelf in
+                                DisclosureGroup(isExpanded: expansion(of: shelf.id)) {
+                                    shelfBody(shelf)
+                                } label: {
+                                    ShelfHeader(shelf: shelf)
+                                }
+                            }
+                        } label: {
+                            aisleLabel(aisle)
+                        }
                     }
                 }
             }
@@ -138,6 +133,28 @@ struct DiscoverView: View {
             }
         }
         .refreshable { await load() }
+    }
+
+    private func aisleLabel(_ aisle: FamilyGroup) -> some View {
+        Text(aisle.label)
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(aisle.ratedIn ? Brand.text : Brand.textMuted)
+    }
+
+    @ViewBuilder private func shelfBody(_ shelf: FamilyPicks) -> some View {
+        ForEach(Array(shelf.results.enumerated()), id: \.element.id) { rank, pick in
+            Button { Task { await openShelfPick(pick, rank: rank) } } label: {
+                ShelfRow(pick: pick,
+                         mine: env.reactions.reaction(for: pick.productId),
+                         busy: opening == pick.productId,
+                         personal: shelf.isPersonal)
+            }
+            .buttonStyle(.plain)
+        }
+        if !shelf.isPersonal {
+            Text("Nothing here is scored for you \u{2014} rate one and this shelf becomes yours.")
+                .font(.caption).foregroundStyle(Brand.textMuted)
+        }
     }
 
     /// Open by key, for aisles and shelves alike -- both are `DisclosureGroup`s over the same

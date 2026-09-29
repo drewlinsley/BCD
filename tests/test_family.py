@@ -117,11 +117,14 @@ def test_spirits_holds_the_spirit_shelves():
     assert Family.IPA not in families_in(Group.SPIRITS)
 
 
-def test_sake_and_cider_are_neither():
-    """Calling either a spirit would be worse than leaving it loose, and neither is a beer."""
-    from bcd_schema.family import Group
-    assert Family.SAKE.group is Group.OTHER
-    assert Family.CIDER.group is Group.OTHER
+def test_sake_and_cider_are_their_own_aisles():
+    """Neither is a beer and neither is a spirit, and a drinker looking for sake is looking for
+    sake -- not for the drawer of things that fitted nowhere."""
+    from bcd_schema.family import Group, families_in
+    assert Family.SAKE.group is Group.SAKE
+    assert Family.CIDER.group is Group.CIDER
+    assert families_in(Group.SAKE) == (Family.SAKE,)
+    assert families_in(Group.CIDER) == (Family.CIDER,)
 
 
 def test_an_aisle_keeps_the_browsing_order_of_its_shelves():
