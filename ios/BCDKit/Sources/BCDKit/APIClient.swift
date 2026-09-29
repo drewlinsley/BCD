@@ -15,6 +15,8 @@ public protocol APIClientProtocol: Sendable {
     func fetchLexicon() async throws -> [String]
     /// What else tastes like one product. About the bottle, not about you.
     func similar(to productId: String, limit: Int) async throws -> SimilarResponse
+    /// What the server has learned about the person this client speaks for.
+    func profile() async throws -> TasteProfile
 }
 
 extension APIClientProtocol {
@@ -47,6 +49,12 @@ extension APIClientProtocol {
     /// the 95% of rows carrying their style's average: show no section rather than an error.
     public func similar(to productId: String, limit: Int) async throws -> SimilarResponse {
         SimilarResponse(basis: .styleOnly, results: [])
+    }
+
+    /// A profile that has learned nothing, which is also what a real fresh install gets back.
+    /// Stubs therefore exercise the empty state rather than a fabricated one.
+    public func profile() async throws -> TasteProfile {
+        TasteProfile(userId: "", version: 0)
     }
 }
 
@@ -170,6 +178,28 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         try Self.check(resp)
         do {
             return try decoder.decode(SimilarResponse.self, from: data)
+        } catch {
+            throw APIError.decoding("\(error)")
+        }
+    }
+
+    /// The drinker's own taste, as the server currently understands it. `user_id` is the same
+    /// pseudonymous install id every other call carries, so this is the profile their verdicts
+    /// actually folded into rather than a lookalike.
+    ///
+    /// A fresh install gets `version: 0` and empty fields back — a real answer meaning "nothing
+    /// learned yet", not an error — so the caller must not read an empty profile as a failure.
+    public func profile() async throws -> TasteProfile {
+        guard var comps = URLComponents(url: baseURL.appendingPathComponent("v1/profile"),
+                                        resolvingAgainstBaseURL: false) else {
+            throw APIError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "user_id", value: installId)]
+        guard let url = comps.url else { throw APIError.badURL }
+        let (data, resp) = try await session.data(from: url)
+        try Self.check(resp)
+        do {
+            return try decoder.decode(TasteProfile.self, from: data)
         } catch {
             throw APIError.decoding("\(error)")
         }

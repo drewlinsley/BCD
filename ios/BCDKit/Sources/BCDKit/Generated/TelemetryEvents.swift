@@ -28,6 +28,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
     case recommendationsShown = "recommendations_shown"
     case recommendationOpened = "recommendation_opened"
     case scanObjectResolution = "scan_object_resolution"
+    case tasteProfileShown = "taste_profile_shown"
 
     public var tier: ConsentTier {
         switch self {
@@ -55,6 +56,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
         case .recommendationsShown: return .analytics
         case .recommendationOpened: return .analytics
         case .scanObjectResolution: return .analytics
+        case .tasteProfileShown: return .personalization
         }
     }
 }

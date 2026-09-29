@@ -61,6 +61,11 @@ _CONF_MAX = 0.9
 
 _MIN_SIGNALS_FOR_BAND = 2
 
+# Before the memo will say a drinker avoids something, the drink they disliked has to be
+# loud on that axis AND their own centroid has to be quiet on it. See `_aversion`.
+_AVERSION_FLOOR = 0.5
+_AVERSION_CEILING = 0.3
+
 
 def signals_from_events(
     events: Iterable[dict[str, Any]], install_id: str
@@ -238,18 +243,48 @@ def _novelty(liked_styles: list[str]) -> float | None:
 
 
 def _memo(ideal: dict[str, float], disliked: list[tuple[float, list[float]]]) -> str | None:
-    """One human-readable line for the weekly card. Names the axes actually driving the
+    """One human-readable line for the taste card. Names the axes actually driving the
     centroid, so the user can see (and argue with) what we think of them."""
     if not ideal:
         return None
     top = sorted(ideal.items(), key=lambda kv: kv[1], reverse=True)[:3]
     leans = ", ".join(_pretty(a) for a, _ in top)
     memo = f"You lean {leans}"
-    neg = _weighted_mean(disliked)
-    if neg:
-        worst = max(range(len(SENSORY_AXES)), key=lambda i: neg[i])
-        memo += f" — and away from {_pretty(SENSORY_AXES[worst])}"
+    axis = _aversion(ideal, disliked)
+    if axis:
+        memo += f" — and away from {_pretty(axis)}"
     return memo + "."
+
+
+def _aversion(
+    ideal: dict[str, float], disliked: list[tuple[float, list[float]]]
+) -> str | None:
+    """The axis a dislike actually argues against — or None, when it argues against nothing.
+
+    This used to be `max(neg)`: the loudest axis of whatever they disliked, named outright.
+    That is only sound when someone's likes and dislikes look different. They usually don't.
+    A drinker working through one style rates near-identical bottles, and the loudest axis of
+    the bad one is then a note they love. Ours liked Heady Topper (tropical 0.70) and disliked
+    a DDH IPA (tropical 0.75); the card told them they lean away from tropical while listing
+    tropical among what they go for. Both halves came from the same two ratings.
+
+    So an axis has to clear two bars to be named: the disliked drink is loud on it, and the
+    drinker's own centroid is not. Two beers that differ only in degree clear neither, which
+    is the correct outcome — a dislike that has not isolated anything gets no clause, rather
+    than the best of a bad field.
+    """
+    neg = _weighted_mean(disliked)
+    if not neg:
+        return None
+    best: str | None = None
+    widest = 0.0
+    for i, axis in enumerate(SENSORY_AXES):
+        mine = ideal.get(axis, 0.0)
+        if neg[i] < _AVERSION_FLOOR or mine >= _AVERSION_CEILING:
+            continue
+        if neg[i] - mine > widest:
+            best, widest = axis, neg[i] - mine
+    return best
 
 
 def _pretty(axis: str) -> str:

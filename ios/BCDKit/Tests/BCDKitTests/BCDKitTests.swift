@@ -1741,3 +1741,70 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         #expect(row.also == 10)
     }
 }
+
+@Suite struct YourTaste {
+    /// The whole point of the screen: what comes back is the drinker's, and every field of it
+    /// has to survive the trip. The real profile this was written against.
+    @Test func aProfileDecodesWithItsCentroidAndBothSignsOfItsStyles() throws {
+        let json = """
+        {"user_id":"ba71974e","version":2,"updated_at":"2026-09-25T02:39:16.236118+00:00",
+         "style_affinities":{"New England IPA":1.0,"Double dry-hopped IPA":-1.0},
+         "sensory_ideal":{"source":"reconciled","confidence":0.46,
+           "axes":{"citrus":0.44,"tropical":0.4,"bitterness":0.44,"piney_resinous":0.42}},
+         "abv_band_min":null,"abv_band_max":null,"novelty_appetite":null,
+         "memo":"You lean citrus, bitterness, piney resinous."}
+        """
+        let p = try JSONDecoder().decode(TasteProfile.self, from: Data(json.utf8))
+        #expect(p.version == 2)
+        #expect(p.memo?.hasPrefix("You lean") == true)
+        #expect(p.stylesLiked.map(\.style) == ["New England IPA"])
+        #expect(p.stylesAvoided.map(\.style) == ["Double dry-hopped IPA"])
+        #expect(p.hasLearnedNothing == false)
+    }
+
+    /// A fresh install gets `{"user_id": ..., "version": 0}` with the rest defaulted. That is a
+    /// successful answer meaning "nothing learned yet" -- it must decode, and it must be
+    /// distinguishable from a profile with content, or the screen cannot tell the empty state
+    /// from a failed fetch.
+    @Test func aFreshInstallDecodesAsHavingLearnedNothing() throws {
+        let json = #"{"user_id":"new","version":0,"style_affinities":{}}"#
+        let p = try JSONDecoder().decode(TasteProfile.self, from: Data(json.utf8))
+        #expect(p.hasLearnedNothing)
+        #expect(p.notes.isEmpty)
+    }
+
+    /// Fields the client has never heard of, and fields it expects that are simply absent,
+    /// both have to leave the drinker looking at their memo rather than at an error.
+    @Test func aMissingFieldIsAnAbsentFactNotAFailedScreen() throws {
+        let json = #"{"user_id":"x","memo":"You lean citrus.","future_field":{"a":1}}"#
+        let p = try JSONDecoder().decode(TasteProfile.self, from: Data(json.utf8))
+        #expect(p.version == 0)
+        #expect(p.styleAffinities.isEmpty)
+        #expect(p.memo == "You lean citrus.")
+        #expect(p.hasLearnedNothing == false)  // a memo is something learned
+    }
+
+    /// Structure axes describe a drink's shape, not a note anyone says they like. "body 0.33"
+    /// under a heading reading "what you go for" is a column printed at a person.
+    @Test func structureAxesAreNotThingsYouGoFor() throws {
+        let ideal = SensoryVector(source: .reconciled, confidence: 0.46,
+                                  axes: ["citrus": 0.44, "bitterness": 0.44,
+                                         "body_fullness": 0.33, "tropical": 0.4])
+        let p = TasteProfile(userId: "x", version: 1, sensoryIdeal: ideal)
+        #expect(p.notes.map(\.axis) == [.citrus, .tropical])
+    }
+
+    /// Ties break on the axis name, so two equal leanings do not swap places between launches.
+    @Test func equalLeaningsHoldTheirOrder() throws {
+        let ideal = SensoryVector(source: .reconciled, axes: ["tropical": 0.4, "citrus": 0.4])
+        let notes = TasteProfile(userId: "x", sensoryIdeal: ideal).notes
+        #expect(notes.map(\.axis) == [.citrus, .tropical])
+    }
+
+    /// A client that has not implemented the route answers with the empty profile rather than
+    /// an invented one, so it exercises the empty state instead of fabricating a taste.
+    @Test func anUnimplementedClientReportsNothingLearned() async throws {
+        #expect(try await StubAPI().profile().hasLearnedNothing)
+    }
+}
+
