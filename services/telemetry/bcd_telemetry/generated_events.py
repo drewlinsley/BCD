@@ -28,6 +28,7 @@ EVENT_NAMES: frozenset[str] = frozenset({
     "recommendations_shown",
     "recommendation_opened",
     "scan_object_resolution",
+    "taste_profile_shown",
 })
 
 EVENT_TIERS: dict[str, str] = {
@@ -55,4 +56,5 @@ EVENT_TIERS: dict[str, str] = {
     "recommendations_shown": "analytics",
     "recommendation_opened": "analytics",
     "scan_object_resolution": "analytics",
+    "taste_profile_shown": "personalization",
 }

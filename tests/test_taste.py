@@ -52,6 +52,11 @@ def store():
                  {"roasted_coffee_choc": 0.9, "body_fullness": 0.6, "bitterness": 0.4}),
         _product("p:scotch", "Lagavulin 16", Category.SPIRIT, "Islay Single Malt", 43.0,
                  {"smoky_peat": 0.95, "alcohol_warmth": 0.7}),
+        # Same style as p:ipa and louder on the axis they share. This is what a dislike
+        # inside someone's own favourite style actually looks like.
+        _product("p:ddh", "Other Half DDH", Category.BEER, "IPA", 7.0,
+                 {"citrus": 0.65, "tropical": 0.75, "piney_resinous": 0.45,
+                  "bitterness": 0.4}),
     ):
         s.put_gold(p.id, "product", p.model_dump(mode="json"))
     yield s
@@ -173,6 +178,33 @@ def test_memo_names_the_driving_axes(store):
     assert "roasted coffee choc" in memo  # prettified, and named as the thing they avoid
 
 
+def test_a_note_they_love_is_never_named_as_the_one_they_avoid(store):
+    """Two bottles of the same style, one liked and one not, share their loud axes.
+
+    The real case: Heady Topper (tropical 0.70) liked, a DDH IPA (tropical 0.75) disliked.
+    Naming the disliked drink's loudest axis put "away from tropical" on a card that listed
+    tropical among what the drinker goes for.
+    """
+    profile = build_profile("demo", {"p:ipa": 1.0, "p:ddh": -1.0}, store)
+    assert "tropical" in profile.sensory_ideal.axes      # still in the centroid
+    assert "away from" not in profile.memo               # and so never disowned
+
+
+def test_a_dislike_that_isolates_nothing_says_nothing(store):
+    """Near-identical bottles leave no axis clearing both bars, so the clause is dropped
+    rather than filled with the widest gap in a bad field."""
+    memo = build_profile("demo", {"p:ipa": 1.0, "p:ddh": -1.0}, store).memo
+    assert memo.startswith("You lean ")
+    assert memo.endswith(".")
+
+
+def test_an_axis_they_are_quiet_on_can_still_be_named(store):
+    """The bar is two-sided, not a mute button: a genuinely different dislike still earns
+    the clause, which is what keeps the rule from just deleting the feature."""
+    memo = build_profile("demo", {"p:ipa": 1.0, "p:scotch": -1.0}, store).memo
+    assert "away from smoky peat" in memo
+
+
 # ---- persistence + the loop ---------------------------------------------------------
 
 def test_profile_round_trips_through_the_store(store):
@@ -185,7 +217,7 @@ def test_profile_round_trips_through_the_store(store):
 
 def test_profile_does_not_pollute_the_product_catalog(store):
     save_profile(store, build_profile("demo", {"p:ipa": 1.0}, store))
-    assert {p["id"] for p in store.iter_gold("product")} == {"p:ipa", "p:stout", "p:scotch"}
+    assert {p["id"] for p in store.iter_gold("product")} == {"p:ipa", "p:stout", "p:scotch", "p:ddh"}
 
 
 def test_rebuild_from_events_persists_and_versions(store):

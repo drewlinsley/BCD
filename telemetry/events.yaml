@@ -209,3 +209,19 @@ events:
       - {name: n_candidates, type: int}
       - {name: frames_seen, type: int}
       - {name: n_texts, type: int}
+
+  # ---- the "Your taste" card ----
+  # Replaces `weekly_profile_delta_shown`, which reported the versions of a hardcoded demo
+  # delta and so measured nothing. This one is emitted when the You screen has actually
+  # fetched a profile. `n_styles` and `n_notes` are what separate a card that had something
+  # to say from the empty state, and `n_rated` is the local verdict count behind it -- a
+  # version 2 profile built from 3 ratings and one built from 300 are not the same claim.
+  - name: taste_profile_shown
+    tier: personalization
+    pii: none
+    desc: the You screen rendered a fetched taste profile (or its empty state).
+    properties:
+      - {name: version, type: int}
+      - {name: n_styles, type: int}
+      - {name: n_notes, type: int}
+      - {name: n_rated, type: int}
