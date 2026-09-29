@@ -13,6 +13,8 @@ public protocol APIClientProtocol: Sendable {
     func recommend(limit: Int) async throws -> [Recommendation]
     /// Catalog vocabulary for the on-device recognizer's custom-words hint.
     func fetchLexicon() async throws -> [String]
+    /// What else tastes like one product. About the bottle, not about you.
+    func similar(to productId: String, limit: Int) async throws -> SimilarResponse
 }
 
 extension APIClientProtocol {
@@ -40,6 +42,12 @@ extension APIClientProtocol {
 
     /// No vocabulary is a fine answer: the recognizer falls back to its own dictionary.
     public func fetchLexicon() async throws -> [String] { [] }
+
+    /// Nothing to compare against is a fine answer too, and the same one the server gives for
+    /// the 95% of rows carrying their style's average: show no section rather than an error.
+    public func similar(to productId: String, limit: Int) async throws -> SimilarResponse {
+        SimilarResponse(basis: .styleOnly, results: [])
+    }
 }
 
 public enum APIError: Error, Sendable {
@@ -144,6 +152,27 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
             query: [URLQueryItem(name: "user_id", value: installId),
                     URLQueryItem(name: "limit", value: String(limit))])
         return resp.results
+    }
+
+    public func similar(to productId: String, limit: Int = 6) async throws -> SimilarResponse {
+        // The id goes in as its own path component and is NOT pre-encoded. Ids carry colons
+        // ("ttb:20315001000326", "off:8000040000802"), and `appendingPathComponent` escapes
+        // them itself -- percent-encoding first gets the `%` escaped in turn, which sent
+        // `ttb%253A94033604` and came back 404.
+        guard var comps = URLComponents(
+            url: baseURL.appendingPathComponent("v1/product")
+                .appendingPathComponent(productId)
+                .appendingPathComponent("similar"),
+            resolvingAgainstBaseURL: false) else { throw APIError.badURL }
+        comps.queryItems = [URLQueryItem(name: "limit", value: String(limit))]
+        guard let url = comps.url else { throw APIError.badURL }
+        let (data, resp) = try await session.data(from: url)
+        try Self.check(resp)
+        do {
+            return try decoder.decode(SimilarResponse.self, from: data)
+        } catch {
+            throw APIError.decoding("\(error)")
+        }
     }
 
     // MARK: - plumbing

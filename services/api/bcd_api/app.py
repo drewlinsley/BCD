@@ -16,11 +16,13 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import httpx
+from bcd_ingest.merge import get_product
 from bcd_ingest.store import Store, open_store
 from bcd_schema import (
     FeedbackRequest,
     FeedbackResponse,
     LexiconResponse,
+    Product,
     ProductSearchResponse,
     ResolvedProduct,
     ScanResolveRequest,
@@ -30,10 +32,10 @@ from bcd_schema import (
     TasteProfile,
 )
 from bcd_schema.api import DetectedText
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 from .index import IndexedStore, LabelIndex
-from .recommend import rank_catalog
+from .recommend import rank_catalog, similar_profile
 from .resolver import Resolver
 from .taste import TASTE_EVENTS, load_profile, rated_products, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
@@ -309,6 +311,23 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
                            exclude=rated_products(store, collector.iter_events(TASTE_EVENTS),
                                                   user_id))
     return {"user_id": user_id, "results": results}
+
+
+@app.get("/v1/product/{product_id}/similar")
+def similar(product_id: str, limit: int = 6) -> dict:
+    """What else tastes like this one. No profile involved -- this is about the bottle, not
+    about you, so two people asking of the same row get the same answer.
+
+    Answered from the rows whose vector is their own. A product carrying its style's centroid
+    has no profile to be near, and says so (`basis: "style_only"`) rather than listing its
+    style back as if that were a similarity.
+    """
+    store: Store = _state["store"]
+    rec = get_product(store, product_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="no such product")
+    return {"product_id": rec.get("id", product_id),
+            **similar_profile(store, Product.model_validate(rec), limit=limit)}
 
 
 @app.post("/v1/feedback", response_model=FeedbackResponse)
