@@ -110,9 +110,10 @@ struct ScanView: View {
                  system: "line.3.horizontal.decrease.circle")
         } else {
             // Live, fixed-rate: overlays refresh on their own, so no per-tick "Analyzing…" strobe.
-            let n = model.overlays.count
-            pill(n == 0 ? "Point at a shelf · scanning live" : "\(n) in view · live",
-                 system: "dot.radiowaves.left.and.right")
+            // Two words, and only because the mode is otherwise invisible. The count and the
+            // "point at a shelf" prompt both narrated the viewfinder back to someone already
+            // looking at it — the chips *are* the count, and no chips is the prompt.
+            pill("Live scan", system: "dot.radiowaves.left.and.right")
         }
     }
 
@@ -125,10 +126,15 @@ struct ScanView: View {
 
     // Persistent, always-on. Typing an ask sets a live filter over the in-frame items; clearing it
     // returns to the full set. No effect on the scan loop itself — the HUD keeps resolving live.
+    //
+    // The placeholder names the job, not the mechanism. "Narrow what's in view" promised a
+    // filter, and the filter can only really honour a style word: ABV is on 2.5% of rows (and
+    // a row without one passes), price isn't in the scan payload at all, and free text is
+    // parsed and dropped. Claiming less is the honest move until it can do more.
     private var chatBar: some View {
         HStack {
             Image(systemName: "sparkles")
-            TextField("Narrow what's in view", text: $ask)
+            TextField("Finding your drink", text: $ask)
                 .textFieldStyle(.plain)
                 .submitLabel(.search)
                 .onSubmit { Task { await model.applyFilter(ask) } }
