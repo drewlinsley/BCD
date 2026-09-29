@@ -12,6 +12,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -32,10 +33,11 @@ from bcd_schema import (
     TasteProfile,
 )
 from bcd_schema.api import DetectedText
+from bcd_schema.family import FAMILIES, Family, family_of, styles_in
 from fastapi import FastAPI, HTTPException, Query
 
 from .index import IndexedStore, LabelIndex
-from .recommend import rank_catalog, similar_profile
+from .recommend import rank_catalog, rank_family, shelf_vector, similar_profile
 from .resolver import Resolver
 from .taste import TASTE_EVENTS, load_profile, rated_products, rebuild_profile
 from .telemetry_ingest import TelemetryCollector
@@ -311,6 +313,65 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
                            exclude=rated_products(store, collector.iter_events(TASTE_EVENTS),
                                                   user_id))
     return {"user_id": user_id, "results": results}
+
+
+@app.get("/v1/recommend/families")
+def recommend_families(user_id: str = "demo", limit: int = 6,
+                       cross_style: bool = False) -> dict:
+    """Discover, one shelf at a time: gin, bourbon and vodka are three questions.
+
+    `/v1/recommend` can only answer whichever one the drinker's centroid sits nearest. A
+    profile built from two IPAs puts the whole nearest neighbourhood inside the IPA shelf, so
+    gin never appears in that list -- not ranked low, absent.
+
+    Families the drinker has rated in come back `basis: "yours"` and ranked. The rest come back
+    `basis: "unrated"`, ordered by what the catalog knows and carrying no score, because a
+    number there would be read as a prediction about someone who has never rated on that shelf.
+    `cross_style=true` ranks those by the taste learned elsewhere instead (`basis: "cross"`).
+
+    Ordered rated-in shelves first, then `FAMILIES`' own order, so the list opens on the ones
+    that are about the reader.
+    """
+    collector: TelemetryCollector = _state["telemetry"]
+    store: Store = _state["store"]
+    profile = _profile_for(user_id)
+    events = list(collector.iter_events(TASTE_EVENTS))
+    judged = rated_products(store, events, user_id)
+    mine = _families_rated_in(store, judged)
+
+    order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
+    # Over-fetch: `rank_family` drops whole vector groups the drinker has already judged, and a
+    # shelf of five that loses two should be a short section rather than a wrong one.
+    vectors = [shelf_vector(profile, rated_in=f in mine, cross_style=cross_style) for f in order]
+    fetched = store.shelves_many([(styles_in(f), v) for f, v in zip(order, vectors, strict=True)],
+                                 limit=limit * 4)
+
+    out = []
+    for family, vec, rows in zip(order, vectors, fetched, strict=True):
+        shelf = rank_family(store, _state["resolver"], profile, rows,
+                            personal=vec is not None, rated_in=family in mine,
+                            limit=limit, exclude=judged)
+        # A shelf with nothing on it is not a shelf. Cider is in the table for completeness
+        # and the catalog files all 333 of its rows with a null style.
+        if shelf["results"]:
+            out.append({"family": family.value, "label": family.label, **shelf})
+    return {"user_id": user_id, "rated": len(judged), "families": out}
+
+
+def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:
+    """The shelves this drinker has passed a verdict on. What separates a ranked family from a
+    dark one, so it is read from the verdicts themselves rather than from the profile: the
+    profile's style affinities are already averaged and would call a shelf theirs on the
+    strength of a style that merely resembles one they rated."""
+    out: set[Family] = set()
+    for pid in judged:
+        rec = get_product(store, pid)
+        if not rec:
+            continue
+        family = family_of((rec.get("style") or {}).get("value"))
+        if family:
+            out.add(family)
+    return out
 
 
 @app.get("/v1/product/{product_id}/similar")

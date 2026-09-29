@@ -1808,3 +1808,68 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
     }
 }
 
+
+@Suite struct Shelves {
+    /// A rated shelf carries scores; the client reads `basis` to know it may show them.
+    @Test func aRatedShelfDecodesWithItsScores() throws {
+        let json = """
+        {"rated":2,"families":[{"family":"ipa","label":"IPA","basis":"yours","results":[
+          {"product_id":"b:1","name":"Abner","producer":"Hill Farmstead","score":0.97,
+           "reason":"matches your citrus preference","cold_start":true,"evidence":"known"}]}]}
+        """
+        let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
+        let shelf = try #require(out.families.first)
+        #expect(shelf.basis == .yours)
+        #expect(shelf.isPersonal)
+        #expect(shelf.results.first?.score == 0.97)
+    }
+
+    /// The bug this guards: `Recommendation.score` is a non-optional `Double`, so reusing it
+    /// for shelves would fail to decode the twenty-one shelves that carry no score -- and
+    /// `try?` at the call site would turn that into an empty Discover screen.
+    @Test func anUnratedShelfDecodesWithNoScoreAtAll() throws {
+        let json = """
+        {"rated":2,"families":[{"family":"gin","label":"Gin","basis":"unrated","results":[
+          {"product_id":"s:1","name":"Beefeater","producer":"Beefeater","score":null,
+           "reason":null,"cold_start":false,"evidence":"known"}]}]}
+        """
+        let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
+        let shelf = try #require(out.families.first)
+        #expect(shelf.basis == .unrated)
+        #expect(shelf.isPersonal == false)
+        let pick = try #require(shelf.results.first)
+        #expect(pick.score == nil)
+        #expect(pick.reason == nil)
+        #expect(pick.name == "Beefeater")
+    }
+
+    /// A shelf ranked by a taste learned elsewhere is personal enough to show a number and not
+    /// personal enough to call it theirs. Collapsing `cross` into either of the others loses
+    /// exactly the distinction the toggle exists to offer.
+    @Test func aBorrowedTasteIsItsOwnKindOfAnswer() throws {
+        let json = """
+        {"rated":2,"families":[{"family":"gin","label":"Gin","basis":"cross","results":[]}]}
+        """
+        let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
+        let shelf = try #require(out.families.first)
+        #expect(shelf.basis == .cross)
+        #expect(shelf.isPersonal)
+    }
+
+    /// Shelves are identified by the stable key, not the label -- the label is prose and will
+    /// be reworded, and an expanded shelf must stay expanded when it is.
+    @Test func aShelfIsIdentifiedByItsKeyNotItsWords() throws {
+        let json = """
+        {"rated":0,"families":[{"family":"agave","label":"Tequila & mezcal","basis":"unrated",
+          "results":[]}]}
+        """
+        let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
+        #expect(out.families.first?.id == "agave")
+    }
+
+    @Test func aClientWithoutTheRouteOffersNoShelves() async throws {
+        let out = try await StubAPI().familyPicks(limit: 6, crossStyle: false)
+        #expect(out.families.isEmpty)
+        #expect(out.rated == 0)
+    }
+}

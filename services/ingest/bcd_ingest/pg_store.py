@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -245,6 +245,13 @@ class PostgresStore:
                     WHERE entity_type='product';
                 CREATE INDEX IF NOT EXISTS ix_gold_sensory_hnsw
                     ON gold USING hnsw (sensory vector_cosine_ops);
+                -- `nearest_in_family` filters to one shelf and then measures distance
+                -- exactly. Without this the filter full-scans gold -- 780ms to find 9,504
+                -- gin rows among 448k -- and the distance work, which is the part that
+                -- looks expensive, is not what costs. Lowercased to match `styles_in`.
+                CREATE INDEX IF NOT EXISTS ix_gold_style_of_product
+                    ON gold ((lower(record->'style'->>'value')))
+                    WHERE entity_type='product' AND sensory IS NOT NULL;
                 """
             )
             # The rows we actually know something about -- rated, profiled, or with an
@@ -727,6 +734,132 @@ class PostgresStore:
                 (_vec_literal(vec), limit),
             ).fetchall()
         return [r[0] for r in rows]
+
+    def nearest_in_family(self, vec: list[float], styles: Collection[str],
+                          limit: int = 10, *,
+                          conn: psycopg.Connection | None = None) -> list[dict[str, Any]]:
+        """The `limit` nearest products whose style names one family, nearest first.
+
+        Exact, not approximate, and that is the point. The HNSW index explores a fixed
+        neighbourhood and then the filter is applied to what it found: asked for gin near an
+        IPA-shaped taste it examined 213 rows, none of them gin, and returned nothing. A shelf
+        is small enough -- the biggest is 36k rows against the catalog's 534k -- that scanning
+        it outright is both correct and quick, once the style index makes finding it cheap.
+
+        Known vectors only, and one row per vector. A shelf is mostly rows carrying their
+        style's centroid -- gin is 9,659 rows of which 178 have a profile of their own, and
+        vodka's 25,957 rows hold 81 distinct shapes -- so ranking the whole shelf by distance
+        ranks nine thousand ties and returns an arbitrary six of them. `rank_catalog` asks the
+        known rows separately for exactly this reason; a shelf needs it more, not less.
+        The row that stands for a vector is the shortest-named one, as in `recommend`.
+
+        Empty `styles` returns nothing rather than the whole catalog: a family the caller could
+        not name is not every family.
+        """
+        styles = list(styles)
+        if not styles:
+            return []
+        sql = """
+            WITH shelf AS MATERIALIZED (
+                SELECT record, sensory
+                FROM gold
+                WHERE entity_type='product' AND sensory IS NOT NULL
+                  AND record->'sensory'->>'source' <> 'style_prior'
+                  AND lower(record->'style'->>'value') = ANY(%s)
+            ), one_per_vector AS (
+                SELECT DISTINCT ON (sensory) record, sensory FROM shelf
+                ORDER BY sensory, length(record->>'name'), record->>'name'
+            )
+            SELECT record FROM one_per_vector ORDER BY sensory <=> %s::vector LIMIT %s
+        """
+        args = (styles, _vec_literal(vec), limit)
+        if conn is not None:
+            with conn.cursor() as cur:
+                return [r[0] for r in cur.execute(sql, args).fetchall()]
+        with self._lock, self._conn.cursor() as cur:
+            return [r[0] for r in cur.execute(sql, args).fetchall()]
+
+    def best_known_in_family(self, styles: Collection[str], limit: int = 10, *,
+                             conn: psycopg.Connection | None = None) -> list[dict[str, Any]]:
+        """One family's rows, best-evidenced first, with no drinker involved.
+
+        What a shelf shows before anyone has rated on it. `nearest_in_family` needs a taste to
+        aim at; this needs none, and returns the rows the catalog knows most about -- drinkers'
+        consensus first, then a profile of the product, then confidence -- so the honest answer
+        to "what is on this shelf" is the part of it we can actually stand behind.
+
+        One row per vector, shortest name standing for the group, as everywhere else.
+        """
+        styles = list(styles)
+        if not styles:
+            return []
+        sql = """
+                WITH shelf AS MATERIALIZED (
+                    SELECT record, sensory,
+                           CASE record->'sensory'->>'source'
+                               WHEN 'review_consensus' THEN 0
+                               WHEN 'reconciled' THEN 0
+                               ELSE 1
+                           END AS tier,
+                           (record->'sensory'->>'confidence')::float AS conf
+                    FROM gold
+                    WHERE entity_type='product' AND sensory IS NOT NULL
+                      AND record->'sensory'->>'source' <> 'style_prior'
+                      AND lower(record->'style'->>'value') = ANY(%s)
+                ), one_per_vector AS (
+                    SELECT DISTINCT ON (sensory) record, tier, conf FROM shelf
+                    ORDER BY sensory, length(record->>'name'), record->>'name'
+                )
+                SELECT record FROM one_per_vector
+                ORDER BY tier, conf DESC NULLS LAST, record->>'name'
+                LIMIT %s
+        """
+        args = (styles, limit)
+        if conn is not None:
+            with conn.cursor() as cur:
+                return [r[0] for r in cur.execute(sql, args).fetchall()]
+        with self._lock, self._conn.cursor() as cur:
+            return [r[0] for r in cur.execute(sql, args).fetchall()]
+
+    def shelves_many(self, asks: Sequence[tuple[Collection[str], list[float] | None]],
+                     limit: int = 10) -> list[list[dict[str, Any]]]:
+        """Fetch several shelves at once, concurrently, answers aligned with `asks`.
+
+        Each ask is `(styles, vec)`: with a vector the shelf is ranked toward it
+        (`nearest_in_family`), without one it comes back best-evidenced first
+        (`best_known_in_family`). Discover mixes both in a single screen -- the shelves the
+        drinker has rated on are ranked for them, the rest are not -- so the two travel together.
+
+        One shelf costs 100-250ms and is mostly the scan; twenty-two in series is over three
+        seconds, which is a screen that fills in visibly section by section. The same reader
+        pool `match_products_many` uses makes it the cost of the slowest few instead.
+        """
+        asks = list(asks)
+        if len(asks) <= 1:
+            return [self._shelf(styles, vec, limit) for styles, vec in asks]
+        workers = min(len(asks), self._MATCH_POOL_SIZE)
+        results: list[list[dict[str, Any]]] = [[] for _ in asks]
+
+        def run(slot: int) -> None:
+            conn = self._reader()
+            try:
+                # Strided, as in `match_products_many`: shelves differ by 2.5x in size, and
+                # chunking would strand a worker behind Lager while the others idle.
+                for i in range(slot, len(asks), workers):
+                    styles, vec = asks[i]
+                    results[i] = self._shelf(styles, vec, limit, conn=conn)
+            finally:
+                self._release(conn)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(run, range(workers)))
+        return results
+
+    def _shelf(self, styles: Collection[str], vec: list[float] | None, limit: int, *,
+               conn: psycopg.Connection | None = None) -> list[dict[str, Any]]:
+        if vec is None:
+            return self.best_known_in_family(styles, limit, conn=conn)
+        return self.nearest_in_family(vec, styles, limit, conn=conn)
 
     def nearest_known(self, vec: list[float], limit: int = 10) -> list[list[dict[str, Any]]]:
         """The `limit` nearest distinct vectors among the known rows -- those whose vector

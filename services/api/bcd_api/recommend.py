@@ -179,6 +179,88 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
             for _key, product, score, reason, cold in chosen[:limit]]
 
 
+# ---- one shelf at a time ---------------------------------------------------------------------
+
+# Discover asks per family, because gin recommendations, bourbon recommendations and vodka
+# recommendations are three questions and `rank_catalog` can only answer whichever one the
+# drinker's centroid happens to sit nearest. A profile built from two IPAs puts the nearest 120
+# vectors in the catalog inside the IPA shelf, so gin cannot appear in that list however far it
+# is scrolled -- not ranked low, absent.
+#
+# A shelf is only ranked *for* someone when they have rated inside it. Ranking gin by an
+# IPA-shaped centroid asks which gin is most like an IPA, which is a real cosine and not a real
+# recommendation, and it amplifies bad style data rather than surviving it: measured on the live
+# catalog, a cross-style pass topped Bourbon, Rum AND Tequila with the same Japanese whisky,
+# because TTB filed each one's cask finish as its style ("Ichiro's Malt & Grain Refill Bourbon
+# Barrel Finish" -> style "Bourbon"). One mislabelled row wins three shelves it does not belong
+# on, because nothing on those shelves has a stronger claim to a taste built elsewhere.
+#
+# So an unrated shelf is answered `basis: "unrated"` and ordered by what the catalog knows rather
+# than by the drinker: no score, nothing claimed. The client shows it dark. `cross_style=True`
+# opts back into the cosine for those shelves, for a drinker who wants it.
+
+
+def shelf_vector(profile: TasteProfile | None, *, rated_in: bool,
+                 cross_style: bool = False) -> list[float] | None:
+    """What to rank a shelf toward, or None to leave it unranked. Lives here rather than at the
+    call site so the rule that decides `basis` and the rule that decides the query cannot drift
+    apart: a shelf ranked toward a vector must not come back saying nobody ranked it."""
+    if profile is None or profile.sensory_ideal is None:
+        return None
+    return profile.sensory_ideal.to_array() if (rated_in or cross_style) else None
+
+
+def rank_family(store: Store, resolver: Resolver, profile: TasteProfile | None,
+                rows: Collection[dict], *, personal: bool, rated_in: bool, limit: int = 6,
+                exclude: Collection[str] = ()) -> dict:
+    """One family's picks, from rows the caller has already fetched (see `shelf_vector` and
+    `Store.shelves_many` -- twenty-two shelves are fetched together, so the query does not
+    belong in here). Returns `{"basis": ..., "results": [...]}`.
+
+    `basis` says what the order means, and the three are not interchangeable:
+      - `"yours"`    - ranked by this drinker's taste, which they earned by rating in here;
+      - `"cross"`    - ranked by a taste learned on another shelf, because they asked for that;
+      - `"unrated"`  - not ranked for anyone. Best-evidenced first, and no score is returned,
+                       because there is no number here that would mean anything about them.
+    """
+    rows = list(rows)
+    skip = set(exclude)
+    seen: set[object] = set()
+    out: list[dict] = []
+    makers: dict[str, str | None] = {}
+
+    def _maker(product: Product) -> str | None:
+        pid = product.producer_id or ""
+        if pid not in makers:
+            makers[pid] = (store.get_gold(pid) or {}).get("name") if pid else None
+        return makers[pid]
+
+    for rec in rows:
+        product = Product.model_validate(rec)
+        if product.id in skip:
+            continue
+        key: object = tuple(product.sensory.to_array()) if product.sensory else product.id
+        if key in seen:
+            continue
+        seen.add(key)
+        score, reason, cold = resolver.score(product, profile if personal else None)
+        out.append({
+            "product_id": product.id, "name": product.name, "producer": _maker(product),
+            # An unrated shelf returns no score and no reason. A number here would be read as a
+            # prediction about the drinker, and the one thing known for certain is that it is not
+            # one -- they have never rated anything on this shelf.
+            "score": score if personal else None,
+            "reason": reason if personal else None,
+            "cold_start": cold,
+            "evidence": EVIDENCE[evidence_tier(product.sensory)],
+        })
+        if len(out) >= limit:
+            break
+
+    basis = "yours" if (personal and rated_in) else ("cross" if personal else "unrated")
+    return {"basis": basis, "results": out}
+
+
 # ---- what else tastes like this -------------------------------------------------------------
 
 # A product's own neighbours, which is a different question from `rank_catalog`'s. That one asks

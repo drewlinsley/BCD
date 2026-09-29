@@ -17,6 +17,9 @@ public protocol APIClientProtocol: Sendable {
     func similar(to productId: String, limit: Int) async throws -> SimilarResponse
     /// What the server has learned about the person this client speaks for.
     func profile() async throws -> TasteProfile
+    /// Suggestions shelf by shelf. `crossStyle` ranks the shelves they have never rated on by
+    /// the taste they built elsewhere; off, those shelves come back unranked and say so.
+    func familyPicks(limit: Int, crossStyle: Bool) async throws -> FamilyResponse
 }
 
 extension APIClientProtocol {
@@ -56,6 +59,10 @@ extension APIClientProtocol {
     public func profile() async throws -> TasteProfile {
         TasteProfile(userId: "", version: 0)
     }
+
+    /// No shelves. A stub exercises the empty state rather than a fabricated shelf.
+    public func familyPicks(limit: Int = 6, crossStyle: Bool = false) async throws
+        -> FamilyResponse { FamilyResponse() }
 }
 
 public enum APIError: Error, Sendable {
@@ -200,6 +207,28 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         try Self.check(resp)
         do {
             return try decoder.decode(TasteProfile.self, from: data)
+        } catch {
+            throw APIError.decoding("\(error)")
+        }
+    }
+
+    /// Suggestions shelf by shelf, rated-in shelves first. One call rather than one per shelf:
+    /// the server fetches all twenty-two concurrently (about a second) and a request each would
+    /// fill the screen in visibly.
+    public func familyPicks(limit: Int = 6, crossStyle: Bool = false) async throws
+        -> FamilyResponse {
+        guard var comps = URLComponents(url: baseURL.appendingPathComponent("v1/recommend/families"),
+                                        resolvingAgainstBaseURL: false) else {
+            throw APIError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "user_id", value: installId),
+                            URLQueryItem(name: "limit", value: String(limit)),
+                            URLQueryItem(name: "cross_style", value: crossStyle ? "true" : "false")]
+        guard let url = comps.url else { throw APIError.badURL }
+        let (data, resp) = try await session.data(from: url)
+        try Self.check(resp)
+        do {
+            return try decoder.decode(FamilyResponse.self, from: data)
         } catch {
             throw APIError.decoding("\(error)")
         }
