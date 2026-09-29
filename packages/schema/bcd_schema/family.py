@@ -19,6 +19,20 @@ from __future__ import annotations
 from enum import Enum
 
 
+class Group(str, Enum):
+    """The aisle a shelf is in. Two levels rather than one because twenty-two shelves in a flat
+    list is a scroll, and because "beer" and "spirits" is the division a drinker already has:
+    someone who wants a gin is not half-deciding between gin and stout on the way there."""
+
+    BEER = "beer"
+    SPIRITS = "spirits"
+    OTHER = "other"
+
+    @property
+    def label(self) -> str:
+        return {Group.BEER: "Beer", Group.SPIRITS: "Spirits", Group.OTHER: "Other"}[self]
+
+
 class Family(str, Enum):
     """What shelf a drink is on. The `label` is what a person is shown."""
 
@@ -52,6 +66,10 @@ class Family(str, Enum):
     def label(self) -> str:
         return _LABELS[self]
 
+    @property
+    def group(self) -> Group:
+        return _GROUPS[self]
+
 
 _LABELS: dict[Family, str] = {
     Family.VODKA: "Vodka",
@@ -77,6 +95,28 @@ _LABELS: dict[Family, str] = {
     Family.CIDER: "Cider",
     Family.SAKE: "Sake",
 }
+
+#: Which aisle each shelf is in. Cider and sake are their own thing and share an aisle with
+#: nothing: neither is a beer, and calling either a spirit would be worse than leaving it loose.
+_GROUPS: dict[Family, Group] = {
+    **{f: Group.BEER for f in (Family.IPA, Family.PALE_ALE, Family.STOUT, Family.PORTER,
+                               Family.LAGER, Family.WHEAT, Family.SOUR, Family.BELGIAN)},
+    **{f: Group.SPIRITS for f in (Family.VODKA, Family.GIN, Family.BOURBON, Family.RYE,
+                                  Family.SCOTCH, Family.IRISH, Family.WHISKEY, Family.AGAVE,
+                                  Family.RUM, Family.BRANDY, Family.LIQUEUR, Family.AMARO)},
+    Family.CIDER: Group.OTHER,
+    Family.SAKE: Group.OTHER,
+}
+
+#: Aisles in the order they are read when nothing is known about the drinker. The catalog is
+#: 337k beer against 158k spirits.
+GROUPS: tuple[Group, ...] = (Group.BEER, Group.SPIRITS, Group.OTHER)
+
+
+def families_in(group: Group) -> tuple[Family, ...]:
+    """The shelves in one aisle, in `FAMILIES` order."""
+    return tuple(f for f in FAMILIES if f.group is group)
+
 
 # Styles that name a family, lowercased. A style may only appear once.
 #

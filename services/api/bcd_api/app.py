@@ -33,7 +33,14 @@ from bcd_schema import (
     TasteProfile,
 )
 from bcd_schema.api import DetectedText
-from bcd_schema.family import FAMILIES, Family, family_of, styles_in
+from bcd_schema.family import (
+    FAMILIES,
+    GROUPS,
+    Family,
+    families_in,
+    family_of,
+    styles_in,
+)
 from fastapi import FastAPI, HTTPException, Query
 
 from .index import IndexedStore, LabelIndex
@@ -340,13 +347,15 @@ def recommend_families(user_id: str = "demo", limit: int = 6,
     mine = _families_rated_in(store, judged)
 
     order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
+    # Ordered rated-in shelves first WITHIN their aisle, below; the sort above only decides
+    # which shelf leads its own group.
     # Over-fetch: `rank_family` drops whole vector groups the drinker has already judged, and a
     # shelf of five that loses two should be a short section rather than a wrong one.
     vectors = [shelf_vector(profile, rated_in=f in mine, cross_style=cross_style) for f in order]
     fetched = store.shelves_many([(styles_in(f), v) for f, v in zip(order, vectors, strict=True)],
                                  limit=limit * 4)
 
-    out = []
+    shelves: dict[Family, dict] = {}
     for family, vec, rows in zip(order, vectors, fetched, strict=True):
         shelf = rank_family(store, _state["resolver"], profile, rows,
                             personal=vec is not None, rated_in=family in mine,
@@ -354,8 +363,21 @@ def recommend_families(user_id: str = "demo", limit: int = 6,
         # A shelf with nothing on it is not a shelf. Cider is in the table for completeness
         # and the catalog files all 333 of its rows with a null style.
         if shelf["results"]:
-            out.append({"family": family.value, "label": family.label, **shelf})
-    return {"user_id": user_id, "rated": len(judged), "families": out}
+            shelves[family] = {"family": family.value, "label": family.label, **shelf}
+
+    # Two levels: twenty-two shelves in a flat list is a scroll, and beer-or-spirits is a
+    # division the drinker already made before opening the screen.
+    groups = []
+    for group in sorted(GROUPS, key=lambda g: (not (mine & set(families_in(g))),
+                                               GROUPS.index(g))):
+        inside = [shelves[f] for f in sorted(families_in(group),
+                                             key=lambda f: (f not in mine, FAMILIES.index(f)))
+                  if f in shelves]
+        if inside:
+            groups.append({"group": group.value, "label": group.label,
+                           "rated_in": any(f in mine for f in families_in(group)),
+                           "families": inside})
+    return {"user_id": user_id, "rated": len(judged), "groups": groups}
 
 
 def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:

@@ -90,3 +90,42 @@ def test_every_family_says_its_name_out_loud():
 ])
 def test_the_catalogs_biggest_styles_land_where_a_drinker_would_look(style, expected):
     assert family_of(style) is expected
+
+
+# ---- aisles ---------------------------------------------------------------------------------
+
+def test_every_shelf_is_in_exactly_one_aisle():
+    """A shelf missing from `families_in` is one Discover can never reach, since the screen
+    walks aisles and not families."""
+    from bcd_schema.family import GROUPS, families_in
+    seen = [f for g in GROUPS for f in families_in(g)]
+    assert sorted(seen, key=FAMILIES.index) == list(FAMILIES)
+    assert len(seen) == len(set(seen))
+
+
+def test_beer_holds_the_beer_shelves():
+    from bcd_schema.family import Group, families_in
+    assert set(families_in(Group.BEER)) == {
+        Family.IPA, Family.PALE_ALE, Family.LAGER, Family.STOUT,
+        Family.PORTER, Family.WHEAT, Family.SOUR, Family.BELGIAN}
+
+
+def test_spirits_holds_the_spirit_shelves():
+    from bcd_schema.family import Group, families_in
+    assert Family.GIN in families_in(Group.SPIRITS)
+    assert Family.BOURBON in families_in(Group.SPIRITS)
+    assert Family.IPA not in families_in(Group.SPIRITS)
+
+
+def test_sake_and_cider_are_neither():
+    """Calling either a spirit would be worse than leaving it loose, and neither is a beer."""
+    from bcd_schema.family import Group
+    assert Family.SAKE.group is Group.OTHER
+    assert Family.CIDER.group is Group.OTHER
+
+
+def test_an_aisle_keeps_the_browsing_order_of_its_shelves():
+    from bcd_schema.family import Group, families_in
+    beer = families_in(Group.BEER)
+    assert beer[0] is Family.IPA
+    assert list(beer) == sorted(beer, key=FAMILIES.index)

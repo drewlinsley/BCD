@@ -15,7 +15,7 @@ import BCDKit
 struct DiscoverView: View {
     @EnvironmentObject var env: AppEnvironment
     @State private var picks: [Recommendation] = []
-    @State private var shelves: [FamilyPicks] = []
+    @State private var aisles: [FamilyGroup] = []
     /// Rank the shelves they have never rated on by the taste they built elsewhere. Off by
     /// default, and deliberately: asking which gin is most like an IPA is a real cosine and not
     /// a real recommendation, and it amplifies bad style data rather than surviving it. Measured
@@ -99,24 +99,33 @@ struct DiscoverView: View {
             // One Section for all of them. Twenty-two sections put an inset card and a gap
             // around every shelf, which turned a list you scan into a list you scroll.
             Section {
-                ForEach(shelves) { shelf in
-                    DisclosureGroup(isExpanded: expansion(of: shelf)) {
-                        ForEach(Array(shelf.results.enumerated()), id: \.element.id) { rank, pick in
-                            Button { Task { await openShelfPick(pick, rank: rank) } } label: {
-                                ShelfRow(pick: pick,
-                                         mine: env.reactions.reaction(for: pick.productId),
-                                         busy: opening == pick.productId,
-                                         personal: shelf.isPersonal)
+                ForEach(aisles) { aisle in
+                    DisclosureGroup(isExpanded: expansion(of: aisle.id)) {
+                        ForEach(aisle.families) { shelf in
+                            DisclosureGroup(isExpanded: expansion(of: shelf.id)) {
+                                ForEach(Array(shelf.results.enumerated()),
+                                        id: \.element.id) { rank, pick in
+                                    Button { Task { await openShelfPick(pick, rank: rank) } } label: {
+                                        ShelfRow(pick: pick,
+                                                 mine: env.reactions.reaction(for: pick.productId),
+                                                 busy: opening == pick.productId,
+                                                 personal: shelf.isPersonal)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                if !shelf.isPersonal {
+                                    Text("Nothing here is scored for you \u{2014} rate one and "
+                                         + "this shelf becomes yours.")
+                                        .font(.caption).foregroundStyle(Brand.textMuted)
+                                }
+                            } label: {
+                                ShelfHeader(shelf: shelf)
                             }
-                            .buttonStyle(.plain)
-                        }
-                        if !shelf.isPersonal {
-                            Text("Nothing here is scored for you \u{2014} rate one and this "
-                                 + "shelf becomes yours.")
-                                .font(.caption).foregroundStyle(Brand.textMuted)
                         }
                     } label: {
-                        ShelfHeader(shelf: shelf)
+                        Text(aisle.label)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(aisle.ratedIn ? Brand.text : Brand.textMuted)
                     }
                 }
             }
@@ -131,12 +140,13 @@ struct DiscoverView: View {
         .refreshable { await load() }
     }
 
-    /// Rated shelves open, dark ones shut, until the reader says otherwise.
-    private func expansion(of shelf: FamilyPicks) -> Binding<Bool> {
+    /// Open by key, for aisles and shelves alike -- both are `DisclosureGroup`s over the same
+    /// set, so one aisle and one shelf can be open without a second piece of state.
+    private func expansion(of key: String) -> Binding<Bool> {
         Binding(
-            get: { open.contains(shelf.family) },
+            get: { open.contains(key) },
             set: { isOpen in
-                if isOpen { open.insert(shelf.family) } else { open.remove(shelf.family) }
+                if isOpen { open.insert(key) } else { open.remove(key) }
             })
     }
 
@@ -147,26 +157,31 @@ struct DiscoverView: View {
         do {
             if rated == 0 {
                 picks = try await env.api.recommend(limit: 15)
-                shelves = []
+                aisles = []
             } else {
                 let answer = try await env.api.familyPicks(limit: 6, crossStyle: crossStyle)
-                shelves = answer.families
-                // Only on the first load: reopening a shelf the reader shut, every time a
-                // rating lands, would undo them.
+                aisles = answer.groups
+                // Open the aisle they have rated in and the shelf inside it, and nothing else:
+                // the screen should start as three rows and one answer, not as a scroll.
+                // Only on the first load -- reopening what the reader shut, every time a rating
+                // lands, would undo them.
                 if open.isEmpty {
-                    open = Set(answer.families.filter(\.isPersonal).map(\.family))
+                    open = Set(answer.groups.filter(\.ratedIn).map(\.id))
+                        .union(answer.groups.flatMap(\.families)
+                            .filter(\.isPersonal).map(\.id))
                 }
             }
             state = .ready
             _ = await env.telemetry.log(
                 TelemetryEvent.recommendationsShown.rawValue, tier: .analytics,
                 ["n_results": .int(rated == 0 ? picks.count
-                                   : shelves.reduce(0) { $0 + $1.results.count }),
+                                   : aisles.flatMap(\.families)
+                                       .reduce(0) { $0 + $1.results.count }),
                  "n_rated": .int(rated),
                  "top_evidence": .string(rated == 0
                                          ? (picks.first?.evidence.rawValue ?? "guessed")
-                                         : (shelves.first?.results.first?.evidence.rawValue
-                                            ?? "guessed"))])
+                                         : (aisles.first?.families.first?.results.first?
+                                            .evidence.rawValue ?? "guessed"))])
         } catch {
             state = .failed
         }

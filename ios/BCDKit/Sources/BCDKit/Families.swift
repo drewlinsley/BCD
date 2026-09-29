@@ -64,14 +64,40 @@ public struct FamilyPick: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+/// An aisle: Beer, Spirits, and whatever belongs to neither. Two levels rather than one because
+/// twenty-two shelves in a flat list is a scroll, and because beer-or-spirits is a division the
+/// drinker already made before they opened the screen.
+public struct FamilyGroup: Codable, Sendable, Identifiable {
+    public var id: String { group }
+    /// Stable key (`beer`, `spirits`). Never shown.
+    public let group: String
+    public let label: String
+    /// Whether any shelf in here is one they have rated on. What decides which aisle opens.
+    public let ratedIn: Bool
+    public let families: [FamilyPicks]
+
+    enum CodingKeys: String, CodingKey {
+        case group, label, families
+        case ratedIn = "rated_in"
+    }
+
+    public init(group: String, label: String, ratedIn: Bool = false,
+                families: [FamilyPicks] = []) {
+        self.group = group
+        self.label = label
+        self.ratedIn = ratedIn
+        self.families = families
+    }
+}
+
 public struct FamilyResponse: Codable, Sendable {
     /// How many drinks this install has been judged on, as the server counts them. What decides
     /// whether any shelf can be `yours`.
     public let rated: Int
-    public let families: [FamilyPicks]
+    public let groups: [FamilyGroup]
 
-    public init(rated: Int = 0, families: [FamilyPicks] = []) {
+    public init(rated: Int = 0, groups: [FamilyGroup] = []) {
         self.rated = rated
-        self.families = families
+        self.groups = groups
     }
 }

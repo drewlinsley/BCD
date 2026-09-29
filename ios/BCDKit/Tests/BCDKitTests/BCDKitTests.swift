@@ -1813,12 +1813,13 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
     /// A rated shelf carries scores; the client reads `basis` to know it may show them.
     @Test func aRatedShelfDecodesWithItsScores() throws {
         let json = """
-        {"rated":2,"families":[{"family":"ipa","label":"IPA","basis":"yours","results":[
+        {"rated":2,"groups":[{"group":"beer","label":"Beer","rated_in":true,"families":[
+          {"family":"ipa","label":"IPA","basis":"yours","results":[
           {"product_id":"b:1","name":"Abner","producer":"Hill Farmstead","score":0.97,
-           "reason":"matches your citrus preference","cold_start":true,"evidence":"known"}]}]}
+           "reason":"matches your citrus preference","cold_start":true,"evidence":"known"}]}]}]}
         """
         let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
-        let shelf = try #require(out.families.first)
+        let shelf = try #require(out.groups.first?.families.first)
         #expect(shelf.basis == .yours)
         #expect(shelf.isPersonal)
         #expect(shelf.results.first?.score == 0.97)
@@ -1829,12 +1830,13 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
     /// `try?` at the call site would turn that into an empty Discover screen.
     @Test func anUnratedShelfDecodesWithNoScoreAtAll() throws {
         let json = """
-        {"rated":2,"families":[{"family":"gin","label":"Gin","basis":"unrated","results":[
+        {"rated":2,"groups":[{"group":"spirits","label":"Spirits","rated_in":false,"families":[
+          {"family":"gin","label":"Gin","basis":"unrated","results":[
           {"product_id":"s:1","name":"Beefeater","producer":"Beefeater","score":null,
-           "reason":null,"cold_start":false,"evidence":"known"}]}]}
+           "reason":null,"cold_start":false,"evidence":"known"}]}]}]}
         """
         let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
-        let shelf = try #require(out.families.first)
+        let shelf = try #require(out.groups.first?.families.first)
         #expect(shelf.basis == .unrated)
         #expect(shelf.isPersonal == false)
         let pick = try #require(shelf.results.first)
@@ -1848,10 +1850,11 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
     /// exactly the distinction the toggle exists to offer.
     @Test func aBorrowedTasteIsItsOwnKindOfAnswer() throws {
         let json = """
-        {"rated":2,"families":[{"family":"gin","label":"Gin","basis":"cross","results":[]}]}
+        {"rated":2,"groups":[{"group":"spirits","label":"Spirits","rated_in":false,
+          "families":[{"family":"gin","label":"Gin","basis":"cross","results":[]}]}]}
         """
         let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
-        let shelf = try #require(out.families.first)
+        let shelf = try #require(out.groups.first?.families.first)
         #expect(shelf.basis == .cross)
         #expect(shelf.isPersonal)
     }
@@ -1860,16 +1863,31 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
     /// be reworded, and an expanded shelf must stay expanded when it is.
     @Test func aShelfIsIdentifiedByItsKeyNotItsWords() throws {
         let json = """
-        {"rated":0,"families":[{"family":"agave","label":"Tequila & mezcal","basis":"unrated",
-          "results":[]}]}
+        {"rated":0,"groups":[{"group":"spirits","label":"Spirits","rated_in":false,
+          "families":[{"family":"agave","label":"Tequila & mezcal","basis":"unrated",
+          "results":[]}]}]}
         """
         let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
-        #expect(out.families.first?.id == "agave")
+        #expect(out.groups.first?.families.first?.id == "agave")
+    }
+
+    /// The aisle a drinker has rated in is the one that opens, so `rated_in` has to survive
+    /// the trip. It is not derivable from the shelves alone once a shelf is dropped for being
+    /// empty -- a drinker could have rated on a shelf that returned nothing this time.
+    @Test func anAisleSaysWhetherItIsOneTheyHaveRatedIn() throws {
+        let json = """
+        {"rated":2,"groups":[
+          {"group":"beer","label":"Beer","rated_in":true,"families":[]},
+          {"group":"spirits","label":"Spirits","rated_in":false,"families":[]}]}
+        """
+        let out = try JSONDecoder().decode(FamilyResponse.self, from: Data(json.utf8))
+        #expect(out.groups.map(\.ratedIn) == [true, false])
+        #expect(out.groups.map(\.id) == ["beer", "spirits"])
     }
 
     @Test func aClientWithoutTheRouteOffersNoShelves() async throws {
         let out = try await StubAPI().familyPicks(limit: 6, crossStyle: false)
-        #expect(out.families.isEmpty)
+        #expect(out.groups.isEmpty)
         #expect(out.rated == 0)
     }
 }
