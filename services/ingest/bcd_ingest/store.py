@@ -14,7 +14,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -30,6 +30,14 @@ def _now() -> str:
 
 def _tokenize(s: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if len(t) > 2}
+
+
+
+def _plainest(members: list[dict[str, Any]]) -> dict[str, Any]:
+    """The row that stands for a vector: the shortest name, ties broken alphabetically. The
+    same rule `nearest_known` and `recommend` use, so one vector answers to one name
+    wherever it is shown."""
+    return min(members, key=lambda p: (len(p.get("name") or ""), p.get("name") or ""))
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -334,6 +342,52 @@ class MedallionStore:
         return [sorted(members, key=lambda p: (len(p.get("name") or ""), p.get("name") or ""))[:16]
                 for _arr, members in nearest[:limit]]
 
+    def nearest_in_family(self, vec: list[float], styles: Collection[str],
+                          limit: int = 10) -> list[dict[str, Any]]:
+        """`nearest_known` restricted to one family's styles. Python-side twin of the
+        Postgres store's filtered exact search."""
+        wanted = {s.lower() for s in styles}
+        groups: dict[tuple[float, ...], list[dict]] = {}
+        for p in self._known_on_shelf(wanted):
+            groups.setdefault(tuple(_sensory_array(p)), []).append(p)   # type: ignore[arg-type]
+        nearest = sorted(groups.items(), key=lambda kv: -_cosine(vec, list(kv[0])))
+        return [_plainest(members) for _arr, members in nearest[:limit]]
+
+    def best_known_in_family(self, styles: Collection[str],
+                             limit: int = 10) -> list[dict[str, Any]]:
+        """One family's rows, best-evidenced first, with no taste involved."""
+        wanted = {s.lower() for s in styles}
+        groups: dict[tuple[float, ...], list[dict]] = {}
+        for p in self._known_on_shelf(wanted):
+            groups.setdefault(tuple(_sensory_array(p)), []).append(p)   # type: ignore[arg-type]
+        chosen = [_plainest(members) for members in groups.values()]
+        chosen.sort(key=lambda p: (
+            0 if (p.get("sensory") or {}).get("source") in ("review_consensus", "reconciled")
+            else 1,
+            -((p.get("sensory") or {}).get("confidence") or 0.0),
+            p.get("name") or "",
+        ))
+        return chosen[:limit]
+
+    def shelves_many(self, asks: Sequence[tuple[Collection[str], list[float] | None]],
+                     limit: int = 10) -> list[list[dict[str, Any]]]:
+        """Serial twin of the Postgres store's concurrent shelf fetch — this one is a local
+        file and has nothing to gain from a pool. See `PostgresStore.shelves_many`."""
+        return [self.nearest_in_family(vec, styles, limit) if vec is not None
+                else self.best_known_in_family(styles, limit)
+                for styles, vec in asks]
+
+    def _known_on_shelf(self, wanted: set[str]) -> Iterator[dict[str, Any]]:
+        """Products whose style names one of `wanted` and whose vector is their own."""
+        for p in self.iter_gold("product"):
+            if _sensory_array(p) is None:
+                continue
+            if (p.get("sensory") or {}).get("source") == "style_prior":
+                continue
+            style = ((p.get("style") or {}).get("value") or "").lower()
+            if style in wanted:
+                yield p
+
     def close(self) -> None:
         self._db.close()
 
@@ -368,6 +422,12 @@ class Store(Protocol):
     def refresh_search_names(self, ids: Iterable[str] | None = None) -> int: ...
     def nearest_by_sensory(self, vec: list[float], limit: int = 10) -> list[dict[str, Any]]: ...
     def nearest_known(self, vec: list[float], limit: int = 10) -> list[list[dict[str, Any]]]: ...
+    def nearest_in_family(self, vec: list[float], styles: Collection[str],
+                          limit: int = 10) -> list[dict[str, Any]]: ...
+    def best_known_in_family(self, styles: Collection[str],
+                             limit: int = 10) -> list[dict[str, Any]]: ...
+    def shelves_many(self, asks: Sequence[tuple[Collection[str], list[float] | None]],
+                     limit: int = 10) -> list[list[dict[str, Any]]]: ...
     def close(self) -> None: ...
 
 
