@@ -130,6 +130,16 @@ _CENTROIDS: dict[str, dict[str, float]] = {
                       "alcohol_warmth": 0.7, "dryness_finish": 0.55, "body_fullness": 0.5},
     "scotch": {"vanilla_oak": 0.6, "malty_bready": 0.4, "honey": 0.45, "nutty": 0.35,
                "caramel_toffee": 0.4, "alcohol_warmth": 0.7, "dryness_finish": 0.5, "sweet": 0.3},
+    # A malt whisky whose label does not say where it is from. "Single malt" was a keyword for
+    # `scotch`, so 566 rows printed "Scotch Whisky" on the strength of those two words alone --
+    # 259 of them saying American, Oregon or Texas on the label, and 271 saying nothing about
+    # origin at all (2026-09-25). Scotch is a place. This is the same grain and the same still
+    # without the claim: more malt and more caramel than a Scotch, because what files here is
+    # usually matured in new charred oak rather than a refill cask, and none of the honeyed
+    # softness age in a used butt gives.
+    "single_malt": {"malty_bready": 0.55, "vanilla_oak": 0.6, "caramel_toffee": 0.45,
+                    "honey": 0.35, "nutty": 0.35, "stone_fruit": 0.25, "alcohol_warmth": 0.7,
+                    "dryness_finish": 0.45, "sweet": 0.35},
     "irish_whiskey": {"vanilla_oak": 0.5, "honey": 0.45, "malty_bready": 0.35,
                       "caramel_toffee": 0.4, "alcohol_warmth": 0.6, "sweet": 0.35,
                       "dryness_finish": 0.4, "nutty": 0.3},
@@ -230,6 +240,7 @@ _ABV: dict[str, float] = {
     "porter": 5.5, "wheat": 5.0, "tripel": 8.5, "belgian_dark": 7.5, "saison": 6.0, "sour": 4.5,
     "amber": 5.3, "brown": 5.2, "bock": 6.8, "pilsner": 4.8, "helles": 4.9, "radler": 2.5,
     "lager": 4.8, "beer": 5.0, "peated_scotch": 43.0, "scotch": 43.0, "irish_whiskey": 40.0,
+    "single_malt": 43.0,
     "bourbon": 45.0, "rye": 45.0, "whiskey": 43.0, "spiced_rum": 37.5, "aged_rum": 40.0,
     "white_rum": 40.0, "rum": 40.0, "gin": 42.0, "vodka": 40.0, "mezcal": 45.0, "tequila": 40.0,
     "agave_spirit": 45.0,
@@ -381,12 +392,24 @@ _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
     # smoked bourbon is a bourbon with smoke in it. Only peat itself, and the distilleries
     # famous for it, name a peated Scotch.
     ("peated_scotch", ("islay", "peated", "peat", "laphroaig", "lagavulin", "ardbeg")),
-    ("scotch", ("single malt", "scotch", "speyside", "highland", "glen", "macallan", "ecosse",
+    # "single malt" used to be here. It says how a whisky was made -- one distillery, all
+    # malted barley -- and nothing about where, so it belongs to no country. Scotch keeps the
+    # word Scotch, the Scottish regions and the distilleries nobody confuses.
+    ("scotch", ("scotch", "speyside", "highland", "glen", "macallan", "ecosse",
                 "chivas", "ballantine", "grant", "famous grouse", "johnnie walker")),
     ("irish_whiskey", ("irish", "jameson", "tullamore", "bushmills", "irlandais")),
     ("bourbon", ("bourbon", "tennessee", "kentucky", "jack daniel", "buffalo trace", "four roses",
                  "maker", "wild turkey", "jim beam")),
     ("rye", ("rye whiskey", "rye whisky", " rye")),
+    # After the origins above, so an Irish or Highland single malt is read as one, and before
+    # the bare word whisky, so a single malt is not merely a whisky.
+    #
+    # Only the phrase "single malt". A looser "malt whisky" claims 155 names and 87 of them say
+    # PURE, BLENDED or VATTED malt, which is a blend of malts from several distilleries -- the
+    # opposite of a single malt ("Suntory Pure Malt", "Koshiji Pure Malt"). The 81 rows the
+    # registry files as class "Malt Whisky" are read by `_CLASS_RULES` instead, where the filing
+    # says it and the name does not have to.
+    ("single_malt", ("single malt",)),
     ("whiskey", ("whiskey", "whisky", "whisk")),
     ("spiced_rum", ("spiced", "kraken", "captain morgan")),
     ("aged_rum", ("añejo", "anejo", "dark rum", "gold rum", "aged rum", "negrita", "reserva",
@@ -436,6 +459,10 @@ _CLASS_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("rye", ("rye whisk",)),
     ("flavored_whiskey", ("whisky (flavored)", "whiskey (flavored)", "flavored whisk",
                           "liqueurs (whisky)", "liqueurs (whiskey)")),
+    # The registry files these as their own thing, and they are not Scotch: 237 American
+    # single malts and 81 plain malt whiskies. "Single Malt Scotch Whisky" is matched by the
+    # scotch rule above before it reaches here.
+    ("single_malt", ("american single malt", "malt whisky")),
     ("whiskey", ("whisk", "canadian", "single malt")),
     # agave. "Agave Spirits" covered every agave distillate that is NOT tequila and was
     # mapped to `tequila` by the bare "agave" keyword. It is a bucket -- but a bucket of one
@@ -493,7 +520,10 @@ def normalize_class(class_type: str | None) -> str:
     """A TTB class/type description as the rules read it: casefolded, the bottling suffix
     (FB foreign-bottled, USB US-bottled, BIB bottled-in-bond) and stray asterisks gone."""
     c = _norm(class_type or "").strip().rstrip("*").strip()
-    return _BOTTLING_SUFFIX.sub("", c).strip()
+    # One filer writes the suffix off a dash -- "American Single Malt Whiskey - Bib", the only
+    # such form in the registry -- and the dash left behind stopped the description matching
+    # its entry in `_CLASS_NAMES`, so 8 rows printed the derived name instead of the filed one.
+    return _BOTTLING_SUFFIX.sub("", c).strip().rstrip("-–—").strip()
 
 
 def class_style(class_type: str | None) -> str | None:
@@ -529,6 +559,7 @@ _STYLE_NAMES: dict[str, str] = {
     "flavored_malt": "Flavored Malt Beverage", "malt_liquor": "Malt Liquor",
     "na_beer": "Non-Alcoholic Beer", "peated_scotch": "Peated Scotch", "scotch": "Scotch Whisky",
     "irish_whiskey": "Irish Whiskey", "bourbon": "Bourbon", "rye": "Rye Whiskey",
+    "single_malt": "Single Malt Whisky",
     "whiskey": "Whiskey", "flavored_whiskey": "Flavored Whiskey", "spiced_rum": "Spiced Rum",
     "aged_rum": "Gold Rum", "white_rum": "White Rum", "flavored_rum": "Flavored Rum", "rum": "Rum",
     "gin": "Gin", "flavored_gin": "Flavored Gin", "vodka": "Vodka",
@@ -558,6 +589,9 @@ _CLASS_NAMES: dict[str, str] = {
     "irish whisky": "Irish Whiskey",
     "corn whisky": "Corn Whiskey",
     "american single malt whiskey": "American Single Malt",
+    "straight american single malt": "American Single Malt",
+    "malt whisky": "Malt Whisky",
+    "straight malt whisky": "Straight Malt Whisky",
     "london dry distilled gin": "London Dry Gin",
     "london dry gin": "London Dry Gin",
     "cognac (brandy)": "Cognac",
@@ -1079,7 +1113,7 @@ _WHISKY_MARK_DELTAS: dict[str, dict[str, float]] = {
 #: The styles a whisky label's marks apply to -- gated on the STYLE, so "single barrel" on a
 #: tequila is read by the agave table instead and "sherry" on a brandy by neither.
 _WHISKY_STYLES = frozenset({"scotch", "peated_scotch", "bourbon", "rye", "whiskey",
-                            "irish_whiskey", "flavored_whiskey"})
+                            "irish_whiskey", "flavored_whiskey", "single_malt"})
 
 
 def whisky_marks(name: str) -> list[str]:
