@@ -132,3 +132,99 @@ def test_an_aisle_keeps_the_browsing_order_of_its_shelves():
     beer = families_in(Group.BEER)
     assert beer[0] is Family.IPA
     assert list(beer) == sorted(beer, key=FAMILIES.index)
+
+
+# ---- a style wearing a qualifier ------------------------------------------------------------
+
+@pytest.mark.parametrize("style,category,expected", [
+    ("Contemporary gin", "spirit", Family.GIN),
+    ("Peated Scotch", "spirit", Family.SCOTCH),
+    ("Blended Bourbon", "spirit", Family.BOURBON),
+    ("Cognac VS", "spirit", Family.BRANDY),
+    ("Tennessee whiskey", "spirit", Family.WHISKEY),
+    ("Vodka 90-99 Proof", "spirit", Family.VODKA),
+    ("Hazy IPA", "beer", Family.IPA),
+    ("Barrel-aged imperial stout", "beer", Family.STOUT),
+    ("Pale lager", "beer", Family.LAGER),
+    ("Imperial porter", "beer", Family.PORTER),
+])
+def test_a_qualifier_does_not_hide_the_style(style, category, expected):
+    """5,712 rows across 436 styles name a style the table knows, wearing one it does not.
+    Measured on the live catalog 2026-09-30, every one of them on no shelf at all — and the
+    failure hides itself, because the shelf a drinker rated on simply stays dark."""
+    assert family_of(style, category) is expected
+
+
+@pytest.mark.parametrize("style,expected", [
+    ("Apricot Brandy", Family.BRANDY),
+    ("Blackberry Flavored Brandy", Family.BRANDY),
+    ("Cinnamon whisky liqueur", Family.LIQUEUR),
+    ("Gin Liqueurs", Family.LIQUEUR),
+])
+def test_the_last_style_word_decides(style, expected):
+    """English puts the head noun last. An apricot brandy is a brandy and a whisky liqueur is
+    a liqueur, and reading the FIRST style word would file both under the ingredient."""
+    assert family_of(style) is expected
+
+
+@pytest.mark.parametrize("style,expected", [
+    ("Fruited sour ale", Family.SOUR),            # `sour ale` over the `ale` marker
+    ("Blended straight bourbon", Family.BOURBON),
+    ("Dry Irish stout", Family.STOUT),
+    ("Fruit wheat ale", Family.WHEAT),            # `wheat ale` over `ale`
+])
+def test_the_longest_phrase_ending_last_wins(style, expected):
+    assert family_of(style) is expected
+
+
+def test_a_bare_class_name_is_still_no_family():
+    """The guard that makes the whole fallback safe: a phrase spanning the WHOLE style is
+    ignored, so `Ale` stays shelfless while `Scotch ale` reaches the ale shelf. Without it the
+    marker would put 98,440 unknown beers on a shelf in one line."""
+    for style in ("Ale", "ale", "  ALE  ", "Beer", "Malt Beverage", "Specialty", "Liqueur"):
+        assert family_of(style, "beer") is None, style
+    assert family_of("Scotch ale", "beer") is Family.PALE_ALE
+
+
+@pytest.mark.parametrize("style", [
+    "Ginger Beer",          # gin
+    "Butterscotch sauce",   # scotch
+    "Original recipe",      # gin
+    "Palest shade",         # pale ale
+])
+def test_a_style_word_inside_another_word_is_not_that_style(style):
+    """The cask-finish pass learned this the expensive way: `gin` lives inside `ginger` and
+    `original`, `oro` inside `oloroso`. A guess is exactly where that would happen again."""
+    assert family_of(style) is None
+
+
+def test_the_rows_own_category_can_reject_a_guess_but_never_make_one():
+    """A beer whose style trails off into a cask is still a beer. The exact table stays
+    category-blind on purpose — 620 Tequila rows are filed under category `other` — but a
+    guess does not get that benefit."""
+    assert family_of("Stout aged in bourbon") is Family.BOURBON          # last word, no category
+    assert family_of("Stout aged in bourbon", "beer") is Family.STOUT    # ...the aisle says no
+    assert family_of("Tequila", "other") is Family.AGAVE                 # exact: unguarded
+
+
+# ---- which spellings fill a shelf -----------------------------------------------------------
+
+def test_shelf_styles_reads_the_spellings_the_catalog_really_holds():
+    """`styles_in` names what somebody wrote in the table; the shelf query has to match what is
+    in the catalog. Otherwise the Scotch shelf calls itself yours the moment you rate a
+    `Peated Scotch`, and then does not contain one."""
+    from bcd_schema.family import shelf_styles
+    found = shelf_styles([("spirit", "Peated Scotch"), ("spirit", "Single Malt Scotch"),
+                          ("beer", "Hazy IPA"), ("beer", "Ale"), (None, "")])
+    assert found[Family.SCOTCH] == ["peated scotch", "single malt scotch"]
+    assert found[Family.IPA] == ["hazy ipa"]
+    assert Family.PALE_ALE not in found
+
+
+def test_shelf_styles_drops_a_spelling_two_aisles_both_claim():
+    """The query filters on the style alone, so one spelling cannot be a beer on one shelf and
+    a whisky on another. Dropping it leaves a shelf short; keeping it puts the wrong drink on
+    somebody's shelf, which is worse."""
+    from bcd_schema.family import shelf_styles
+    found = shelf_styles([("beer", "Scotch ale"), ("spirit", "Scotch ale")])
+    assert found == {}

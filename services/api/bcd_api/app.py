@@ -40,6 +40,7 @@ from bcd_schema.family import (
     Family,
     families_in,
     family_of,
+    shelf_styles,
     styles_in,
 )
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -454,7 +455,8 @@ def recommend_families(who: Caller, limit: int = 6,
     # Over-fetch: `rank_family` drops whole vector groups the drinker has already judged, and a
     # shelf of five that loses two should be a short section rather than a wrong one.
     vectors = [shelf_vector(profile, rated_in=f in mine, cross_style=cross_style) for f in order]
-    fetched = store.shelves_many([(styles_in(f), v) for f, v in zip(order, vectors, strict=True)],
+    spellings = _shelf_styles(store)
+    fetched = store.shelves_many([(spellings[f], v) for f, v in zip(order, vectors, strict=True)],
                                  limit=limit * 4)
 
     shelves: dict[Family, dict] = {}
@@ -480,6 +482,25 @@ def recommend_families(who: Caller, limit: int = 6,
                            "rated_in": any(f in mine for f in families_in(group)),
                            "families": inside})
     return {"user_id": user_id, "rated": len(judged), "groups": groups}
+
+
+def _shelf_styles(store: Store) -> dict[Family, list[str]]:
+    """Which spellings fill each shelf, read from the catalog once and kept.
+
+    `styles_in` names the styles somebody wrote into the table; the shelf query has to match
+    the ones that are really in the catalog. `Peated Scotch` reaches the Scotch shelf through
+    the last-word rule, and without this the shelf would call itself yours the moment you rated
+    one and then not contain a single one.
+
+    Unioned with the table so this can only ever add: if the catalog read comes back thin, the
+    shelves are exactly what they were before.
+    """
+    cached: dict[Family, list[str]] | None = _state.get("shelf_styles")
+    if cached is None:
+        found = shelf_styles(store.style_catalog())
+        cached = {f: sorted(set(found.get(f, ())) | set(styles_in(f))) for f in FAMILIES}
+        _state["shelf_styles"] = cached
+    return cached
 
 
 def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:
