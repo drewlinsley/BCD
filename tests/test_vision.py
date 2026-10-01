@@ -15,6 +15,7 @@ import httpx
 import pytest
 import respx
 from bcd_api.app import _state, app as fastapi_app, scan_vision
+from bcd_api.auth import Principal
 from bcd_api.resolver import Resolver
 from bcd_api.vision import (
     MAX_IMAGE_BYTES,
@@ -72,8 +73,14 @@ def api(store, monkeypatch):
     return _state
 
 
-def call(req: ScanVisionRequest):
-    return asyncio.run(scan_vision(req))
+#: Any authenticated caller. These tests are about what the endpoint does with a frame, not
+#: about who sent it -- `test_auth.py` owns that -- so they hand it a principal directly, the
+#: same way they hand it `_state` instead of booting a server.
+_ANYONE = Principal(id="demo", provider="anonymous")
+
+
+def call(req: ScanVisionRequest, who: Principal = _ANYONE):
+    return asyncio.run(scan_vision(req, who))
 
 
 # --- reading the model's reply -------------------------------------------------------

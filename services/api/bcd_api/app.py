@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from typing import Annotated
 
 import httpx
 from bcd_ingest.merge import get_product
@@ -41,8 +42,19 @@ from bcd_schema.family import (
     family_of,
     styles_in,
 )
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pydantic import BaseModel
 
+from .auth import (
+    Principal,
+    account_for_subject,
+    bearer,
+    create_account,
+    issue_session,
+    link_subject,
+    make_current_principal,
+    verify_id_token,
+)
 from .index import IndexedStore, LabelIndex
 from .recommend import rank_catalog, rank_family, shelf_vector, similar_profile
 from .resolver import Resolver
@@ -80,7 +92,11 @@ def _load_dotenv(path: str = ".env") -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_dotenv()
-    store = open_store(root="./data")
+    # Where this server's own files live. An env var rather than a literal so a test can point
+    # the whole app at a throwaway directory: with the path baked in, standing the app up at all
+    # read and WROTE the real dev store, and rebuilt the label index over it once per test.
+    root = os.environ.get("BCD_DATA_ROOT", "./data")
+    store = open_store(root=root)
     _state["store"] = store
     # The label index is what makes a scan sub-second: retrieval from memory instead of a
     # trigram scan per line. Built from the store once (cached beside the data and reused
@@ -89,11 +105,12 @@ async def lifespan(app: FastAPI):
     # matching, for comparing the two on the same catalog.
     matching: Store = store
     if os.environ.get("BCD_LABEL_INDEX", "1") != "0":
-        index = LabelIndex.for_store(store, os.path.join("./data", "label_index.pkl"))
+        index = LabelIndex.for_store(store, os.environ.get(
+            "BCD_LABEL_INDEX_PATH", os.path.join(root, "label_index.pkl")))
         _state["index"] = index
         matching = IndexedStore(store, index)
     _state["resolver"] = Resolver(matching)
-    _state["telemetry"] = TelemetryCollector(root="./data")
+    _state["telemetry"] = TelemetryCollector(root=root)
     # Demo profile so /v1/scan/resolve returns personalized scores out of the box.
     _state["profiles"] = {"demo": _demo_profile()}
     # None without a key. The scan path predates this and has to keep working without it.
@@ -103,6 +120,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="BCD API", version="0.1.0", lifespan=lifespan)
+
+
+#: Resolves the caller from their bearer token. Built with a getter rather than the store
+#: itself, because the store is opened at startup and this module is imported before that.
+current_principal = make_current_principal(lambda: _state["store"])
+
+#: Who is calling, on a route that needs to know. Spelled as an `Annotated` alias rather than a
+#: `Depends()` default so the type says it once and every route reads `who: Caller`.
+Caller = Annotated[Principal, Depends(current_principal)]
 
 
 @app.get("/healthz")
@@ -132,7 +158,9 @@ def product_search(q: str = Query(..., min_length=1), limit: int = 20) -> Produc
 
 
 @app.post("/v1/scan/resolve", response_model=ScanResolveResponse)
-def scan_resolve(req: ScanResolveRequest, user_id: str = "demo") -> ScanResolveResponse:
+def scan_resolve(req: ScanResolveRequest,
+                 who: Caller) -> ScanResolveResponse:
+    user_id = who.id
     resolver: Resolver = _state["resolver"]
     profile = _profile_for(user_id)
     t0 = time.perf_counter()
@@ -198,7 +226,8 @@ _VISION_UNCONFIGURED = (
 
 
 @app.post("/v1/scan/vision", response_model=ScanVisionResponse)
-async def scan_vision(req: ScanVisionRequest, user_id: str = "demo") -> ScanVisionResponse:
+async def scan_vision(req: ScanVisionRequest,
+                      who: Caller) -> ScanVisionResponse:
     """Identify a frame from the picture rather than from what OCR made of it.
 
     The model only ever supplies *names*. Each one is then resolved by the same `Resolver`
@@ -209,6 +238,7 @@ async def scan_vision(req: ScanVisionRequest, user_id: str = "demo") -> ScanVisi
     Errors are reported in `detail`, never raised. This runs on the camera's hot path, and a
     timeout at the vision provider must degrade to "no extra answers", not to a failed scan.
     """
+    user_id = who.id
     t0 = time.perf_counter()
     provider: VisionProvider | None = _state.get("vision")
 
@@ -309,11 +339,12 @@ def _log_vision(req: ScanVisionRequest, resp: ScanVisionResponse) -> None:
 
 
 @app.post("/v1/recommend")
-def recommend(user_id: str = "demo", limit: int = 10) -> dict:
+def recommend(who: Caller, limit: int = 10) -> dict:
     """Rank the catalog for a user: the store finds the nearest vectors (pgvector on
     Postgres, python cosine on the SQLite dev store), `rank_catalog` scores and orders them
     -- a match before a partial one, what drinkers rated before what we know before what we
     guess, then the score -- and says which of those each result is (`evidence`)."""
+    user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
     results = rank_catalog(store, _state["resolver"], _profile_for(user_id), limit=limit,
@@ -322,8 +353,78 @@ def recommend(user_id: str = "demo", limit: int = 10) -> dict:
     return {"user_id": user_id, "results": results}
 
 
+class SignInRequest(BaseModel):
+    """An ID token from the provider, obtained by the app. The server never sees a password and
+    never talks to the provider on the drinker's behalf -- it checks a signature."""
+
+    id_token: str
+    #: The anonymous account the drinker has been using, if any. Its ratings move to the
+    #: signed-in account rather than being left behind. Taken from the CALLER'S OWN token, never
+    #: from the body -- see the route.
+
+
+class SignInResponse(BaseModel):
+    account_id: str
+    token: str
+    provider: str
+    #: True when this sign-in adopted the anonymous account the caller was already using.
+    claimed: bool = False
+
+
+@app.post("/v1/auth/anonymous", response_model=SignInResponse)
+def auth_anonymous() -> SignInResponse:
+    """An account with nobody attached, minted by the server on the app's first launch.
+
+    The app used to identify itself with an id it chose. That is what made every other route
+    forgeable, so the id is minted here instead and handed back exactly once.
+    """
+    store: Store = _state["store"]
+    account_id = create_account(store, "anonymous")
+    return SignInResponse(account_id=account_id, token=issue_session(store, account_id),
+                          provider="anonymous")
+
+
+@app.post("/v1/auth/{provider}", response_model=SignInResponse)
+def auth_provider(provider: str, req: SignInRequest,
+                  authorization: str | None = Header(default=None)) -> SignInResponse:
+    """Sign in with Google or Apple.
+
+    If the caller already holds a token for an anonymous account, that account is CLAIMED: the
+    provider identity is linked to it and the drinker keeps the ratings they gave before signing
+    in. The account to claim is read from their own bearer token and never from the body, so
+    nobody can claim an account by naming it.
+
+    Signing in again later finds the same account through the provider link.
+    """
+    if provider not in ("google", "apple"):
+        raise HTTPException(status_code=404, detail=f"no provider {provider!r}")
+    store: Store = _state["store"]
+    subject = verify_id_token(provider, req.id_token)
+
+    existing = account_for_subject(store, provider, subject)
+    if existing:
+        return SignInResponse(account_id=existing, token=issue_session(store, existing),
+                              provider=provider)
+
+    # First sign-in with this identity. Adopt the anonymous account the caller is holding, so a
+    # drinker who rated ten drinks and then signed in still has ten.
+    claimed = False
+    account_id = None
+    if authorization:
+        from .auth import principal_for_token
+        who = principal_for_token(store, bearer(authorization))
+        if who is not None and who.provider == "anonymous":
+            account_id, claimed = who.id, True
+    if account_id is None:
+        account_id = create_account(store, provider, subject)
+    else:
+        link_subject(store, account_id, provider, subject)
+    return SignInResponse(account_id=account_id, token=issue_session(store, account_id),
+                          provider=provider, claimed=claimed)
+
+
 @app.get("/v1/recommend/families")
-def recommend_families(user_id: str = "demo", limit: int = 6,
+def recommend_families(who: Caller, limit: int = 6,
                        cross_style: bool = False) -> dict:
     """Discover, one shelf at a time: gin, bourbon and vodka are three questions.
 
@@ -339,6 +440,7 @@ def recommend_families(user_id: str = "demo", limit: int = 6,
     Ordered rated-in shelves first, then `FAMILIES`' own order, so the list opens on the ones
     that are about the reader.
     """
+    user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
     profile = _profile_for(user_id)
@@ -414,10 +516,12 @@ def similar(product_id: str, limit: int = 6) -> dict:
 
 
 @app.post("/v1/feedback", response_model=FeedbackResponse)
-def feedback(req: FeedbackRequest, user_id: str = "demo") -> FeedbackResponse:
+def feedback(req: FeedbackRequest,
+             who: Caller) -> FeedbackResponse:
     """A thumbs on one product. Recorded as a real `rating_submitted` event and then
     folded into the profile, so this convenience path and the client's batch telemetry
     upload converge on exactly the same profile."""
+    user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
     event = {
@@ -437,17 +541,23 @@ def feedback(req: FeedbackRequest, user_id: str = "demo") -> FeedbackResponse:
 
 
 @app.get("/v1/profile", response_model=TasteProfile)
-def get_profile(user_id: str = "demo") -> TasteProfile:
-    """What we think of your taste. Exposed so the client can show it — and so the user
-    can see the same thing we rank with, rather than an opaque score."""
-    profile = _profile_for(user_id)
-    return profile or TasteProfile(user_id=user_id, version=0)
+def get_profile(who: Caller) -> TasteProfile:
+    """What we think of YOUR taste, or an empty profile — never the seed.
+
+    `_profile_for` falls back to the seed so a fresh install still gets a sensible ranking, and
+    that is right for ranking and wrong here: this route is read by the "Your taste" card, and
+    a card that shows the seed tells a drinker who has rated nothing that they lean hoppy with
+    an ABV band of 5-9%. It is about them or it is empty, and `version: 0` is how it says empty.
+    """
+    learned = load_profile(_state["store"], who.id)
+    return learned or TasteProfile(user_id=who.id, version=0)
 
 
 @app.post("/v1/profile/rebuild", response_model=TasteProfile)
-def rebuild(user_id: str = "demo") -> TasteProfile:
+def rebuild(who: Caller) -> TasteProfile:
     """Recompute from the whole event log — the batch job's entry point, and the repair
     path if a profile is ever suspect."""
+    user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     return rebuild_profile(_state["store"], collector.iter_events(TASTE_EVENTS), user_id)
 
