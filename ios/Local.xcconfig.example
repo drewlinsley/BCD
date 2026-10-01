@@ -22,3 +22,15 @@ BCD_API_HOSTPORT = localhost:8000
 // language correction, catalog lexicon as custom words — the coarse-to-fine pipeline in
 // full. Try `vision` on a device once `visionkit` is confirmed working.
 BCD_SCAN_ENGINE = visionkit
+
+// Sign in with Google. Create an OAuth 2.0 Client ID of type iOS at
+// console.cloud.google.com -> APIs & Services -> Credentials, using this build's bundle id.
+// There is NO client secret: a native app cannot keep one, which is why the flow is PKCE.
+// Leave both blank and the Google button is simply not offered -- never offered and broken.
+//
+// The reversed id is the same string with its dot-separated parts in reverse order; Google
+// shows it on the credential page as the "iOS URL scheme".
+//   BCD_GOOGLE_CLIENT_ID          = 1234567890-abcdef.apps.googleusercontent.com
+//   BCD_GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.1234567890-abcdef
+BCD_GOOGLE_CLIENT_ID =
+BCD_GOOGLE_REVERSED_CLIENT_ID =

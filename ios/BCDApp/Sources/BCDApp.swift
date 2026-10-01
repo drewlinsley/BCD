@@ -35,8 +35,13 @@ final class AppEnvironment: ObservableObject {
     /// What this install has searched for, so the Search tab opens on your own history
     /// rather than on a placeholder.
     let recents: RecentSearches
-    /// Pseudonymous per-install id. The only identity the server keys a profile on.
+    /// Pseudonymous per-install id. Still the id telemetry is filed under -- it is what the
+    /// event spec declares -- but no longer what the server keys a PROFILE on: that is the
+    /// account behind `auth`, which the server mints and the app proves with a token.
     let installId: String
+    /// The session token, and signing in. Held here so one actor answers for the whole app:
+    /// several screens asking at once on a cold launch must not mint several accounts.
+    let auth: AuthStore
 
     /// Bumped when the server has accepted a rating. The Discover list ranks with the taste
     /// profile that rating just moved, so it is stale the moment one lands -- and a list that
@@ -55,7 +60,8 @@ final class AppEnvironment: ObservableObject {
          reactions: ReactionLog = ReactionLog(),
          seen: SeenLog = SeenLog(),
          recents: RecentSearches = RecentSearches(),
-         installId: String = InstallIdentity.current) {
+         installId: String = InstallIdentity.current,
+         auth: AuthStore = AuthStore(baseURL: AppEnvironment.apiBaseURL())) {
         self.api = api
         self.llm = llm
         self.telemetry = telemetry
@@ -65,10 +71,15 @@ final class AppEnvironment: ObservableObject {
         self.seen = seen
         self.recents = recents
         self.installId = installId
+        self.auth = auth
     }
 
     static func live() -> AppEnvironment {
-        let api = APIClient(baseURL: Self.apiBaseURL(), installId: InstallIdentity.current)
+        // The client presents a token the SERVER issued. It used to present an id it chose
+        // itself, which the server believed -- so any profile was readable and writable by
+        // anyone who knew an id.
+        let auth = AuthStore(baseURL: Self.apiBaseURL())
+        let api = APIClient(baseURL: Self.apiBaseURL(), auth: auth)
         // Consent is read from what the user actually chose last run, not assumed.
         let consent = ConsentStore()
         let telemetry = TelemetryQueue(consent: consent.state, sink: api,
@@ -81,7 +92,7 @@ final class AppEnvironment: ObservableObject {
         let llm = Self.bestLLMProvider()
         return AppEnvironment(
             api: api, llm: llm, telemetry: telemetry,
-            makeScanEngine: { Self.makeScanEngine() }, consent: consent
+            makeScanEngine: { Self.makeScanEngine() }, consent: consent, auth: auth
         )
     }
 
@@ -91,7 +102,7 @@ final class AppEnvironment: ObservableObject {
     ///     setting (Local.xcconfig), so a device build launched by tapping the icon points at
     ///     your Mac's LAN IP rather than localhost.
     ///  3. `http://localhost:8000` — Simulator default.
-    private static func apiBaseURL() -> URL {
+    static func apiBaseURL() -> URL {
         if let env = ProcessInfo.processInfo.environment["BCD_API_BASE"], !env.isEmpty,
            let url = URL(string: env) { return url }
         if let s = Bundle.main.object(forInfoDictionaryKey: "BCDAPIBase") as? String,

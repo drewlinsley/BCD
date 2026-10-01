@@ -29,11 +29,17 @@ struct ProfileView: View {
     /// back empty and a profile that never arrived look identical if you only track one.
     @State private var profile: TasteProfile?
     @State private var loadFailed = false
+    @State private var authState: AuthStore.State?
+    @State private var signingIn = false
+    @State private var signInError: String?
+    /// nil when no Google client id was built in, in which case the button is not offered.
+    private let google = GoogleIdentityProvider()
 
     var body: some View {
         NavigationStack {
             List {
                 Section("Your taste") { taste }
+                Section("Account") { account }
                 Section("Privacy") {
                     Toggle("Analytics", isOn: $consent.analytics)
                     Toggle("Personalization", isOn: $consent.personalization)
@@ -53,13 +59,73 @@ struct ProfileView: View {
                 }
             }
             .navigationTitle("You")
-            .task { await load() }
+            .task { await load(); await readAuth() }
             // The profile is rebuilt server-side from verdicts, so it can change while this
             // screen is open only if the switch above changes what may be collected. Re-read
             // on that rather than on every appearance.
             .onChange(of: consent.personalization) { _, _ in Task { await load() } }
         }
     }
+
+    // MARK: - account
+
+    // What signing in buys is DURABILITY, not secrecy, and the copy says so. An anonymous
+    // account lives in one app install: delete the app and the taste goes with it. Signing in
+    // makes the same profile reachable from a reinstall or a second phone.
+    @ViewBuilder private var account: some View {
+        switch authState {
+        case .signedIn(let provider):
+            HStack {
+                Label("Signed in with \(provider.capitalized)", systemImage: "checkmark.seal")
+                    .font(.callout)
+                Spacer()
+                Button("Sign out") { Task { await env.auth.signOut(); await readAuth() } }
+                    .font(.caption)
+            }
+            Text("Your taste is kept with this account, so it survives reinstalling the app "
+                 + "and follows you to another phone.")
+                .font(.caption).foregroundStyle(Brand.textMuted)
+        case .anonymous, .none:
+            if let google {
+                Button {
+                    Task { await signIn(with: google) }
+                } label: {
+                    HStack(spacing: 8) {
+                        if signingIn { ProgressView().controlSize(.small) }
+                        Text("Sign in with Google")
+                    }
+                }
+                .disabled(signingIn)
+            }
+            // Sign in with Apple is written and the server verifies it. It cannot be OFFERED
+            // until the Apple Developer Program membership is paid: it is a capability free
+            // provisioning will not sign, so the button would fail at the tap rather than at
+            // the build. Shown disabled rather than hidden, so it is not quietly forgotten.
+            Button("Sign in with Apple") {}
+                .disabled(true)
+            Text(signInError ?? ("Your taste lives on this phone. Signing in keeps it if you "
+                                 + "reinstall, and carries it to another phone."))
+                .font(.caption)
+                .foregroundStyle(signInError == nil ? Brand.textMuted : .red)
+        }
+    }
+
+    private func signIn(with provider: GoogleIdentityProvider) async {
+        signingIn = true
+        signInError = nil
+        defer { signingIn = false }
+        do {
+            _ = try await env.auth.signIn(with: provider)
+            await readAuth()
+            await load()            // the profile is the account's now, not the install's
+        } catch BCDKit.AuthError.cancelled {
+            // Backing out of a sign-in sheet is not an error and must not be reported as one.
+        } catch {
+            signInError = "That sign-in did not complete. Nothing changed."
+        }
+    }
+
+    private func readAuth() async { authState = await env.auth.state }
 
     // MARK: - the card
 
