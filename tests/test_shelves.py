@@ -179,3 +179,39 @@ def test_shelves_fetched_together_stay_with_their_shelf(store, ipa_drinker):
         [(GIN, ideal), (styles_in(Family.BOURBON), None)], limit=10)
     assert all("Gin" in r["name"] for r in gin)
     assert [r["name"] for r in bourbon] == ["A Bourbon"]
+
+
+# ---- the shelf has to CONTAIN what lit it up ------------------------------------------------
+
+def test_a_qualified_style_reaches_the_shelf_it_lit_up():
+    """Reading `Peated Scotch` as a scotch is half the job. The shelf is filled by matching
+    style spellings, so a style the table only reaches through its last word is on nobody's
+    shelf until the catalog's own spelling is in that list — and the drinker gets a shelf that
+    calls itself theirs and then shows them nothing they rated on."""
+    from bcd_schema.family import shelf_styles
+    s = MedallionStore(root=tempfile.mkdtemp())
+    try:
+        s.put_gold("prod:house", "producer", {"id": "prod:house", "name": "A House"})
+        s.put_gold("sc:peat", "product", _product(
+            "sc:peat", "A Peated Malt", "Peated Scotch",
+            _sv(SensorySource.LLM_PROFILE, 0.7, smoky_peat=0.9)))
+
+        assert s.best_known_in_family(styles_in(Family.SCOTCH)) == []   # the table alone: nothing
+
+        spellings = shelf_styles(s.style_catalog())[Family.SCOTCH]
+        assert "peated scotch" in spellings
+        assert [p["name"] for p in s.best_known_in_family(spellings)] == ["A Peated Malt"]
+    finally:
+        s.close()
+
+
+def test_style_catalog_reports_what_is_really_filed():
+    s = MedallionStore(root=tempfile.mkdtemp())
+    try:
+        s.put_gold("a", "product", _product("a", "One", "Peated Scotch", None))
+        s.put_gold("b", "product", _product("b", "Two", "Peated Scotch", None))
+        s.put_gold("c", "product", _product("c", "Three", "Hazy IPA", None,
+                                            category=Category.BEER))
+        assert s.style_catalog() == [("beer", "Hazy IPA"), ("spirit", "Peated Scotch")]
+    finally:
+        s.close()

@@ -377,6 +377,15 @@ class MedallionStore:
                 else self.best_known_in_family(styles, limit)
                 for styles, vec in asks]
 
+    def style_catalog(self) -> list[tuple[str | None, str]]:
+        """Every `(category, style)` pair the catalog actually holds, once each."""
+        seen: set[tuple[str | None, str]] = set()
+        for p in self.iter_gold("product"):
+            style = (p.get("style") or {}).get("value")
+            if isinstance(style, str) and style.strip():
+                seen.add((p.get("category"), style))
+        return sorted(seen, key=lambda cs: (cs[1], cs[0] or ""))
+
     def _known_on_shelf(self, wanted: set[str]) -> Iterator[dict[str, Any]]:
         """Products whose style names one of `wanted` and whose vector is their own."""
         for p in self.iter_gold("product"):
@@ -428,6 +437,7 @@ class Store(Protocol):
                              limit: int = 10) -> list[dict[str, Any]]: ...
     def shelves_many(self, asks: Sequence[tuple[Collection[str], list[float] | None]],
                      limit: int = 10) -> list[list[dict[str, Any]]]: ...
+    def style_catalog(self) -> list[tuple[str | None, str]]: ...
     def close(self) -> None: ...
 
 

@@ -855,6 +855,20 @@ class PostgresStore:
             list(pool.map(run, range(workers)))
         return results
 
+    def style_catalog(self) -> list[tuple[str | None, str]]:
+        """Every `(category, style)` pair the catalog actually holds, once each.
+
+        What `bcd_schema.family.shelf_styles` reads to decide which spellings fill a shelf. The
+        table of styles can only name the ones somebody wrote down; this names the ones that
+        are really in there, which is what the shelf query has to match on.
+        """
+        with self._lock, self._conn.cursor() as cur:
+            rows = cur.execute(
+                "SELECT DISTINCT record->>'category', record->'style'->>'value' "
+                "FROM gold WHERE entity_type = 'product' "
+                "  AND record->'style'->>'value' IS NOT NULL").fetchall()
+        return [(cat, style) for cat, style in rows if style and style.strip()]
+
     def _shelf(self, styles: Collection[str], vec: list[float] | None, limit: int, *,
                conn: psycopg.Connection | None = None) -> list[dict[str, Any]]:
         if vec is None:

@@ -12,11 +12,20 @@ which means "no family", not "some other family" — see `family_of`.
 The table is keyed on the style string alone and ignores `category`, deliberately. 620 Tequila
 rows, 363 Bourbon rows and 512 Amaro rows are filed under category `other`, and a drinker
 looking for tequila should find those too. The style is the more reliable of the two fields.
+
+Below the table sits one rule, not a second table. `Peated Scotch`, `Blended Bourbon` and
+`Hazy IPA` are styles the table already knows wearing a qualifier it does not, and there were
+5,712 rows of them on no shelf at all (measured 2026-09-30). `_qualified` reads the last style
+word; `shelf_styles` is how a shelf gets filled with the spellings the catalog really holds,
+because knowing `Peated Scotch` is a scotch and never showing one is its own kind of broken.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from enum import Enum
+from functools import lru_cache
 
 
 class Group(str, Enum):
@@ -199,9 +208,103 @@ _claim(Family.BELGIAN, "saison", "tripel", "belgian dark ale", "dubbel", "quadru
 _claim(Family.CIDER, "cider", "hard cider", "perry", "fruit cider", "rosé cider", "rose cider")
 _claim(Family.SAKE, "sake", "flavored sake", "junmai", "ginjo", "daiginjo", "nigori")
 
+# Spellings the last-word rule below gets wrong or cannot see, measured on the live catalog
+# 2026-09-30. `Curaçao` (175 rows) names no family word at all; `Liqueur & Brandy` (64) and
+# `Rock & Rye, Rum & Brandy (Etc.)` (55) are TTB cordial classes whose last word is `brandy`,
+# which is a listed ingredient and not the shelf; `Belgian-style strong ale` (12) ends in a
+# style that belongs to a different shelf than the beer does. Each is a real spelling with rows
+# behind it, not a style anybody imagined.
+_claim(Family.LIQUEUR, "curaçao", "curacao", "liqueur & brandy",
+       "rock & rye, rum & brandy (etc.)")
+_claim(Family.WHISKEY, "moonshine", "flavored moonshine", "japanese blended malt")
+_claim(Family.BELGIAN, "belgian-style strong ale", "belgian strong golden ale")
+_claim(Family.SOUR, "spontaneously fermented ale", "flanders-style sour brown ale")
 
-def family_of(style: str | None) -> Family | None:
+
+#: Head nouns that name a family only when something else qualifies them. Kept out of
+#: `_STYLE_FAMILY` on purpose, because the bare word and the qualified one go to different
+#: places: `Ale` alone is 98,440 rows of TTB class name and must stay shelfless, while
+#: `Scotch ale` and `Pumpkin ale` are beers; `Scotch` alone is not a style anybody files, while
+#: `Peated Scotch` is a whisky. A marker speaks only when the style says more than the marker.
+_MARKERS: dict[str, Family] = {
+    "ale": Family.PALE_ALE,
+    "wheat ale": Family.WHEAT,
+    "scotch": Family.SCOTCH,
+    "liqueur": Family.LIQUEUR,
+    "cordial": Family.LIQUEUR,
+    "schnapps": Family.LIQUEUR,
+}
+
+_PHRASES: dict[str, Family] = {**_STYLE_FAMILY, **_MARKERS}
+if len(_PHRASES) != len(_STYLE_FAMILY) + len(_MARKERS):
+    raise ValueError("a marker is also a claimed style; it belongs in one table, not both")
+
+
+def _word(phrase: str) -> re.Pattern[str]:
+    """`phrase`, as whole words, allowing a plural.
+
+    Anchored at BOTH ends. A style word that may run on matches inside another word -- `gin`
+    lives in `ginger` and in `original`, `scotch` in `butterscotch` -- which the cask-finish
+    pass learned the expensive way, and a fallback that guesses is exactly where that mistake
+    would be free to happen again.
+    """
+    body = re.escape(phrase)
+    # brandy -> brandies, liqueur -> liqueurs. The catalog pluralises a style word often
+    # enough to matter: without this, `Gin Liqueurs` reads as a gin.
+    plural = re.escape(phrase[:-1]) + "ies" if phrase.endswith("y") else body + "(?:e?s)?"
+    return re.compile(rf"(?<![a-z0-9])(?:{body}|{plural})(?![a-z0-9])")
+
+
+_PATTERNS: tuple[tuple[re.Pattern[str], str, Family], ...] = tuple(
+    (_word(phrase), phrase, family) for phrase, family in _PHRASES.items())
+
+#: The aisle a row's own `category` puts it in. Only ever used to REJECT a guess.
+_CATEGORY_GROUP: dict[str, Group] = {"beer": Group.BEER, "spirit": Group.SPIRITS,
+                                     "cider": Group.CIDER, "sake": Group.SAKE}
+
+
+@lru_cache(maxsize=8192)
+def _qualified(style: str, group: Group | None) -> Family | None:
+    """The family named by the last style word in a style nobody claimed outright.
+
+    `Peated Scotch`, `Blended Bourbon`, `Hazy IPA`, `Barrel-aged imperial stout`, `Cognac VS`
+    and the whole flavored-brandy run are each a style the table already knows, wearing a
+    qualifier it does not. Measured on the live catalog 2026-09-30: 5,712 rows across 436 such
+    styles, every one of them on no shelf at all.
+
+    Read the RIGHTMOST one, because English puts the head noun last -- which is what makes
+    `Apricot Brandy` a brandy and `Cinnamon whisky liqueur` a liqueur -- and among phrases
+    ending there prefer the longest, so `straight bourbon` beats `bourbon` and `sour ale` beats
+    `ale`.
+
+    A phrase spanning the WHOLE string is ignored: that is the exact lookup's job, and refusing
+    it here is what keeps `Ale` shelfless while `Scotch ale` reaches the ale shelf.
+
+    `group` comes from the row's own category and only ever rejects a candidate. Exact claims
+    stay category-blind on purpose -- 620 Tequila rows are filed under category `other` -- but a
+    guess does not get that benefit: without the guard a beer filed `Scotch ale` would be read
+    as a whisky.
+    """
+    best: tuple[int, int] | None = None
+    found: Family | None = None
+    for pattern, phrase, family in _PATTERNS:
+        if group is not None and family.group is not group:
+            continue
+        for m in pattern.finditer(style):
+            if m.start() == 0 and m.end() == len(style):
+                continue
+            rank = (m.end(), len(phrase))
+            if best is None or rank > best:
+                best, found = rank, family
+    return found
+
+
+def family_of(style: str | None, category: str | None = None) -> Family | None:
     """The family a style belongs to, or None when the catalog does not say.
+
+    Answered from the table first, and only then by reading the style's last style word
+    (`_qualified`). `category` is optional and only ever narrows that second answer; the table
+    itself never consults it.
 
     None is a real answer and the common one: a row whose style is `Ale` or `Flavored Malt
     Beverage` has been classified by a regulator, not described. Such a row can still be
@@ -210,12 +313,45 @@ def family_of(style: str | None) -> Family | None:
     """
     if not style:
         return None
-    return _STYLE_FAMILY.get(style.strip().lower())
+    key = style.strip().lower()
+    exact = _STYLE_FAMILY.get(key)
+    if exact is not None:
+        return exact
+    return _qualified(key, _CATEGORY_GROUP.get((category or "").strip().lower()))
 
 
 def styles_in(family: Family) -> list[str]:
-    """Every style that names this family, for the query that fetches its rows."""
+    """Every style the TABLE gives this family, lowercased."""
     return sorted(s for s, f in _STYLE_FAMILY.items() if f is family)
+
+
+def shelf_styles(rows: Iterable[tuple[str | None, str | None]]) -> dict[Family, list[str]]:
+    """Bucket a catalog's own `(category, style)` pairs onto shelves, lowercased.
+
+    `styles_in` answers from the table alone, which is right for a test and wrong for a query.
+    The shelf a drinker opens is filled by `lower(style) = ANY(...)`, so a style the table
+    reaches only through `_qualified` is on nobody's shelf until its own spelling is in that
+    list: the Scotch shelf would call itself yours the moment you rated a `Peated Scotch` and
+    then not contain one. Pass the spellings the catalog actually holds.
+
+    A style whose answer depends on which category it is filed under is dropped rather than
+    guessed at. The query filters on the style alone, so it cannot put the `Scotch ale` beers on
+    one shelf and a `Scotch ale`-filed whisky on another, and a shelf with the wrong drink on it
+    is worse than a shelf without that spelling.
+    """
+    answers: dict[str, set[Family | None]] = {}
+    for category, style in rows:
+        if not style or not style.strip():
+            continue
+        answers.setdefault(style.strip().lower(), set()).add(family_of(style, category))
+    out: dict[Family, list[str]] = {}
+    for style, families in answers.items():
+        if len(families) != 1:
+            continue
+        family = next(iter(families))
+        if family is not None:
+            out.setdefault(family, []).append(style)
+    return {family: sorted(styles) for family, styles in out.items()}
 
 
 #: Every family, in the order a list of shelves should be read when nothing is known about the
