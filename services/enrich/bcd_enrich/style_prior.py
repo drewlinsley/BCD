@@ -315,30 +315,46 @@ def _specific_beer_style(n: str, cls: str | None) -> str | None:
     return None
 
 
+# Beer reads its name the same way spirits do: a keyword is a whole word unless a `*` says which
+# side it may run on. The spaces that used to guard `"wit "` and `" apa"` are gone -- anchoring
+# does that job properly, and the hack only half worked: it stopped "With" but also stopped
+# "wit." and "wit)" at the end of a name.
+#
+# Every `*` here was measured against the 331,844 filed beer rows, by looking at which real words
+# the fragment lives inside:
+#   weizen -> hefeweizen, weizenbock, dunkelweizen, weizenbier   (all wheat, both sides open)
+#   weiss  -> weisse, weissbier, berlinerweisse, dunkelweiss     (all wheat, both sides open)
+#   bock   -> bock, doppelbock, maibock, weizenbock, eisbock     (prefixed only -- `bockefeller`
+#                                                                 is a brewery, not a bock)
+#   ipa    -> ipa, dipa, iipa, neipa, ddhipa, sipa               (prefixed only; dipa and neipa
+#                                                                 are claimed by earlier rules)
+# And the ones deliberately NOT given a `*`, each a real false positive it was costing:
+#   keller -> MIKKELLER        light -> LAMPLIGHTER      apa  -> nAPArbier, APAche
+#   wit    -> WITh cherries    blanc -> casa BLANCa      haze -> HAZEl grove
 _BEER_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("neipa", ("hazy", "juicy", "neipa", "new england", "haze")),
     ("dipa", ("double ipa", "dipa", "imperial ipa", "triple ipa", "double i.p.a",
               "double india pale", "imperial india pale", "triple india pale")),
-    ("ipa", ("ipa", "india pale", "i.p.a", " apa")),
-    ("pale_ale", ("pale ale", "american pale", "apa ")),
+    ("ipa", ("*ipa", "india pale", "i.p.a", "apa")),
+    ("pale_ale", ("pale ale", "american pale", "apa")),
     ("imperial_stout", ("imperial stout", "russian imperial", "impy")),
     ("stout", ("stout",)),
     ("porter", ("porter",)),
-    ("wheat", ("hefe", "weiss", "weizen", "witbier", "wit ", "white ale", "belgian white",
-               "blanche", "wheat", "blanc", "weisse", "hoegaarden")),
+    ("wheat", ("hefe*", "*weiss*", "*weizen*", "witbier", "wit", "white ale", "belgian white",
+               "blanche", "wheat", "blanc", "hoegaarden")),
     ("tripel", ("tripel", "triple")),
-    ("belgian_dark", ("dubbel", "quadrupel", "quad", "abbey", "abbaye", "trappist", "grimbergen",
-                      "leffe", "belgian strong")),
+    ("belgian_dark", ("dubbel", "quadrupel", "quadruple", "quad", "abbey", "abbaye", "trappist",
+                      "grimbergen", "leffe", "belgian strong")),
     ("saison", ("saison", "farmhouse")),
     ("sour", ("sour", "gose", "lambic", "berliner", "kriek", "gueuze", "wild ale")),
-    ("amber", ("amber", "red ale", "irish red", " rouge")),
-    ("brown", ("brown ale", "nut brown", " brown")),
-    ("bock", ("doppelbock", "bock", "dunkel", "schwarz", "dark lager")),
+    ("amber", ("amber", "red ale", "irish red", "rouge")),
+    ("brown", ("brown ale", "nut brown", "brown")),
+    ("bock", ("doppelbock", "*bock", "dunkel", "schwarz*", "dark lager")),
     ("pilsner", ("pilsner", "pilsener", "pils", "urquell")),
     ("helles", ("helles", "kellerbier", "keller", "märzen", "marzen", "oktoberfest")),
     ("radler", ("radler", "shandy")),
     ("lager", ("lager", "light", "lite", "premium", "especial", "cerveza", "pale lager",
-               "blonde", "blond", "pils", "birra", "bier", "biere")),
+               "blonde", "blond", "pils", "birra", "*bier", "biere")),
 ]
 # The two agave spirits the catch-all class does NOT get to swallow, read as whole words.
 # Anchoring is the whole point here: the bare substring "tequila" is inside `tequilana`, the
@@ -736,15 +752,22 @@ def _says(n: str, keyword: str) -> bool:
     guards. Anchoring only the front fixed "original" and left "Ginger Beer" reading as a gin,
     so both ends are anchored and the inflections are spelled out instead.
 
-    A keyword ending in `*` is a STEM and may run on into a longer word. Four earn it, each
-    measured: `glen*` reaches Glenmorangie and Glengoyne, `mezcal*` Mezcalosfera, `raki*` the
-    Balkan rakia and rakija, `bitter*` Bittermens. Anchoring those cost 241 rows that were
-    right before. Nothing else in the table gets it: a stem is how `gin` claimed GINGER.
+    A `*` marks the side a word is allowed to run on, and each one is measured:
+
+      `glen*`   the word may CONTINUE   -- Glenmorangie, Glengoyne, and mezcal*, raki*, bitter*
+      `*bock`   the word may be PREFIXED -- Maibock, Rauchbock, Doppelbock
+      `*ipa`    both are common in beer  -- DDHIPA and SIPA are how brewers write it
+
+    Neither is given out freely. A keyword that may run on is exactly how `gin` claimed GINGER
+    and `wit` claimed WITH, so the default is a whole word and the `*` has to earn its place
+    against the catalog.
     """
     kw = keyword.strip()
-    if kw.endswith("*"):
-        return re.search(r"\b" + re.escape(kw[:-1]), n) is not None
-    return re.search(r"\b" + re.escape(kw) + _INFLECTION + r"\b", n) is not None
+    head, tail = kw.startswith("*"), kw.endswith("*")
+    kw = kw.strip("*")
+    left = "" if head else r"\b"
+    right = "" if tail else _INFLECTION + r"\b"
+    return re.search(left + re.escape(kw) + right, n) is not None
 
 
 def detect_style(name: str, category: Category | str | None,
@@ -790,10 +813,12 @@ def detect_style(name: str, category: Category | str | None,
     # Lamplighter, both brewery names -- but it needs per-keyword anchoring rather than one
     # rule, since the same table holds words that must match inside a compound and words that
     # must not. That is a separate change, measured separately.
-    beer = cat == "beer"
-    readable = n if beer else _without_cask(n)
+    # Spirits read the name with the cask phrase taken out; beer keeps its barrels, because a
+    # barrel-aged stout IS a barrel-aged stout and no beer rule reads a cask word as a style.
+    # Both read it word by word -- see `_says` and the `*` markers in the tables.
+    readable = n if cat == "beer" else _without_cask(n)
     for style, kws in rules:
-        if any((k.strip() in readable) if beer else _says(readable, k) for k in kws):
+        if any(_says(readable, k) for k in kws):
             return style
     if cls is not None:
         return cls

@@ -435,3 +435,52 @@ def test_the_words_that_did_work_still_do(name, expected):
     """Inflections are spelled out so anchoring both ends does not quietly stop the rules
     matching: whisky AND whiskey, peat AND peated."""
     assert detect_style(name, "spirit", None) == expected
+
+
+# ---- beer: a keyword has to be a word here too ------------------------------------------------
+
+@pytest.mark.parametrize("name,wrong", [
+    ("Mikkeller Suddenly Summer", "helles"),          # keller inside MIKKELLER -- 1,030 rows
+    ("Lamplighter Brewing Co. Devil's Snare", "lager"),   # light inside lampLIGHTer
+    ("Sierra Nevada Tiki Torches At Twilight", "lager"),  # light inside twiLIGHT
+    ("Redhook Blondage", "lager"),                    # blond inside BLONDage
+    ("The Source", "sour"),                           # sour inside SOURce
+    ("Brasserie Saint James Quadrophobia", "belgian_dark"),  # quad inside QUADrophobia
+    ("Calusa Brewing Totemic With Cherries", "wheat"),       # wit inside WITh
+    ("Casa Blanca Brewing", "wheat"),                 # blanc inside casa BLANCa
+    ("Hazel Grove Brewing Company", "neipa"),         # haze inside HAZEl
+    ("Naparbier Janis", "ipa"),                       # apa inside nAPArbier
+    ("Bockefeller", "bock"),                          # bock inside BOCKefeller
+])
+def test_a_beer_keyword_hiding_inside_a_longer_word_names_nothing(name, wrong):
+    assert detect_style(name, "beer", "Ale") != wrong
+
+
+@pytest.mark.parametrize("name,expected", [
+    # `*bock` -- the word may be PREFIXED. These are real bocks and anchoring both ends cost
+    # 520 of them.
+    ("Manayunk Maibock", "bock"),
+    ("Barriqoue Rauchbock", "bock"),
+    ("Shiner Barrel-Aged Doppelbock", "bock"),
+    # `*ipa` -- how brewers actually write it
+    ("Ddhipa Series 38", "ipa"),
+    ("Witch's Hat Brewing Company Simcoe Sipa", "ipa"),
+    # `*weizen*` and `*weiss*` -- German compounds, open at both ends
+    ("Cave Brewing Peach Fuzz Hefeweizen Ale", "wheat"),
+    ("Bell's Dunkelweizen", "dunkelweizen"),   # its own style, not merely wheat
+    ("Berlinerweiss German-style", "wheat"),
+    ("Miami Weisse", "wheat"),
+    # `schwarz*` and `*bier`
+    ("Zittauer Schwarzbier", "schwarzbier"),   # its own style, not merely a bock
+    ("Smokin' Beech Bamberg-style Rauchbier", "lager"),
+])
+def test_a_beer_keyword_may_run_on_where_the_catalog_says_it_must(name, expected):
+    assert detect_style(name, "beer", "Ale") == expected
+
+
+@pytest.mark.parametrize("name", ["Stone Spotlight Scru Wit", "217 Brew Works Half-wit"])
+def test_a_witbier_named_at_the_end_is_still_a_witbier(name):
+    """The old guard was the literal `"wit "`, a trailing space meant to stop "With". It also
+    stopped every name that ENDS in Wit, which is where brewers put it. Anchoring does the job
+    the space was reaching for, and does it on both sides."""
+    assert detect_style(name, "beer", "Malt Beverages Specialities - Flavored") == "wheat"
