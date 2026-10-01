@@ -67,6 +67,16 @@ targets:
         # Which on-device scan pipeline the HUD uses: visionkit (default) or vision.
         # See Local.xcconfig and BCDApp.swift.
         BCDScanEngine: "$(BCD_SCAN_ENGINE)"
+        # Google OAuth iOS client id, from Local.xcconfig. Not a secret -- a native app cannot
+        # keep one, which is why the flow is PKCE -- but it is per-developer, so it is kept out
+        # of the repo like the bundle id and the team. Empty means the Google button is not
+        # offered at all, rather than offered and broken.
+        BCDGoogleClientID: "$(BCD_GOOGLE_CLIENT_ID)"
+        # The redirect Google sends the code back to: the client id reversed. Claimed here so
+        # `ASWebAuthenticationSession` can catch it.
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - "$(BCD_GOOGLE_REVERSED_CLIENT_ID)"
     settings:
       base:
         # Bundle ID comes from Local.xcconfig (BCD_BUNDLE_ID) — a free Apple ID can't register

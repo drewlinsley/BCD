@@ -75,29 +75,34 @@ public enum APIError: Error, Sendable {
 /// live server (see MockURLProtocol in the tests).
 public final class APIClient: APIClientProtocol, @unchecked Sendable {
     private let baseURL: URL
-    private let installId: String
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
+    /// Where the bearer token comes from. A closure rather than the `AuthStore` itself so this
+    /// stays a plain value type over `URLSession` and tests can hand it a constant.
+    private let bearer: @Sendable () async throws -> String?
 
-    /// `installId` is a property of the client rather than an argument to every call: it
-    /// is the same pseudonymous identity for the whole session, and threading it through
-    /// each request signature would only give callers a way to get it wrong.
-    public init(baseURL: URL, installId: String = InstallIdentity.current,
-                session: URLSession = .shared) {
+    /// The client no longer carries an identity it picked. It used to send `user_id` -- an id
+    /// of its own choosing, which the server believed -- so every profile was readable and
+    /// writable by anyone who knew one. The server mints the identity now and this presents it.
+    public init(baseURL: URL, session: URLSession = .shared,
+                bearer: @escaping @Sendable () async throws -> String? = { nil }) {
         self.baseURL = baseURL
-        self.installId = installId
         self.session = session
         self.decoder = JSONDecoder()
         self.encoder = JSONEncoder()
+        self.bearer = bearer
     }
 
-    /// Scoring is personal, so the scan has to say who is asking. Without `user_id` the
-    /// server falls back to its seed profile and every rating the user has ever given is
-    /// invisible to the number on screen.
+    /// Convenience for the composition root: take the token from an `AuthStore`.
+    public convenience init(baseURL: URL, auth: AuthStore, session: URLSession = .shared) {
+        self.init(baseURL: baseURL, session: session, bearer: { try await auth.token() })
+    }
+
+    /// Scoring is personal, and the server reads who is asking from the bearer token. It used
+    /// to read it from a `user_id` the client chose, which is why anyone could score as anyone.
     public func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
-        try await post("/v1/scan/resolve", body: req,
-                       query: [URLQueryItem(name: "user_id", value: installId)])
+        try await post("/v1/scan/resolve", body: req)
     }
 
     /// How long to wait for a picture to be read. `URLSession`'s 60s default is sized for a
@@ -107,11 +112,10 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// nothing — the one confusion this whole path was built to remove.
     static let visionTimeout: TimeInterval = 180
 
-    /// A camera frame for the labels OCR cannot read. Same `user_id` as the text path:
+    /// A camera frame for the labels OCR cannot read. Same caller as the text path:
     /// what comes back is scored for the same person.
     public func resolveVision(_ req: ScanVisionRequest) async throws -> ScanVisionResponse {
         try await post("/v1/scan/vision", body: req,
-                       query: [URLQueryItem(name: "user_id", value: installId)],
                        timeout: Self.visionTimeout)
     }
 
@@ -148,24 +152,23 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         let _: EmptyAck = try await post("/v1/telemetry", body: batch)
     }
 
-    /// A taste verdict. `user_id` is the pseudonymous install id — it selects which
-    /// profile the rating folds into, and is the only identity the server ever sees.
+    /// A taste verdict. Which profile it folds into is decided by the bearer token, not by
+    /// `userId` — that argument is kept for the call sites and is no longer sent, because a
+    /// caller-supplied id is exactly what let anyone write to anyone's profile.
     public func submitFeedback(_ req: FeedbackRequest,
                                userId: String) async throws -> FeedbackResponse {
         try await post("/v1/feedback", body: req,
-                       query: [URLQueryItem(name: "user_id", value: userId)])
+                       query: [])
     }
 
-    /// What to drink next. `user_id` is the same pseudonymous install id the scan sends, and
-    /// it is what makes the list this person's rather than anyone's: the server answers with
-    /// their learned profile once they have rated anything, and with its seed profile before
-    /// that — so a fresh install gets a real ranking rather than an empty screen, and the
-    /// caller is the one that has to say which of those the user is looking at.
+    /// What to drink next, for whoever the bearer token says is asking. The server answers
+    /// with their learned profile once they have rated anything, and with its seed profile
+    /// before that — so a fresh install gets a real ranking rather than an empty screen, and
+    /// the caller is the one that has to say which of those the user is looking at.
     public func recommend(limit: Int = 12) async throws -> [Recommendation] {
         let resp: RecommendResponse = try await post(
             "/v1/recommend", body: EmptyBody(),
-            query: [URLQueryItem(name: "user_id", value: installId),
-                    URLQueryItem(name: "limit", value: String(limit))])
+            query: [URLQueryItem(name: "limit", value: String(limit))])
         return resp.results
     }
 
@@ -190,26 +193,13 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
         }
     }
 
-    /// The drinker's own taste, as the server currently understands it. `user_id` is the same
-    /// pseudonymous install id every other call carries, so this is the profile their verdicts
-    /// actually folded into rather than a lookalike.
+    /// The drinker's own taste, as the server currently understands it — theirs because the
+    /// token says so, not because the client asked for that id.
     ///
     /// A fresh install gets `version: 0` and empty fields back — a real answer meaning "nothing
     /// learned yet", not an error — so the caller must not read an empty profile as a failure.
     public func profile() async throws -> TasteProfile {
-        guard var comps = URLComponents(url: baseURL.appendingPathComponent("v1/profile"),
-                                        resolvingAgainstBaseURL: false) else {
-            throw APIError.badURL
-        }
-        comps.queryItems = [URLQueryItem(name: "user_id", value: installId)]
-        guard let url = comps.url else { throw APIError.badURL }
-        let (data, resp) = try await session.data(from: url)
-        try Self.check(resp)
-        do {
-            return try decoder.decode(TasteProfile.self, from: data)
-        } catch {
-            throw APIError.decoding("\(error)")
-        }
+        try await get("v1/profile")
     }
 
     /// Suggestions shelf by shelf, rated-in shelves first. One call rather than one per shelf:
@@ -217,24 +207,46 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// fill the screen in visibly.
     public func familyPicks(limit: Int = 6, crossStyle: Bool = false) async throws
         -> FamilyResponse {
-        guard var comps = URLComponents(url: baseURL.appendingPathComponent("v1/recommend/families"),
-                                        resolvingAgainstBaseURL: false) else {
+        try await get("v1/recommend/families", query: [
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "cross_style", value: crossStyle ? "true" : "false")])
+    }
+
+    // MARK: - plumbing
+
+    /// Every request goes out through here, so the token cannot be forgotten on one route.
+    private func authorized(_ url: URL, method: String) async throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let token = try await bearer() {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private func url(_ path: String, query: [URLQueryItem] = []) throws -> URL {
+        let base = baseURL.appendingPathComponent(path)
+        guard !query.isEmpty else { return base }
+        guard var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
             throw APIError.badURL
         }
-        comps.queryItems = [URLQueryItem(name: "user_id", value: installId),
-                            URLQueryItem(name: "limit", value: String(limit)),
-                            URLQueryItem(name: "cross_style", value: crossStyle ? "true" : "false")]
-        guard let url = comps.url else { throw APIError.badURL }
-        let (data, resp) = try await session.data(from: url)
+        comps.queryItems = query
+        guard let built = comps.url else { throw APIError.badURL }
+        return built
+    }
+
+    private func get<R: Decodable>(_ path: String, query: [URLQueryItem] = [],
+                                   timeout: TimeInterval? = nil) async throws -> R {
+        var request = try await authorized(try url(path, query: query), method: "GET")
+        if let timeout { request.timeoutInterval = timeout }
+        let (data, resp) = try await session.data(for: request)
         try Self.check(resp)
         do {
-            return try decoder.decode(FamilyResponse.self, from: data)
+            return try decoder.decode(R.self, from: data)
         } catch {
             throw APIError.decoding("\(error)")
         }
     }
-
-    // MARK: - plumbing
 
     private func post<B: Encodable, R: Decodable>(
         _ path: String, body: B, query: [URLQueryItem] = [], timeout: TimeInterval? = nil
@@ -248,8 +260,7 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
             guard let built = comps.url else { throw APIError.badURL }
             url = built
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        var request = try await authorized(url, method: "POST")
         if let timeout { request.timeoutInterval = timeout }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)

@@ -19,6 +19,10 @@ dependencies = [
     "structlog>=24.1",
     "tenacity>=8.4",
     "protego>=0.3",
+    # Verifying a provider's ID token: RS256 against their published JWKS. The `crypto` extra
+    # is what pulls `cryptography`; PyJWT alone cannot check an RS256 signature, and a verifier
+    # that silently cannot verify is worse than none.
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

@@ -1891,3 +1891,150 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         #expect(out.rated == 0)
     }
 }
+
+// MARK: - who is calling
+
+/// Canned HTTP, and a record of what went out. There was a comment in `APIClient` promising one
+/// of these; there wasn't one.
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static let lock = NSLock()
+    nonisolated(unsafe) static var bodies: [String: String] = [:]      // path -> JSON
+    nonisolated(unsafe) static var seen: [(path: String, auth: String?, query: String?)] = []
+    nonisolated(unsafe) static var hits: [String: Int] = [:]
+
+    static func reset(_ bodies: [String: String]) {
+        lock.lock(); defer { lock.unlock() }
+        self.bodies = bodies; seen = []; hits = [:]
+    }
+
+    /// Synchronous readers. `NSLock.lock()` is unavailable from an async context, and these
+    /// are called from async tests.
+    static func calls(to path: String) -> Int {
+        lock.lock(); defer { lock.unlock() }; return hits[path] ?? 0
+    }
+
+    static func requests() -> [(path: String, auth: String?, query: String?)] {
+        lock.lock(); defer { lock.unlock() }; return seen
+    }
+
+    static func session() -> URLSession {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: cfg)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        Self.lock.lock()
+        Self.seen.append((path, request.value(forHTTPHeaderField: "Authorization"),
+                          request.url?.query))
+        Self.hits[path, default: 0] += 1
+        let body = Self.bodies[path]
+        Self.lock.unlock()
+        let code = body == nil ? 404 : 200
+        let resp = HTTPURLResponse(url: request.url!, statusCode: code,
+                                   httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data((body ?? "{}").utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+private let anonBody = #"{"account_id":"acct:abc","token":"tok-1","provider":"anonymous"}"#
+private let googleBody = #"{"account_id":"acct:abc","token":"tok-2","provider":"google","claimed":true}"#
+
+private struct FakeGoogle: IdentityProvider {
+    let name = "google"
+    func idToken() async throws -> String { "an-id-token" }
+}
+
+/// Serialized: `StubURLProtocol` keeps its canned responses and its record of requests in
+/// statics, and Swift Testing runs tests in parallel by default -- so without this the tests
+/// reset each other's stubs and count each other's calls. The first run of them failed exactly
+/// that way, reporting three calls where one was expected.
+@Suite(.serialized) struct WhoIsCalling {
+    /// The app asks the server for an account on first launch. It does not choose one -- that
+    /// is what let anyone read anyone's profile by naming an id.
+    @Test func theFirstLaunchAsksTheServerForAnAccount() async throws {
+        StubURLProtocol.reset(["/v1/auth/anonymous": anonBody])
+        let store = MemoryTokenStorage()
+        let auth = AuthStore(baseURL: URL(string: "http://x")!, storage: store,
+                             session: StubURLProtocol.session())
+        #expect(try await auth.token() == "tok-1")
+        #expect(store.read() == "tok-1")          // kept, so a relaunch is the same account
+    }
+
+    /// The race this is an actor for: a cold launch paints several screens at once, and each
+    /// one asks for the token. Three requests would mint three accounts and keep the last,
+    /// orphaning two the moment they were created.
+    @Test func screensAskingAtOnceGetOneAccountNotThree() async throws {
+        StubURLProtocol.reset(["/v1/auth/anonymous": anonBody])
+        let auth = AuthStore(baseURL: URL(string: "http://x")!, storage: MemoryTokenStorage(),
+                             session: StubURLProtocol.session())
+        let tokens = try await withThrowingTaskGroup(of: String.self) { group -> [String] in
+            for _ in 0..<8 { group.addTask { try await auth.token() } }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(tokens.allSatisfy { $0 == "tok-1" })
+        let calls = StubURLProtocol.calls(to: "/v1/auth/anonymous")
+        #expect(calls == 1)
+    }
+
+    /// A token already in storage is used as-is. Asking for a new account every launch would
+    /// hand the drinker a new profile every launch.
+    @Test func aStoredTokenIsNotTradedForAFreshAccount() async throws {
+        StubURLProtocol.reset(["/v1/auth/anonymous": anonBody])
+        let auth = AuthStore(baseURL: URL(string: "http://x")!,
+                             storage: MemoryTokenStorage("already-have-one"),
+                             session: StubURLProtocol.session())
+        #expect(try await auth.token() == "already-have-one")
+        let calls = StubURLProtocol.calls(to: "/v1/auth/anonymous")
+        #expect(calls == 0)
+    }
+
+    /// Signing in sends the token the app is already using, so the server can claim that
+    /// anonymous account. Without it a drinker who rated ten drinks and then signed in would
+    /// find zero.
+    @Test func signingInOffersTheAccountAlreadyBeingUsed() async throws {
+        StubURLProtocol.reset(["/v1/auth/anonymous": anonBody, "/v1/auth/google": googleBody])
+        let auth = AuthStore(baseURL: URL(string: "http://x")!, storage: MemoryTokenStorage(),
+                             session: StubURLProtocol.session())
+        let state = try await auth.signIn(with: FakeGoogle())
+        #expect(state == .signedIn(provider: "google"))
+        let sent = StubURLProtocol.requests().first { $0.path == "/v1/auth/google" }?.auth
+        #expect(sent == "Bearer tok-1")           // the anonymous one, for the server to claim
+        #expect(try await auth.token() == "tok-2")
+    }
+
+    /// Signing out forgets the token here and nothing on the server: the ratings stay with the
+    /// account, which is the entire reason to sign in.
+    @Test func signingOutForgetsTheTokenAndNotTheAccount() async throws {
+        StubURLProtocol.reset(["/v1/auth/anonymous": anonBody])
+        let store = MemoryTokenStorage("tok-x")
+        let auth = AuthStore(baseURL: URL(string: "http://x")!, storage: store,
+                             session: StubURLProtocol.session())
+        await auth.signOut()
+        #expect(store.read() == nil)
+        #expect(await auth.state == .anonymous)
+    }
+
+    /// Every route carries the token, and none of them carries an id the server would believe.
+    @Test func everyCallPresentsTheTokenAndNamesNobody() async throws {
+        StubURLProtocol.reset([
+            "/v1/profile": #"{"user_id":"acct:abc","version":0,"style_affinities":{}}"#,
+            "/v1/recommend/families": #"{"rated":0,"groups":[]}"#,
+        ])
+        let api = APIClient(baseURL: URL(string: "http://x")!,
+                            session: StubURLProtocol.session(), bearer: { "tok-9" })
+        _ = try await api.profile()
+        _ = try await api.familyPicks(limit: 4, crossStyle: false)
+        let seen = StubURLProtocol.requests()
+        #expect(seen.count == 2)
+        #expect(seen.allSatisfy { $0.auth == "Bearer tok-9" })
+        #expect(seen.allSatisfy { !($0.query ?? "").contains("user_id") })
+    }
+}
