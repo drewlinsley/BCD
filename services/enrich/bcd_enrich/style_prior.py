@@ -395,7 +395,7 @@ _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
     # "single malt" used to be here. It says how a whisky was made -- one distillery, all
     # malted barley -- and nothing about where, so it belongs to no country. Scotch keeps the
     # word Scotch, the Scottish regions and the distilleries nobody confuses.
-    ("scotch", ("scotch", "speyside", "highland", "glen", "macallan", "ecosse",
+    ("scotch", ("scotch", "speyside", "highland", "glen*", "macallan", "ecosse",
                 "chivas", "ballantine", "grant", "famous grouse", "johnnie walker")),
     ("irish_whiskey", ("irish", "jameson", "tullamore", "bushmills", "irlandais")),
     ("bourbon", ("bourbon", "tennessee", "kentucky", "jack daniel", "buffalo trace", "four roses",
@@ -419,15 +419,15 @@ _SPIRIT_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("rum", ("rum", "rhum", " ron ", "ron ", "bacardi")),
     ("gin", ("gin", "london dry", "hendrick", "bombay", "tanqueray", "beefeater")),
     ("vodka", ("vodka", "smirnoff", "absolut", "svedka", "ketel", "grey goose", "stoli", "vodca")),
-    ("mezcal", ("mezcal", "mescal")),
+    ("mezcal", ("mezcal*", "mescal")),
     ("tequila", ("tequila", "reposado", "patron", "jose cuervo", "don julio", "espolon", "1800",
                  "blanco tequila", "silver tequila")),
     ("brandy", ("brandy", "cognac", "armagnac", "calvados", "hennessy", "remy martin")),
     ("triple_sec", ("cointreau", "triple sec", "grand marnier", "curacao", "curaçao")),
-    ("anise", ("absinthe", "ouzo", "pastis", "sambuca", "anis", "raki", "arak")),
+    ("anise", ("absinthe", "ouzo", "pastis", "sambuca", "anis", "raki*", "arak")),
     ("cream_liqueur", ("baileys", "irish cream", "cream liqueur")),
     ("amaro", ("amaro", "aperol", "campari", "vermouth", "fernet", "cynar", "martini",
-               "aperitivo", "aperitif", "bitter")),
+               "aperitivo", "aperitif", "bitter*")),
     ("liqueur", ("liqueur", "likör", "likor", "licor", "schnapps", "kahlua", "coffee liqueur")),
 ]
 
@@ -699,6 +699,54 @@ def is_non_alcoholic(name: str) -> bool:
     return bool(re.search(r"\b0[.,]0\b", n))
 
 
+#: A phrase naming the CASK a spirit was finished in, not the spirit itself. The same doctrine
+#: the smoke fix above records: a cask is a MARK a label states, and `_WHISKY_MARKS` already
+#: reads it as one ("oloroso" is a sherry cask there). Read as a STYLE as well, it renamed the
+#: drink: "Ichiro's Malt & Grain Refill Bourbon Barrel Finish" -- class `Other Imported Whisky`
+#: -- came out a Bourbon, and its sibling "Oloroso Sherry Cask Finish" came out a Gold Rum.
+#: Both then topped a Discover shelf they do not belong on.
+#:
+#: The finishing verb is required, and that is what keeps this from eating real names. "Barrel
+#: Proof" is a STRENGTH and "Bourbon Barrel Proof" is a bourbon; only "Bourbon Barrel FINISH"
+#: is a cask. Stripping every "<word> barrel" would have taken the bourbon out of the first.
+_CASK_PHRASE = re.compile(
+    r"\b[a-z0-9'\u2019-]+\s+(?:barrels?|casks?|butts?|pipes?|hogsheads?|puncheons?|barriques?)"
+    r"[\s-]+(?:finish\w*|matur\w*|aged|rested|conditioned)"
+    r"|\bfinished\s+in\s+[a-z0-9'\u2019-]+(?:\s+[a-z0-9'\u2019-]+)?",
+    re.I,
+)
+
+
+def _without_cask(n: str) -> str:
+    """`n` with any cask-finish phrase removed, for the rules that read the name for a style."""
+    return _CASK_PHRASE.sub(" ", n)
+
+
+#: Suffixes a keyword may pick up and still be the same word. Anchoring both ends is what stops
+#: "gin" claiming GINGER and "oro" claiming OLOROSO; this is what keeps the plural and the past
+#: participle working anyway, so the tables can say the word rather than a stem that collides.
+_INFLECTION = r"(?:s|es|ed|d|y|ies)?"
+
+
+def _says(n: str, keyword: str) -> bool:
+    """Whether `n` states `keyword` as a word, allowing a plural or a participle.
+
+    `keyword in n` let "oro" (Carta Oro, an aged rum) match inside OLOROSO and hand a Japanese
+    whisky a rum centroid -- the same shape as the `gin`-inside-`original` bug the resolver
+    guards. Anchoring only the front fixed "original" and left "Ginger Beer" reading as a gin,
+    so both ends are anchored and the inflections are spelled out instead.
+
+    A keyword ending in `*` is a STEM and may run on into a longer word. Four earn it, each
+    measured: `glen*` reaches Glenmorangie and Glengoyne, `mezcal*` Mezcalosfera, `raki*` the
+    Balkan rakia and rakija, `bitter*` Bittermens. Anchoring those cost 241 rows that were
+    right before. Nothing else in the table gets it: a stem is how `gin` claimed GINGER.
+    """
+    kw = keyword.strip()
+    if kw.endswith("*"):
+        return re.search(r"\b" + re.escape(kw[:-1]), n) is not None
+    return re.search(r"\b" + re.escape(kw) + _INFLECTION + r"\b", n) is not None
+
+
 def detect_style(name: str, category: Category | str | None,
                  class_type: str | None = None) -> str | None:
     """Best style key for a product, or None if even the category is unknown.
@@ -728,8 +776,24 @@ def detect_style(name: str, category: Category | str | None,
         return cls
     rules = (_BEER_RULES if cat == "beer" else
              _SPIRIT_RULES if cat in ("spirit", "other") else [])
+    # Spirits read the name with the cask phrase taken out, and read it word by word. Beer does
+    # neither, deliberately:
+    #
+    #   - a barrel-aged stout IS a barrel-aged stout, and no beer rule reads a cask word as a
+    #     style, so there is nothing for `_without_cask` to save it from;
+    #   - beer keywords live INSIDE compound words on purpose. `hefe` has to reach hefeweizen,
+    #     `bock` has to reach Maibock and Rauchbock, `ipa` has to reach the brewers who write
+    #     DDHIPA and SIPA. Anchoring them cost 520 real bocks and 1,722 wheat beers when it was
+    #     measured over the 523,457 filed rows.
+    #
+    # Beer has its own version of this bug -- `keller` claims Mikkeller and `light` claims
+    # Lamplighter, both brewery names -- but it needs per-keyword anchoring rather than one
+    # rule, since the same table holds words that must match inside a compound and words that
+    # must not. That is a separate change, measured separately.
+    beer = cat == "beer"
+    readable = n if beer else _without_cask(n)
     for style, kws in rules:
-        if any(k in n for k in kws):
+        if any((k.strip() in readable) if beer else _says(readable, k) for k in kws):
             return style
     if cls is not None:
         return cls

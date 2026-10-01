@@ -364,3 +364,74 @@ def test_a_single_malt_carries_its_own_centroid_and_reads_its_own_label():
     young = sensory_from_style("Probe Single Malt", Category.SPIRIT, style_hint="Whisky").axes
     assert aged["vanilla_oak"] > young["vanilla_oak"]
     assert aged["stone_fruit"] > young["stone_fruit"]
+
+
+# ---- a cask is a mark, not a style ----------------------------------------------------------
+
+@pytest.mark.parametrize("name,expected", [
+    # The bug: both of these are filed under class "Other Imported Whisky", and the NAME
+    # renamed them. One came out a Bourbon and its sibling a Gold Rum, and both then topped a
+    # Discover shelf they do not belong on.
+    ("Ichiro's Malt & Grain Refill Bourbon Barrel Finish Japan", "whiskey"),
+    ("Ichiro's Malt & Grain Oloroso Sherry Cask Finish 11950", "whiskey"),
+    ("Chattanooga Whiskey Tequila Barrel Finished", "whiskey"),
+    ("Hibiki Finished In Mizunara Casks", "whiskey"),
+])
+def test_the_cask_a_whisky_sat_in_does_not_rename_it(name, expected):
+    assert detect_style(name, "spirit", "Other Imported Whisky Fb") == expected
+
+
+def test_a_barrel_proof_is_a_strength_not_a_cask():
+    """The finishing verb is what makes a cask phrase a cask phrase. Without that rule this
+    would strip "Bourbon Barrel" and leave a bourbon that no longer says so."""
+    assert detect_style("Heaven Hill Bourbon Barrel Proof", "spirit", None) == "bourbon"
+
+
+def test_beer_keeps_its_barrels():
+    """A barrel-aged stout IS a barrel-aged stout, and no beer rule reads a cask word as a
+    style, so the stripping must not reach beer names."""
+    assert detect_style("Goose Island Bourbon County Barrel Aged Stout", "beer", "Ale") == "stout"
+
+
+# ---- a keyword has to be a word -------------------------------------------------------------
+
+@pytest.mark.parametrize("name,wrong", [
+    ("Kinmen Kaoliang Original Distilled No. 21", "gin"),     # gin inside ORIGINal
+    ("Gays & Faes Lemon Orange Hibiscus Ginger Spritz", "gin"),  # gin inside GINGer
+    ("Baron De Sigognac VS", "rum"),                          # "ron " inside baRON
+    ("Teeling 15yo Oloroso Sherry Cask", "aged_rum"),          # "oro" inside olOROso
+    ("Hawkeye Butterscotch", "scotch"),                        # scotch inside butterSCOTCH
+    ("Versa Series Cafe Grumpy", "rum"),                       # rum inside gRUMpy
+    ("Luther Dryers Mango Vodka Lemonade", "rye"),             # rye inside dRYErs
+    ("The Lakes Whiskymaker's Reserve", "bourbon"),            # "maker" (Maker's Mark)
+    ("Apple Brandywine", "brandy"),                            # brandy inside BRANDYwine
+])
+def test_a_keyword_hiding_inside_a_longer_word_names_nothing(name, wrong):
+    assert detect_style(name, "spirit", None) != wrong
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Glenmorangie Elegance", "scotch"),        # glen* runs on into the distillery
+    ("Hepburn's Choice Glengoyne", "scotch"),
+    ("Mezcalosfera Espadin Distilado", "mezcal"),
+    ("Legende Rakija", "anise"),
+    ("Bittermens Amere Nouvelle", "amaro"),
+])
+def test_a_stem_may_run_on_into_the_name_it_belongs_to(name, expected):
+    """Four keywords are proper-noun stems and say so with a trailing `*`. Anchoring them like
+    the rest cost 241 rows that were right before."""
+    assert detect_style(name, "spirit", None) == expected
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Glenfiddich 15 Year Whisky", "scotch"),
+    ("Jack Daniels Tennessee Whiskey", "bourbon"),
+    ("Laphroaig Peated Single Malt", "peated_scotch"),
+    ("Ardbeg Peat", "peated_scotch"),
+    ("Bacardi Carta Oro", "aged_rum"),
+    ("Detroit City Distillery Lumber Baron Gin", "gin"),
+])
+def test_the_words_that_did_work_still_do(name, expected):
+    """Inflections are spelled out so anchoring both ends does not quietly stop the rules
+    matching: whisky AND whiskey, peat AND peated."""
+    assert detect_style(name, "spirit", None) == expected
