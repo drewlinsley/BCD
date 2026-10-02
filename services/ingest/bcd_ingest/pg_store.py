@@ -446,20 +446,63 @@ class PostgresStore:
                 out[tbl] = cur.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
         return out
 
+    #: How close a row has to be to what was typed. The connection sets the trigram gate at
+    #: 0.4, which is right for the resolver -- OCR arrives garbled and a loose gate is the
+    #: point -- and too loose for a search box, where the query is typed and clean: "Heady
+    #: Topper" let `Copper Head Red Ale` through at 0.615. Partial words, which a search box
+    #: must serve, score far above that: LAGAV against `Lagavulin` is 0.833 and HEADY is
+    #: 1.0. Set between the two rather than at either: a one-letter typo is the other thing a
+    #: search box must survive, and LAGAVULAN against `Lagavulin` lands on exactly 0.7 -- a
+    #: float4 that does not reliably compare >= to a float8 0.7, so the bar sits just under
+    #: it. (The old query "handled" that typo by returning `Lantern`, `Landing Lager` and
+    #: `Lagom`.)
+    SEARCH_MIN_SIM = 0.65
+
     def search_gold_products(self, q: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Trigram match on name, falling back to a substring scan of the record — the
-        real version of MedallionStore's LIKE placeholder."""
+        """What a typed query names, best first — the Search tab's one query.
+
+        Gated on `%%>`, which is the commutator of `<%%` and the operator `gin_trgm_ops`
+        actually indexes (see `match_products` for the directionality rules), so this reads
+        `ix_gold_qualified_trgm_product` instead of walking the table.
+
+        It used to score plain `similarity` on `name` and OR in `record::text ILIKE '%%q%%'`,
+        and that second arm was the whole cost: no index can serve a cast of every product's
+        JSON to text, and an OR with one unindexable side makes the planner scan for BOTH.
+        Measured on the live catalog at 534,104 products, searching "Lagavulin" took 4.7
+        seconds on a parallel seq scan that threw away 441,793 rows per worker. The same
+        search is now a bitmap index scan (2026-10-02).
+
+        Dropping that arm loses nothing a drinker wanted. It was matching the query anywhere
+        in the record, so a search for "Lagavulin" returned `Ardbeg Fermutation`, `Ardbeg
+        Perpetuum` and `Signatory Ardbeg` -- Islay neighbours named in some other field. The
+        one real match it found that a plain `name` similarity missed, `Jw Lees Harvest
+        Matured In Lagavulin Cask`, word-similarity catches outright, because that is what
+        finding a short query inside a longer name IS.
+
+        Matched against the brand-qualified name, so a drink is findable by its maker even
+        when its own name never says it -- `refresh_search_names` is what puts it there.
+        Ties are the norm (word similarity is 1.0 for any name containing the query), and
+        they break toward the shorter name: `Lagavulin` before `Lagavulin 16 Year`.
+        """
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
                 """
-                SELECT record, similarity(coalesce(name,''), %s) AS sim
-                FROM gold
-                WHERE entity_type='product'
-                  AND (coalesce(name,'') %% %s OR record::text ILIKE %s)
-                ORDER BY sim DESC
-                LIMIT %s
+                SELECT record FROM (
+                    SELECT record,
+                           GREATEST(
+                               word_similarity(%(q)s, coalesce(search_name, name, '')),
+                               similarity(coalesce(search_name, name, ''), %(q)s)
+                           ) AS sim,
+                           length(coalesce(search_name, name, '')) AS len
+                    FROM gold
+                    WHERE entity_type='product'
+                      AND coalesce(search_name, name, '') %%> %(q)s
+                ) t
+                WHERE sim >= %(floor)s
+                ORDER BY sim DESC, len
+                LIMIT %(limit)s
                 """,
-                (q, q, f"%{q}%", limit),
+                {"q": q, "limit": limit, "floor": self.SEARCH_MIN_SIM},
             ).fetchall()
         return [r[0] for r in rows]
 
