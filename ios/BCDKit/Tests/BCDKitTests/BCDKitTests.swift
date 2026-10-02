@@ -344,6 +344,32 @@ import Foundation
         #expect(coord.overlays.count == 2)
         #expect(coord.filterText == nil)
     }
+
+    @MainActor
+    @Test func aLabelNothingCanPlaceOffersToAddIt() async throws {
+        // Readable text in view, tick after tick, that the catalog can't place and — with no
+        // on-device model here — nothing else can either. The HUD stops sitting blank and offers
+        // to add the drink. The counter is its own, not `unreadTicks`, so the picture escalation
+        // resetting that one can't mask a genuinely unknown can.
+        let engine = PushEngine()
+        let coord = ScanCoordinator(engine: engine, api: CatalogStubAPI(known: []))
+        coord.start()
+
+        for i in 0..<ScanCoordinator.unknownAfterTicks {
+            engine.push([DetectedText(text: "MYSTERY BREW \(i)", kind: "text",
+                                      x: 0.3, y: 0.4, w: 0.4, h: 0.1)])
+            try await Task.sleep(nanoseconds: 50_000_000)
+            #expect(!coord.isUnknownLabel)      // not before the full run — let the reads settle
+            await coord.resolveLatest()
+        }
+        #expect(coord.isUnknownLabel)           // nothing placed across the run: offer to add
+
+        // Pointing away is the phone being lowered, not a label we failed to place.
+        engine.push([])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await coord.resolveLatest()
+        #expect(!coord.isUnknownLabel)
+    }
 }
 
 @Suite("SeenLog")

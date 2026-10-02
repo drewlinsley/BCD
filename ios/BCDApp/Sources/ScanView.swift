@@ -17,6 +17,19 @@ struct ScanView: View {
     @StateObject private var model = ScanViewModel()
     @State private var ask: String = ""
     @State private var selected: ScoredCandidate?
+    #if DEBUG
+    // The Simulator has no camera, so the scan loop never fires `isUnknownLabel` on its own. A
+    // long-press on the viewfinder forces the empty-state on, to preview it without a shelf.
+    @State private var debugForceUnknown = false
+    #endif
+
+    private var showsNotFound: Bool {
+        #if DEBUG
+        model.isUnknownLabel || debugForceUnknown
+        #else
+        model.isUnknownLabel
+        #endif
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -75,12 +88,25 @@ struct ScanView: View {
             // Ease overlays in/out as the fixed-rate loop swaps the set each tick.
             .animation(.easeInOut(duration: 0.2), value: model.overlays.count)
 
+            // Readable label, nothing placed: offer to add it, centred in the viewfinder and
+            // under the status/chat bar so those stay reachable.
+            if showsNotFound {
+                ScanNotFoundGlyph(size: 200) { model.beginAddUnknown() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
+            }
+
             VStack(spacing: 12) {
                 statusPill
                 chatBar
             }
             .padding()
         }
+        .animation(.easeInOut(duration: 0.3), value: showsNotFound)
+        #if DEBUG
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.6)
+            .onEnded { _ in debugForceUnknown.toggle() })
+        #endif
         .task { model.configure(env: env); model.startLive() }
         .onDisappear { model.stop() }
         // Back from the background: the camera was stopped by iOS and VisionKit does not
@@ -222,6 +248,8 @@ final class ScanViewModel: ObservableObject {
     /// A photo of the label is with the server.
     @Published var isLookingAtTheLabel = false
     @Published var isServerUnreachable = false
+    /// Readable label, nothing placed: the HUD offers to add it. Mirrored from the coordinator.
+    @Published var isUnknownLabel = false
     /// The active natural-language filter (nil = none), mirrored for the status pill.
     @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
@@ -253,6 +281,7 @@ final class ScanViewModel: ObservableObject {
         coord.$isInterpreting.assign(to: &$isInterpreting)
         coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
         coord.$isServerUnreachable.assign(to: &$isServerUnreachable)
+        coord.$isUnknownLabel.assign(to: &$isUnknownLabel)
         coord.$filterText.assign(to: &$filterText)
         // The catalog's vocabulary, for an engine whose recognizer takes custom words: told
         // about "Alchemist" it stops correcting it into "Chemist". Best effort; no words is
@@ -296,6 +325,14 @@ final class ScanViewModel: ObservableObject {
     /// Chat-bar filter: parse the ask once and apply it to every live tick.
     func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }
     func clearFilter() async { await coordinator?.clearFilter() }
+
+    /// The user took the HUD up on adding the drink it couldn't place. The capture screen this
+    /// opens isn't built yet; this is its one entry point, and for now it leaves a breadcrumb so
+    /// we can see how often the catalog's gaps get hit from the camera.
+    func beginAddUnknown() {
+        guard let env else { return }
+        Task { await env.telemetry.log("scan_add_unknown_tapped", tier: .analytics) }
+    }
 }
 
 /// Camera layer. On a real device it presents VisionKit's `DataScannerViewController` (live
