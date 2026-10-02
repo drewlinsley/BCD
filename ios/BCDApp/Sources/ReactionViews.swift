@@ -28,8 +28,14 @@ struct ReactionGlyph: View {
     }
 }
 
-/// "How was it?" — the ask. A tap is a rating, which is the only thing that moves the
-/// taste centroid, so this is the app's one real write.
+/// The ask. A tap is a rating, which is the only thing that moves the taste centroid, so this
+/// is the app's one real write.
+///
+/// It carries no question. "How was it?" sat above the faces and was asked once per drink, so
+/// the Rate tab put it on screen three times at once; lifting it to that list's header fixed
+/// the repetition and was still a sentence nobody needed. Five faces under a drink's name,
+/// reached from a row that says "Change your rating" or a tab called Rate, do not need to be
+/// told what they are for.
 struct ReactionPicker: View {
     let productId: String
     @EnvironmentObject var env: AppEnvironment
@@ -42,10 +48,6 @@ struct ReactionPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("How was it?")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Brand.text)
-
             HStack(spacing: 2) {
                 ForEach(Reaction.allCases) { reaction in
                     Button { choose(reaction) } label: {
@@ -100,12 +102,18 @@ struct ReactionPicker: View {
         }
     }
 
+    /// What the picker says back. Only the things a drinker has a reason to know: where the
+    /// verdict went, and what to do if it went nowhere.
+    ///
+    /// A `weight %+.1f` in monospace and `Reaction.note` used to sit above these, and they were
+    /// our vocabulary, not a drinker's: "pulls the centroid hard toward this product and lifts
+    /// the matching style affinity" explains our arithmetic to someone who came to say they
+    /// liked a beer. Not hidden behind `#if DEBUG` — the simulator and a free-provisioned phone
+    /// both run Debug, so that would have shown it in every build we actually look at. The
+    /// weights stay written down where we would look them up, on `Reaction` itself.
     @ViewBuilder private var readout: some View {
         if let picked {
             VStack(alignment: .leading, spacing: 3) {
-                Text(String(format: "weight %+.1f", picked.weight))
-                    .font(.caption2.monospaced()).foregroundStyle(Brand.textMuted)
-                Text(picked.note).font(.caption).foregroundStyle(Brand.textMuted)
                 if !consent.personalization {
                     // Honest about where it went: with personalization off this is a local
                     // note, not a signal, and nothing reaches the profile.
@@ -181,9 +189,8 @@ struct RatingSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                // The picker asks "How was it?" itself -- it has to, because the Rate tab
-                // stacks several of them -- so the bar carries the drink's name instead of
-                // asking the same question twice.
+                // The bar carries the drink's name and the faces carry the rest; the sheet
+                // asks nothing, because arriving here took a tap on "Change your rating".
                 ReactionPicker(productId: productId).padding(20)
             }
             .background(Brand.surface)
