@@ -1213,6 +1213,21 @@ def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str
     return rec, best, at
 
 
+def _style_seconds_the_name(c: ScoredCandidate, reading: str) -> bool:
+    """Whether the reading prints a style that is the row's own — a second fact for a label
+    whose name is a single word.
+
+    Only ever consulted where one identifying word has already matched: this says the can
+    agrees about what KIND of drink it is, which no amount of name similarity can supply.
+    """
+    own = _own_family(c.resolved)
+    if own is None:
+        return False
+    p = c.resolved.product
+    said = _line_family(reading, p.category.value if p.category else None)
+    return said is not None and said is own
+
+
 def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     """`_accounts_for_sighting`, for a reading that is the camera's rather than a model's.
 
@@ -1233,7 +1248,18 @@ def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     # word for free: "DRINK FROM THE CAN!" misread as DRINK FRONT is, once the chrome is gone,
     # the single word FRONT, and `Front Flips` accounted for it in full. A single word is not a
     # label here any more than it is in `_is_whole_label` -- it may match, it may not certify.
-    if len(set(read)) < _MIN_SELF_PROOF_TOKENS:
+    #
+    # Unless the one word it prints is not the only thing it says. A can whose whole identity
+    # is one word -- The Alchemist's `Crusher`, where the house name appears nowhere on the
+    # label -- still prints its style, and a style is a second fact about the drink that the
+    # name did not supply. That is already what this frame calls corroboration: "the label
+    # naming both its maker and its drink, OR naming one and printing a category that matches
+    # it" (`ScanResolveResponse.corroborated`). The style has to AGREE, not merely be present,
+    # and families are compared rather than spellings, so the can's `AMERICAN DOUBLE INDIA
+    # PALE ALE` and the catalog's `Double IPA` are one answer (`_line_family`). The coincidence
+    # this gate was built against does not survive it: FRONT off "DRINK FROM THE CAN" is one
+    # word on a line that prints no style at all.
+    if len(set(read)) < _MIN_SELF_PROOF_TOKENS and not _style_seconds_the_name(c, reading):
         return False
     if not any(t in in_name for t in read):
         return False
