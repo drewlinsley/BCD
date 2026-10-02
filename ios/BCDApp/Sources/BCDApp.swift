@@ -14,6 +14,11 @@ struct BCDApp: App {
             RootView()
                 .environmentObject(env)
                 .environmentObject(env.consent)
+                // Handed to the views in its own right, not just reached through `env`.
+                // A nested `ObservableObject` publishes nothing to whoever holds the
+                // outer one, so a row drawing a glyph has to observe the log itself --
+                // see `ReactionLog`.
+                .environmentObject(env.reactions)
         }
     }
 }

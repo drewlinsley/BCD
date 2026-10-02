@@ -25,6 +25,8 @@ import BCDKit
 struct ProfileView: View {
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var consent: ConsentStore
+    /// The provenance line counts them, so it has to be told when the count changes.
+    @EnvironmentObject var reactions: ReactionLog
     /// nil until the fetch settles. `loadFailed` is separate on purpose: a profile that came
     /// back empty and a profile that never arrived look identical if you only track one.
     @State private var profile: TasteProfile?
@@ -200,7 +202,7 @@ struct ProfileView: View {
     /// Where this came from, in one line. The rating count is the local one: it is what the
     /// drinker did, and it says whether a confident-sounding memo rests on three verdicts.
     private func provenance(_ p: TasteProfile) -> String {
-        let n = env.reactions.count
+        let n = reactions.count
         let ratings = n == 1 ? "1 rating" : "\(n) ratings"
         guard let when = Self.updated(p.updatedAt) else { return "Built from your \(ratings)." }
         return "Built from your \(ratings) · updated \(when)."
@@ -230,7 +232,7 @@ struct ProfileView: View {
                 ["version": .int(p.version),
                  "n_styles": .int(p.styleAffinities.count),
                  "n_notes": .int(p.notes.count),
-                 "n_rated": .int(env.reactions.count)])
+                 "n_rated": .int(reactions.count)])
         } catch {
             loadFailed = true
         }

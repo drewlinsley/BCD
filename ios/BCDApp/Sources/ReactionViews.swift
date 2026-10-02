@@ -40,11 +40,17 @@ struct ReactionPicker: View {
     let productId: String
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var consent: ConsentStore
-    @State private var picked: Reaction?
+    @EnvironmentObject var reactions: ReactionLog
     @State private var sending = false
     @State private var failed = false
     /// Whether to ask before the first verdict leaves the phone.
     @State private var asking = false
+
+    /// Which face is ringed. The log, read straight -- not a `@State` copy seeded once when
+    /// the picker appeared. "Remove rating" writes the same log from the sheet around this
+    /// view, and the Rate tab shows several pickers at once, so a copy here was a second
+    /// answer to a question only the log can answer.
+    private var picked: Reaction? { reactions.reaction(for: productId) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -86,7 +92,6 @@ struct ReactionPicker: View {
             readout
         }
         .padding(.vertical, 4)
-        .task { picked = env.reactions.reaction(for: productId) }
         // The first rating is where consent actually becomes a question, so it is asked
         // here rather than left as a line of small print under the picker. Before this, a
         // tap on a fresh install recorded locally and went nowhere: the profile never
@@ -132,10 +137,10 @@ struct ReactionPicker: View {
     }
 
     private func choose(_ reaction: Reaction) {
-        picked = reaction
         // Recorded locally either way: it is the user's own answer about their own drink,
-        // and it is what the Seal and the search rows read back.
-        env.reactions.record(reaction, for: productId)
+        // and it is what the Seal and the search rows read back. The write is also what
+        // rings the face -- `picked` reads back out of the log.
+        reactions.record(reaction, for: productId)
         if consent.personalization { send(reaction) } else { asking = true }
     }
 
@@ -185,11 +190,13 @@ struct RatingSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var consent: ConsentStore
-    /// Whether there is a verdict to take back. Read when the sheet appears rather than
-    /// bound to the picker, because the picker owns its own selection and this only has to
-    /// decide whether the way out is offered at all.
-    @State private var rated = false
+    @EnvironmentObject var reactions: ReactionLog
     @State private var removing = false
+
+    /// Whether there is a verdict to take back. The same log the picker reads, so rating a
+    /// drink for the first time brings the way out with it; it used to be read once when the
+    /// sheet appeared, which meant a fresh rating showed no way to undo it.
+    private var rated: Bool { reactions.reaction(for: productId) != nil }
 
     var body: some View {
         NavigationStack {
@@ -213,7 +220,6 @@ struct RatingSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task { rated = env.reactions.reaction(for: productId) != nil }
     }
 
     /// The way back out of a verdict.
@@ -242,9 +248,9 @@ struct RatingSheet: View {
     private func remove() {
         removing = true
         // Cleared here first so the screen behind is right the moment the sheet closes; the
-        // log is a display cache and the server is the profile's source of truth.
-        env.reactions.remove(for: productId)
-        rated = false
+        // log is a display cache and the server is the profile's source of truth, and the
+        // write is what tells every drawn glyph to go back to "not rated".
+        reactions.remove(for: productId)
         Task {
             // Best effort, and deliberately not reverted on failure. A withdrawal that does
             // not reach the server leaves a rating in the profile the drinker has been told
