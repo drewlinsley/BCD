@@ -16,6 +16,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
     case productView = "product_view"
     case provenanceExpanded = "provenance_expanded"
     case ratingSubmitted = "rating_submitted"
+    case ratingWithdrawn = "rating_withdrawn"
     case listAdd = "list_add"
     case alertFired = "alert_fired"
     case alertConverted = "alert_converted"
@@ -44,6 +45,7 @@ public enum TelemetryEvent: String, Sendable, CaseIterable {
         case .productView: return .analytics
         case .provenanceExpanded: return .analytics
         case .ratingSubmitted: return .personalization
+        case .ratingWithdrawn: return .personalization
         case .listAdd: return .personalization
         case .alertFired: return .analytics
         case .alertConverted: return .analytics

@@ -36,11 +36,17 @@ from bcd_schema import (
 # directional (saving something is interest, not a verdict). `scan_corrected_by_user` is
 # deliberately absent: it labels *recognition*, not preference.
 _RATING_EVENT = "rating_submitted"
+#: Taking a verdict back. The log is append-only and the profile is a pure function of it,
+#: so a withdrawal is a thing that HAPPENED rather than a thing erased: the rating stays in
+#: the log and stops counting. That is what lets it travel the client's batch upload exactly
+#: as a rating does, instead of needing a second, deleting path through the telemetry store.
+_WITHDRAWN_EVENT = "rating_withdrawn"
 _LIST_EVENT = "list_add"
 _LIST_WEIGHTS = {"cellar": 0.6, "had_it": 0.5, "wishlist": 0.3, "want_to_try": 0.3}
 
-#: The only events a profile is ever built from — used to filter the log on replay.
-TASTE_EVENTS = frozenset({_RATING_EVENT, _LIST_EVENT})
+#: The only events a profile is ever built from — used to filter the log on replay. The
+#: withdrawal belongs here or replay would drop it and the rating it retracts would return.
+TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _LIST_EVENT})
 
 # Consent tiers under which a profile may be built at all (see telemetry/events.yaml).
 _PERSONALIZATION_CONSENT = frozenset({"personalization", "data_sharing"})
@@ -90,6 +96,11 @@ def signals_from_events(
             rating = ev.get("rating")
             if isinstance(rating, (int, float)):
                 ratings[pid] = _rating_weight(float(rating))
+        elif name == _WITHDRAWN_EVENT:
+            # Read in order with everything else, so withdrawing and then rating again
+            # leaves the new verdict standing -- the same rule a re-rate already follows.
+            # Only the rating goes: a list add is a separate signal and was not withdrawn.
+            ratings.pop(pid, None)
         elif name == _LIST_EVENT:
             bump = _LIST_WEIGHTS.get(ev.get("list_kind") or "", 0.0)
             if bump:
@@ -116,13 +127,20 @@ def rated_products(
     """
     out: set[str] = set()
     for ev in _canonical(store, events):
-        if ev.get("name") != _RATING_EVENT or ev.get("install_id") != install_id:
+        if ev.get("install_id") != install_id:
             continue
         if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
             continue
         pid = ev.get("product_id")
-        if pid:
+        if not pid:
+            continue
+        name = ev.get("name")
+        if name == _RATING_EVENT:
             out.add(pid)
+        elif name == _WITHDRAWN_EVENT:
+            # Withdrawn means never said, so it is something to drink next again. Without
+            # this a mis-tap would quietly bar a drink from "For you" for good.
+            out.discard(pid)
     return out
 
 

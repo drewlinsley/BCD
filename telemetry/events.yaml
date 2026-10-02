@@ -113,6 +113,14 @@ events:
       - {name: product_id, type: string}
       - {name: rating, type: float}
       - {name: aspects, type: json, optional: true}
+  # Taking a verdict back -- a mis-tap on the five faces, or a drink rated and thought
+  # better of. Its own event rather than a deletion because the log is append-only and the
+  # profile is a pure function of it: the rating stays recorded and stops counting.
+  - name: rating_withdrawn
+    tier: personalization
+    pii: none
+    properties:
+      - {name: product_id, type: string}
   - name: list_add
     tier: personalization
     pii: none

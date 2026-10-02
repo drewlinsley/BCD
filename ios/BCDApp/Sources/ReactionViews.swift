@@ -185,13 +185,23 @@ struct RatingSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var consent: ConsentStore
+    /// Whether there is a verdict to take back. Read when the sheet appears rather than
+    /// bound to the picker, because the picker owns its own selection and this only has to
+    /// decide whether the way out is offered at all.
+    @State private var rated = false
+    @State private var removing = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                // The bar carries the drink's name and the faces carry the rest; the sheet
-                // asks nothing, because arriving here took a tap on "Change your rating".
-                ReactionPicker(productId: productId).padding(20)
+                VStack(alignment: .leading, spacing: 20) {
+                    // The bar carries the drink's name and the faces carry the rest; the
+                    // sheet asks nothing, because arriving here took a tap on "Change your
+                    // rating".
+                    ReactionPicker(productId: productId)
+                    if rated { removeRating }
+                }
+                .padding(20)
             }
             .background(Brand.surface)
             .navigationTitle(productName)
@@ -203,6 +213,49 @@ struct RatingSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .task { rated = env.reactions.reaction(for: productId) != nil }
+    }
+
+    /// The way back out of a verdict.
+    ///
+    /// Rating is one tap and the sheet closes itself on that tap, so rating the wrong drink is
+    /// easy and until this it was permanent: the picker could move a rating between rungs but
+    /// never take one off, and `rated_products` went on keeping that drink out of "For you"
+    /// forever on the strength of a slip.
+    ///
+    /// Underneath the faces and on the right, set at Done's size: the two ways out of this
+    /// sheet are the same kind of thing and belong on the same edge, one above the other.
+    /// Destructive styling and no confirmation — what it undoes is one tap, and guarding one
+    /// tap with another is how a dialog becomes furniture.
+    @ViewBuilder private var removeRating: some View {
+        Button(role: .destructive) { remove() } label: {
+            HStack(spacing: 6) {
+                Text("Remove rating")
+                if removing { ProgressView().controlSize(.mini) }
+            }
+            .font(.body)
+        }
+        .disabled(removing)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func remove() {
+        removing = true
+        // Cleared here first so the screen behind is right the moment the sheet closes; the
+        // log is a display cache and the server is the profile's source of truth.
+        env.reactions.remove(for: productId)
+        rated = false
+        Task {
+            // Best effort, and deliberately not reverted on failure. A withdrawal that does
+            // not reach the server leaves a rating in the profile the drinker has been told
+            // is gone -- but putting the face back on screen to say so would be worse, and the
+            // next drain of the telemetry queue carries the same event anyway.
+            _ = try? await env.api.withdrawFeedback(productId: productId)
+            await MainActor.run {
+                removing = false
+                dismiss()
+            }
+        }
     }
 }
 

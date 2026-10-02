@@ -2292,3 +2292,62 @@ struct ContributionUploaderTests {
         #expect(ack.accepted && ack.docId == "user_contribution:9f2a" && !ack.duplicate)
     }
 }
+
+@Suite("ReactionLog")
+struct ReactionLogTests {
+    /// Its own defaults suite per test, like the other logs', so nothing leaks between runs
+    /// or onto the simulator's real store.
+    private func fresh() -> ReactionLog {
+        let name = "bcd.tests.reactions.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return ReactionLog(defaults: defaults)
+    }
+
+    @Test("a verdict is remembered")
+    func recordsAVerdict() {
+        let log = fresh()
+        log.record(.chuggedIt, for: "p:ipa")
+        #expect(log.reaction(for: "p:ipa") == .chuggedIt)
+        #expect(log.count == 1)
+    }
+
+    @Test("a verdict can be taken back")
+    func removesAVerdict() {
+        // The picker could move a rating between rungs but never take one off, so a face
+        // tapped by mistake stood for good.
+        let log = fresh()
+        log.record(.spatItOut, for: "p:ipa")
+        log.remove(for: "p:ipa")
+        #expect(log.reaction(for: "p:ipa") == nil)
+        #expect(log.count == 0)
+    }
+
+    @Test("taking one back leaves the others alone")
+    func removingIsNarrow() {
+        let log = fresh()
+        log.record(.chuggedIt, for: "p:ipa")
+        log.record(.spatItOut, for: "p:stout")
+        log.remove(for: "p:ipa")
+        #expect(log.reaction(for: "p:ipa") == nil)
+        #expect(log.reaction(for: "p:stout") == .spatItOut)
+        #expect(log.count == 1)
+    }
+
+    @Test("removing what was never rated is a no-op")
+    func removingUnratedIsHarmless() {
+        let log = fresh()
+        log.record(.chuggedIt, for: "p:ipa")
+        log.remove(for: "p:never")
+        #expect(log.count == 1)
+    }
+
+    @Test("a drink can be rated again after it is taken back")
+    func canRateAgain() {
+        let log = fresh()
+        log.record(.spatItOut, for: "p:ipa")
+        log.remove(for: "p:ipa")
+        log.record(.pinkieOut, for: "p:ipa")
+        #expect(log.reaction(for: "p:ipa") == .pinkieOut)
+    }
+}

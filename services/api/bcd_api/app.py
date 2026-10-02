@@ -34,6 +34,7 @@ from bcd_schema import (
     ScanVisionRequest,
     ScanVisionResponse,
     TasteProfile,
+    WithdrawRequest,
 )
 from bcd_schema.api import DetectedText
 from bcd_schema.family import (
@@ -559,6 +560,38 @@ def feedback(req: FeedbackRequest,
     if req.aspects:
         event["aspects"] = req.aspects
     collector.ingest({"events": [event]})
+    profile = rebuild_profile(store, collector.iter_events(TASTE_EVENTS), user_id)
+    return FeedbackResponse(accepted=True, profile=profile)
+
+
+@app.post("/v1/feedback/withdraw", response_model=FeedbackResponse)
+def withdraw_feedback(req: WithdrawRequest, who: Caller) -> FeedbackResponse:
+    """Take back a verdict on one product, and hand back the profile without it.
+
+    A mis-tap on the five faces is one tap and the sheet closes itself, so the slip is easy
+    and until now it was permanent: the picker could move a rating between rungs but never
+    remove one, and a drink that had been rated was also barred from "For you" for good.
+
+    Recorded as a `rating_withdrawn` event rather than by deleting the rating. The log is
+    append-only and the profile is a pure function of it, so retracting by appending is what
+    lets this converge with the client's batch telemetry upload exactly as `feedback` does --
+    and it keeps the honest record that a verdict was given and taken back.
+
+    Idempotent, and deliberately silent about whether anything was there to withdraw: the
+    client's own log is a disposable cache, so it may ask to withdraw something the server
+    never had, and that is a no-op and not an error.
+    """
+    user_id = who.id
+    collector: TelemetryCollector = _state["telemetry"]
+    store: Store = _state["store"]
+    collector.ingest({"events": [{
+        "name": "rating_withdrawn",
+        "event_id": str(uuid.uuid4()),
+        "ts": datetime.now(UTC).isoformat(),
+        "install_id": user_id,
+        "consent_tier": "personalization",
+        "product_id": req.product_id,
+    }]})
     profile = rebuild_profile(store, collector.iter_events(TASTE_EVENTS), user_id)
     return FeedbackResponse(accepted=True, profile=profile)
 

@@ -9,6 +9,9 @@ public protocol APIClientProtocol: Sendable {
     func searchProducts(_ query: String) async throws -> [ResolvedProduct]
     func sendTelemetry(_ batch: TelemetryBatch) async throws
     func submitFeedback(_ req: FeedbackRequest, userId: String) async throws -> FeedbackResponse
+    /// Take one verdict back. The profile comes back rebuilt without it, so the caller does
+    /// not have to ask a second time to know where it left them.
+    func withdrawFeedback(productId: String) async throws -> FeedbackResponse
     /// Drinks to suggest, best first, for the person this client speaks for.
     func recommend(limit: Int) async throws -> [Recommendation]
     /// Catalog vocabulary for the on-device recognizer's custom-words hint.
@@ -31,6 +34,12 @@ extension APIClientProtocol {
     /// pretending a verdict was recorded.
     public func submitFeedback(_ req: FeedbackRequest,
                                userId: String) async throws -> FeedbackResponse {
+        throw APIError.http(501)
+    }
+
+    /// Same reasoning. A stub that cannot withdraw must say so rather than report success,
+    /// because the caller clears its own copy of the verdict on the strength of this returning.
+    public func withdrawFeedback(productId: String) async throws -> FeedbackResponse {
         throw APIError.http(501)
     }
 
@@ -168,6 +177,12 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
                                userId: String) async throws -> FeedbackResponse {
         try await post("/v1/feedback", body: req,
                        query: [])
+    }
+
+    /// A POST rather than a DELETE on the rating's own path, because a product id carries a
+    /// colon (`bcd:the-alchemist-crusher`) and a body needs no escaping to survive the trip.
+    public func withdrawFeedback(productId: String) async throws -> FeedbackResponse {
+        try await post("/v1/feedback/withdraw", body: WithdrawBody(productId: productId))
     }
 
     /// What to drink next, for whoever the bearer token says is asking. The server answers

@@ -76,6 +76,19 @@ public struct FeedbackRequest: Codable, Sendable {
     }
 }
 
+/// What `POST /v1/feedback/withdraw` takes — the id of the verdict being taken back.
+///
+/// Its own type rather than a `FeedbackRequest` with a nil rating: a withdrawal is not a
+/// rating with something missing, and the route must not be reachable by forgetting a field.
+/// The client sets no key strategy, so the one key is spelled out (see `ContributionWire`).
+struct WithdrawBody: Encodable {
+    let productId: String
+
+    enum CodingKeys: String, CodingKey {
+        case productId = "product_id"
+    }
+}
+
 public struct FeedbackResponse: Codable, Sendable {
     public let accepted: Bool
     public let profile: TasteProfile
@@ -124,6 +137,19 @@ public final class ReactionLog: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         var all = defaults.dictionary(forKey: key) ?? [:]
         all[productId] = reaction.rawValue
+        defaults.set(all, forKey: key)
+    }
+
+    /// Forget a verdict. The picker could move a rating between rungs but never take one off,
+    /// so a face tapped by mistake stood for good — and because `rated_products` reads the
+    /// same verdicts, it also barred that drink from "For you" permanently.
+    ///
+    /// Clearing here is only half of it: this log is a display cache and the server holds the
+    /// profile, so the caller withdraws on the server too (`APIClientProtocol.withdrawFeedback`).
+    public func remove(for productId: String) {
+        lock.lock(); defer { lock.unlock() }
+        var all = defaults.dictionary(forKey: key) ?? [:]
+        all.removeValue(forKey: productId)
         defaults.set(all, forKey: key)
     }
 }
