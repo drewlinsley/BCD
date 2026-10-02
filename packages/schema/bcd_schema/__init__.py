@@ -19,6 +19,7 @@ from .api import (
     ScanVisionRequest,
     ScanVisionResponse,
     ScoredCandidate,
+    WithdrawRequest,
 )
 from .entities import (
     SKU,
@@ -113,5 +114,6 @@ __all__ = [
     "WaterProfile",
     "WeeklyPrediction",
     "WeeklyProfileDelta",
+    "WithdrawRequest",
     "Yeast",
 ]

@@ -346,3 +346,76 @@ def test_a_verdict_survives_the_row_being_merged_away():
     put_redirect(store, "old", "new")
     assert rated_products(store, [_ev(product_id="old", rating=1.0)], "demo") == {"new"}
     store.close()
+
+
+# ---- taking a verdict back ----------------------------------------------------------
+
+def test_a_withdrawn_rating_stops_counting():
+    """A mis-tap on the five faces is one tap, and until this it was permanent."""
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(name="rating_withdrawn", product_id="p:ipa"),
+    ]
+    assert signals_from_events(events, "demo") == {}
+
+
+def test_withdrawing_leaves_every_other_verdict_alone():
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(product_id="p:stout", rating=1.0),
+        _ev(name="rating_withdrawn", product_id="p:ipa"),
+    ]
+    assert signals_from_events(events, "demo") == {"p:stout": -1.0}
+
+
+def test_rating_again_after_withdrawing_stands():
+    """Read in order, like a re-rate. Withdrawing is not a tombstone on the product."""
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(name="rating_withdrawn", product_id="p:ipa"),
+        _ev(product_id="p:ipa", rating=4.0),
+    ]
+    assert signals_from_events(events, "demo") == {"p:ipa": 0.5}
+
+
+def test_withdrawing_what_was_never_rated_is_a_no_op():
+    """The client's reaction log is a disposable cache, so it can ask to withdraw something
+    the server never had. That is not an error and must not invent a signal."""
+    assert signals_from_events([_ev(name="rating_withdrawn", product_id="p:ipa")], "demo") == {}
+
+
+def test_withdrawing_a_rating_does_not_withdraw_a_list_add():
+    """Separate signals. Saving a bottle is interest and was never the verdict taken back."""
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(name="list_add", product_id="p:ipa", list_kind="cellar"),
+        _ev(name="rating_withdrawn", product_id="p:ipa"),
+    ]
+    assert signals_from_events(events, "demo") == {"p:ipa": 0.6}
+
+
+def test_a_withdrawn_rating_is_drinkable_again(store):
+    """`rated_products` is what keeps a drink you have judged out of "For you". A verdict
+    taken back has to put it back in the pool, or one mis-tap bars a drink for good."""
+    rated = [_ev(product_id="p:ipa", rating=5.0)]
+    assert rated_products(store, rated, "demo") == {"p:ipa"}
+    taken_back = rated + [_ev(name="rating_withdrawn", product_id="p:ipa")]
+    assert rated_products(store, taken_back, "demo") == set()
+
+
+def test_withdrawing_is_consent_gated_like_the_rating(store):
+    """A withdrawal collected outside personalization consent may no more change the profile
+    than the rating could — and under that consent the rating never counted either."""
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(name="rating_withdrawn", product_id="p:ipa", tier="analytics"),
+    ]
+    assert signals_from_events(events, "demo") == {"p:ipa": 1.0}
+
+
+def test_one_installs_withdrawal_cannot_clear_anothers_verdict():
+    events = [
+        _ev(product_id="p:ipa", rating=5.0),
+        _ev(name="rating_withdrawn", product_id="p:ipa", install="someone-else"),
+    ]
+    assert signals_from_events(events, "demo") == {"p:ipa": 1.0}

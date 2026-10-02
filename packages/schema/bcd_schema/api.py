@@ -129,6 +129,14 @@ class FeedbackRequest(BaseModel):
     aspects: dict[str, float] | None = None  # optional per-axis detail ("too sweet")
 
 
+class WithdrawRequest(BaseModel):
+    """Taking one verdict back. A POST with the id in the body rather than a DELETE with it
+    in the path: product ids carry a colon (`bcd:the-alchemist-crusher`), and a body needs no
+    escaping to survive the trip."""
+
+    product_id: str = Field(..., min_length=1, max_length=128)
+
+
 class FeedbackResponse(BaseModel):
     accepted: bool
     profile: TasteProfile  # echo the updated profile so the client can show the shift
