@@ -182,8 +182,10 @@ struct ReactionPicker: View {
 ///
 /// A sheet rather than a push because rating is an aside to the screen that opened it: you
 /// came to decide whether to drink the thing, and this is you reporting back on one you
-/// already did. It closes itself once a verdict is in, so the answer to "how was it?" takes
-/// exactly one tap.
+/// already did. The verdict lands on the first tap — nothing here is a draft waiting on
+/// Done — but the sheet stays open, so a face hit by mistake can be moved to another rung
+/// or taken off without coming back in. Done and a swipe close it; the one thing that
+/// closes it by itself is "Remove rating", which has nothing left to stay open for.
 struct RatingSheet: View {
     let productId: String
     let productName: String
@@ -224,10 +226,10 @@ struct RatingSheet: View {
 
     /// The way back out of a verdict.
     ///
-    /// Rating is one tap and the sheet closes itself on that tap, so rating the wrong drink is
-    /// easy and until this it was permanent: the picker could move a rating between rungs but
-    /// never take one off, and `rated_products` went on keeping that drink out of "For you"
-    /// forever on the strength of a slip.
+    /// Rating is a single tap on one of five close-cousin faces, so landing on the wrong
+    /// drink — or the wrong rung — is easy, and until this it was permanent: the picker
+    /// could move a rating between rungs but never take one off, and `rated_products` went
+    /// on keeping that drink out of "For you" forever on the strength of a slip.
     ///
     /// Underneath the faces and on the right, set at Done's size: the two ways out of this
     /// sheet are the same kind of thing and belong on the same edge, one above the other.
