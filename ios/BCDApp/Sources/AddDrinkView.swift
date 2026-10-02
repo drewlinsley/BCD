@@ -22,6 +22,12 @@ struct AddDrinkView: View {
     /// Hand the finished contribution back to the caller to persist and log. The view owns the
     /// fields and the dismissal; the caller owns where it goes.
     let onSubmit: (DrinkContribution) -> Void
+    /// Look for what is being typed in the catalog. Injected rather than taken from the
+    /// environment so this screen stays previewable and so the lookup can be stubbed.
+    let search: (String) async -> [ResolvedProduct]
+    /// They recognised one of the matches: it was in the catalog all along, and the right
+    /// outcome is to open it, not to describe it again.
+    let onPick: (ResolvedProduct) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -34,6 +40,10 @@ struct AddDrinkView: View {
     @State private var abv = ""
     @State private var note = ""
     @State private var didSubmit = false
+    /// What the catalog already has by this name. The reason the lookup is here at all: the
+    /// camera failing to read a label and the catalog not holding the drink look identical from
+    /// the HUD, and only one of them is worth typing out.
+    @State private var matches: [ResolvedProduct] = []
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case name, maker, abv, note }
@@ -60,6 +70,9 @@ struct AddDrinkView: View {
             }
         }
         .onAppear(perform: seed)
+        // Restarted on every keystroke, which is what makes the sleep below a debounce: a
+        // half-typed name cancels its own lookup before it reaches the network.
+        .task(id: trimmedName) { await lookUpName() }
     }
 
     // MARK: - the form
@@ -71,6 +84,9 @@ struct AddDrinkView: View {
                 if !sightings.isEmpty { sightingsStrip }
                 field(title: "Name", text: $name, focus: .name,
                       placeholder: "What's it called?")
+                // Directly under the name, before any other field is filled: the whole point is
+                // to be seen early, while there is still nothing to lose by stopping.
+                alreadyHere
                 categoryField
                 field(title: "Maker", text: $maker, focus: .maker,
                       placeholder: "Brewery or distillery (optional)")
@@ -182,6 +198,64 @@ struct AddDrinkView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// What the catalog already has by the name being typed.
+    ///
+    /// This is the half of the empty-state the glyph cannot tell you about: a drink missing from
+    /// the catalog and a drink whose label the camera could not read look exactly the same from
+    /// the HUD, and the second is far more common than the first. A stylized wordmark that OCR
+    /// garbles is already in here under a name a person can spell.
+    ///
+    /// It never blocks the add. One name is many drinks — "Crusher" is 182 beers in this
+    /// catalog — so a form that refused a taken name would refuse real contributions. It shows
+    /// the alternatives and makes picking one a single tap; choosing to add anyway is allowed and
+    /// is sometimes right.
+    @ViewBuilder private var alreadyHere: some View {
+        if !matches.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                fieldTitle("Already in the catalog?")
+                VStack(spacing: 0) {
+                    ForEach(Array(matches.enumerated()), id: \.element.id) { index, rp in
+                        // Dismiss here, not in the caller: this view owns its own dismissal
+                        // everywhere else, and the detail screen can only be presented once
+                        // this sheet is actually gone.
+                        Button { onPick(rp); dismiss() } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(DisplayName.label(rp.product.name, brand: rp.brand.name))
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Brand.text)
+                                        .lineLimit(1)
+                                    Text(DisplayName.producer(rp.producer.name))
+                                        .font(.caption)
+                                        .foregroundStyle(Brand.textMuted)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 8)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Brand.textMuted)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if index < matches.count - 1 {
+                            Divider().overlay(Brand.hairline).padding(.leading, 12)
+                        }
+                    }
+                }
+                .background(Brand.tile, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Brand.hairline, lineWidth: 0.5))
+                Text("Tap one to open it — or keep going if yours isn't here.")
+                    .font(.caption2)
+                    .foregroundStyle(Brand.textMuted)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .transition(.opacity)
+        }
+    }
+
     private var categoryField: some View {
         VStack(alignment: .leading, spacing: 8) {
             fieldTitle("What is it")
@@ -249,8 +323,9 @@ struct AddDrinkView: View {
 
     // MARK: - the thanks
 
-    /// A short, honest confirmation. We don't yet upload contributions, so this doesn't promise
-    /// the drink will appear — only that we have it. Dismisses itself, or the toolbar's Done.
+    /// A short, honest confirmation. It says we have it, and deliberately does not promise the
+    /// drink will appear: a contribution is uploaded as a *claim*, and whether it becomes a
+    /// catalog row is a curation decision made later. Dismisses itself, or the toolbar's Done.
     private var thanks: some View {
         VStack(spacing: 14) {
             ContributionCheck(size: 72)
@@ -318,6 +393,30 @@ struct AddDrinkView: View {
         if trimmedName.isEmpty { name = text }
         else if trimmedMaker.isEmpty { maker = text }
         else { name = text }
+    }
+
+    /// Ask the catalog about the name as it is typed.
+    ///
+    /// Three characters before anything is sent, because two letters match most of a 534,000-row
+    /// catalog and the answer would be noise. The sleep is the debounce: `.task(id:)` cancels and
+    /// restarts this on every keystroke, so only a pause in typing ever reaches the network.
+    ///
+    /// A failed lookup shows nothing. The server being unreachable is exactly when someone is
+    /// most likely to be standing in front of a shelf adding a drink, and "we could not check"
+    /// is not a reason to get in their way.
+    private func lookUpName() async {
+        let term = trimmedName
+        guard term.count >= 3 else {
+            matches = []
+            return
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        guard !Task.isCancelled else { return }
+        let found = await search(term)
+        guard !Task.isCancelled else { return }
+        // Four. Enough to recognise yours in, few enough not to push the rest of the form off
+        // the screen — and the list is ranked, so a fifth row rarely says anything new.
+        matches = Array(found.prefix(4))
     }
 
     private func submit() {
@@ -428,11 +527,14 @@ private struct FlowRow: Layout {
 }
 
 #if DEBUG
+// The lookup is stubbed empty: a preview has no server, and the "already in the catalog?" list
+// is exercised against the real 534,000 rows rather than against invented ones.
 #Preview("Add a drink — from a scan") {
-    AddDrinkView(sightings: ["Crusher", "The Alchemist"]) { _ in }
+    AddDrinkView(sightings: ["Crusher", "The Alchemist"],
+                 onSubmit: { _ in }, search: { _ in [] }, onPick: { _ in })
 }
 
 #Preview("Add a drink — cold") {
-    AddDrinkView(sightings: []) { _ in }
+    AddDrinkView(sightings: [], onSubmit: { _ in }, search: { _ in [] }, onPick: { _ in })
 }
 #endif

@@ -19,8 +19,10 @@ from typing import Annotated
 
 import httpx
 from bcd_ingest.merge import get_product
-from bcd_ingest.store import Store, open_store
+from bcd_ingest.store import BronzeDoc, Store, doc_id, open_store
 from bcd_schema import (
+    ContributionRequest,
+    ContributionResponse,
     FeedbackRequest,
     FeedbackResponse,
     LexiconResponse,
@@ -581,6 +583,53 @@ def rebuild(who: Caller) -> TasteProfile:
     user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     return rebuild_profile(_state["store"], collector.iter_events(TASTE_EVENTS), user_id)
+
+
+#: What a contribution's bronze documents are filed under. Its own source, beside `ttb-cola`
+#: and `off`, because that is exactly what it is: a source of claims about drinks, with its own
+#: reliability. Nothing downstream should ever confuse a typed name with a regulatory filing.
+CONTRIBUTION_SOURCE = "user_contribution"
+
+#: Most a single account may contribute while this process is up. A loop guard, not abuse
+#: control: it stops a client that retries forever from filling bronze, and it forgets
+#: everything on restart. Real abuse control has to be persistent and is not this.
+CONTRIBUTION_CAP = 200
+
+
+@app.post("/v1/contribute", response_model=ContributionResponse)
+def contribute(req: ContributionRequest, who: Caller) -> ContributionResponse:
+    """Record a drink the catalog could not place, as told by the person who saw the label.
+
+    It lands in **bronze**, not gold. A user-typed name is a claim about a drink, and bronze is
+    where claims live until someone promotes them — the same path OFF rows and TTB filings take.
+    Writing to gold here would let any anonymous account put a row into the thing the resolver
+    draws from, unreviewed, which is a different feature and a much more dangerous one.
+
+    Idempotent on the client's id: the bronze doc id is derived from it, so the phone can retry
+    a submission whose response it never saw and still leave one document. The answer says
+    whether it was new, because the phone's next move — stop keeping it — is the same either way.
+    """
+    store: Store = _state["store"]
+    submitted = _state.setdefault("contributions_by_account", {})
+    seen: set[str] = submitted.setdefault(who.id, set())
+    if len(seen) >= CONTRIBUTION_CAP and req.id not in seen:
+        raise HTTPException(status_code=429, detail="too many contributions")
+
+    # Keyed on the account too: two installs that happen to generate the same client id are two
+    # contributions, and one account cannot overwrite another's by guessing an id.
+    natural_key = f"{who.id}::{req.id}"
+    did = doc_id(CONTRIBUTION_SOURCE, natural_key)
+    duplicate = store.get_bronze(did) is not None
+
+    payload = req.model_dump(mode="json")
+    # Who said so, and when we were told. `created_at` in the payload is the phone's clock and
+    # is kept as given; `received_at` is ours, and is the one to trust when they disagree.
+    payload["account_id"] = who.id
+    payload["received_at"] = datetime.now(UTC).isoformat()
+    store.put_bronze(BronzeDoc(id=did, source_id=CONTRIBUTION_SOURCE, natural_key=natural_key,
+                               fetched_at=payload["received_at"], url=None, payload=payload))
+    seen.add(req.id)
+    return ContributionResponse(accepted=True, doc_id=did, duplicate=duplicate)
 
 
 @app.post("/v1/telemetry")

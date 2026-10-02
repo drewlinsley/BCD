@@ -82,6 +82,24 @@ def test_medallion_roundtrip(pg: PostgresStore):
     assert counts["bronze"] == 1 and counts["gold"] >= 3  # producer+brand+product
 
 
+def test_one_bronze_doc_by_id(pg: PostgresStore):
+    """The point lookup `POST /v1/contribute` uses to answer "have I already got this?". It has
+    to work on the real backend: a retry that cannot find the first upload writes a second row,
+    and the whole idempotency argument rests on this query."""
+    doc = BronzeDoc(id=doc_id("user_contribution", "acct:a::c-1"),
+                    source_id="user_contribution", natural_key="acct:a::c-1",
+                    fetched_at="", url=None,
+                    payload={"name": "The Alchemist Crusher", "sightings": ["CRUSHER"]})
+    assert pg.get_bronze(doc.id) is None, "nothing there before it is written"
+    pg.put_bronze(doc)
+    got = pg.get_bronze(doc.id)
+    assert got is not None
+    assert got.source_id == "user_contribution" and got.natural_key == "acct:a::c-1"
+    assert got.payload["sightings"] == ["CRUSHER"]
+    assert got.fetched_at and got.url is None
+    assert pg.get_bronze("user_contribution:nothing-like-it") is None
+
+
 def test_trigram_match_is_typo_tolerant(pg: PostgresStore):
     _seed_product(pg, "gh", "Galaxy Haze", {"tropical": 1.0})
     _seed_product(pg, "ms", "Midnight Roast Stout", {"roasted_coffee_choc": 1.0})

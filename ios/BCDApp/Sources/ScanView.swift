@@ -17,6 +17,9 @@ struct ScanView: View {
     @StateObject private var model = ScanViewModel()
     @State private var ask: String = ""
     @State private var selected: ScoredCandidate?
+    /// A drink the add-a-drink sheet turned out to already have — held until that sheet is gone,
+    /// then opened in its place.
+    @State private var picked: ResolvedProduct?
     #if DEBUG
     // The Simulator has no camera, so the scan loop never fires `isUnknownLabel` on its own. A
     // long-press on the viewfinder forces the empty-state on, to preview it without a shelf.
@@ -104,8 +107,16 @@ struct ScanView: View {
             // Hosted here, on an always-present subview, rather than on the glyph (which leaves
             // the tree the moment the camera moves off the unplaceable label) or alongside the
             // detail `.sheet(item:)` below (two sheets on one view fight over presentation).
-            .sheet(isPresented: $model.addingUnknown) {
-                AddDrinkView(sightings: model.sightings) { model.submitContribution($0) }
+            // `onDismiss` rather than setting `selected` from inside the sheet: a drink
+            // recognised in the match list has to replace this sheet with the detail, and two
+            // presentations overlapping is the one thing that reliably drops both.
+            .sheet(isPresented: $model.addingUnknown, onDismiss: openPickedMatch) {
+                AddDrinkView(sightings: model.sightings,
+                             onSubmit: { model.submitContribution($0) },
+                             search: { term in
+                                 (try? await env.api.searchProducts(term)) ?? []
+                             },
+                             onPick: { picked = $0 })
             }
         }
         .animation(.easeInOut(duration: 0.3), value: showsNotFound)
@@ -119,11 +130,26 @@ struct ScanView: View {
         // restart it on its own, so the HUD sat on a live-looking preview doing nothing
         // until the app was relaunched (2026-09-17).
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.resume() }
+            if phase == .active {
+                model.resume()
+                // Anything typed while the server was unreachable is still on disk. Coming back
+                // is the natural moment to try again, and a drain already running is a no-op.
+                Task { await env.contributionUploader.drain() }
+            }
         }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
         }
+    }
+
+    /// They recognised their drink in the "already in the catalog?" list, so the contribution
+    /// never happened and the detail screen opens instead — where they can rate it, which is what
+    /// they were trying to do. No personal score: nothing here was ranked for them, and a seal on
+    /// the detail screen would be inventing one.
+    private func openPickedMatch() {
+        guard let rp = picked else { return }
+        picked = nil
+        selected = ScoredCandidate(resolved: rp, matchScore: 1.0)
     }
 
     // A one-line status: on-device interpretation, an active filter, or the live scan state.
@@ -349,12 +375,14 @@ final class ScanViewModel: ObservableObject {
         Task { await env.telemetry.log("scan_add_unknown_tapped", tier: .analytics) }
     }
 
-    /// A contribution came back from the sheet. Keep it on device (the record of truth until a
-    /// contribute route exists to drain it), and log that one happened — its *shape* only, never
-    /// the free text the user typed, which telemetry doesn't carry by construction.
+    /// A contribution came back from the sheet. Write it to the log FIRST — that is the record
+    /// of truth and it must survive a failed upload — then try to send it, and log that one
+    /// happened: its *shape* only, never the free text the user typed, which telemetry doesn't
+    /// carry by construction.
     func submitContribution(_ contribution: DrinkContribution) {
         env?.contributions.add(contribution)
         guard let env else { return }
+        Task { await env.contributionUploader.drain() }
         Task {
             await env.telemetry.log("scan_add_unknown_submitted", tier: .analytics, [
                 "category": .string(contribution.category.rawValue),
