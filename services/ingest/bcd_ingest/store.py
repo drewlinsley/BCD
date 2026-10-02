@@ -134,6 +134,16 @@ class MedallionStore:
             )
             self._db.commit()
 
+    def get_bronze(self, bronze_id: str) -> BronzeDoc | None:
+        """One document by id. A point lookup, so a caller asking "have I already got this?"
+        does not have to walk a whole source to find out."""
+        with self._lock:
+            r = self._db.execute("SELECT * FROM bronze WHERE id=?", (bronze_id,)).fetchone()
+        if r is None:
+            return None
+        return BronzeDoc(r["id"], r["source_id"], r["natural_key"],
+                         r["fetched_at"], r["url"], json.loads(r["payload"]))
+
     def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]:
         with self._lock:
             rows = self._db.execute(
@@ -410,6 +420,7 @@ class Store(Protocol):
     db_path: str
 
     def put_bronze(self, doc: BronzeDoc) -> None: ...
+    def get_bronze(self, bronze_id: str) -> BronzeDoc | None: ...
     def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]: ...
     def put_silver(self, sid: str, source_id: str, entity_type: str,
                    bronze_id: str, record: dict[str, Any]) -> None: ...

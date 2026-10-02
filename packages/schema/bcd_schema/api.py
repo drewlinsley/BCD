@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .entities import ResolvedProduct
+from .entities import Category, ResolvedProduct
 from .profile import TasteProfile
 
 
@@ -132,6 +132,49 @@ class FeedbackRequest(BaseModel):
 class FeedbackResponse(BaseModel):
     accepted: bool
     profile: TasteProfile  # echo the updated profile so the client can show the shift
+
+
+class ContributionRequest(BaseModel):
+    """A drink a drinker told us about, because the catalog could not place its label.
+
+    This is the only route on which a user authors catalog data, so every field is bounded and
+    nothing here is a `Product`: a contribution is a claim *towards* a row, not a row. It lands
+    in bronze under its own source and is promoted by a curator, the same way a TTB filing is —
+    a typed name must never become something the resolver can draw before someone has looked
+    at it.
+
+    `id` is the client's own id for the contribution, and it is what makes this route safe to
+    retry: the bronze doc id is derived from it, so a phone that uploads, loses the response and
+    uploads again leaves one document rather than two. It is therefore required — the server
+    will not invent one, because an invented one would duplicate on every retry.
+
+    `sightings` is what the camera read off the label at the moment the user tapped add. It is
+    not shown back and not required; it is kept because it is the only record of what the phone
+    actually saw on the one label the catalog missed, and a reviewer should be able to check a
+    typed name against it.
+    """
+
+    id: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=120)
+    category: Category
+    maker: str | None = Field(default=None, max_length=120)
+    abv_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    note: str | None = Field(default=None, max_length=500)
+    sightings: list[str] = Field(default_factory=list, max_length=24)
+    created_at: str | None = None  # when the phone captured it; the server records its own too
+
+
+class ContributionResponse(BaseModel):
+    """`accepted` means it is recorded and the phone may stop keeping it.
+
+    `doc_id` is where it landed, so a submission can be found again without guessing, and
+    `duplicate` says this id had already been recorded — an honest answer to a retry, and not
+    an error, because the phone's job is done either way.
+    """
+
+    accepted: bool
+    doc_id: str
+    duplicate: bool = False
 
 
 class ScanVisionRequest(BaseModel):

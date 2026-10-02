@@ -2127,3 +2127,168 @@ private struct FakeGoogle: IdentityProvider {
         #expect(seen.allSatisfy { !($0.query ?? "").contains("user_id") })
     }
 }
+
+/// Records every contribution it is handed, and can be told to fail — so the one thing that
+/// matters here can be tested: a contribution leaves the log only when the server has it.
+private final class ContributeStubAPI: APIClientProtocol, @unchecked Sendable {
+    /// Ids in the order they were sent.
+    var sent: [String] = []
+    /// Thrown instead of acknowledging, keyed by contribution name; nil means accept.
+    var failures: [String: Error] = [:]
+    /// What `duplicate` comes back as, for the retry case.
+    var duplicate = false
+    /// Delay before answering, to overlap two drains.
+    var delay: Duration = .zero
+
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: 0)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+
+    func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck {
+        if delay != .zero { try? await Task.sleep(for: delay) }
+        if let failure = failures[contribution.name] { throw failure }
+        // No lock: every call arrives from inside `ContributionUploader`, which is an actor, so
+        // these are serialized already — and the overlapping-drain test is exactly the proof.
+        sent.append(contribution.id)
+        return ContributionAck(accepted: true, docId: "user_contribution:\(contribution.id)",
+                               duplicate: duplicate)
+    }
+}
+
+@Suite("ContributionUploader")
+struct ContributionUploaderTests {
+    private func fresh() -> ContributionLog {
+        let name = "bcd.tests.upload.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return ContributionLog(defaults: defaults)
+    }
+
+    @Test func sendsOldestFirstAndEmptiesTheLog() async {
+        // The log reads newest-first for display; the queue has to drain in the order the
+        // drinker actually saw the cans.
+        let log = fresh()
+        log.add(DrinkContribution(name: "first", category: .beer))
+        log.add(DrinkContribution(name: "second", category: .beer))
+        let api = ContributeStubAPI()
+        let ids = log.all().reversed().map(\.id)
+
+        let report = await ContributionUploader(log: log, api: api).drain()
+
+        #expect(api.sent == Array(ids))
+        #expect(report.uploaded == 2)
+        #expect(report.remaining == 0)
+        #expect(log.count == 0)
+    }
+
+    @Test func aContributionStaysOnDiskUntilTheServerHasIt() async {
+        // The whole reason the log exists. Upload then remove, never the other way round.
+        let log = fresh()
+        log.add(DrinkContribution(name: "Crusher", category: .beer, maker: "The Alchemist"))
+        let api = ContributeStubAPI()
+        api.failures["Crusher"] = APIError.http(503)
+
+        let report = await ContributionUploader(log: log, api: api).drain()
+
+        #expect(report.uploaded == 0)
+        #expect(report.remaining == 1)
+        #expect(log.all().first?.maker == "The Alchemist", "and intact, not a husk")
+    }
+
+    @Test func anUnreachableServerStopsTheDrainRatherThanWalkingTheQueue() async {
+        let log = fresh()
+        for n in ["a", "b", "c"] { log.add(DrinkContribution(name: n, category: .beer)) }
+        let api = ContributeStubAPI()
+        api.failures["a"] = URLError(.notConnectedToInternet)   // "a" is the oldest, so first
+
+        _ = await ContributionUploader(log: log, api: api).drain()
+
+        #expect(api.sent.isEmpty, "nothing behind a dead connection should have been tried")
+        #expect(log.count == 3)
+    }
+
+    @Test func aRouteThatIsNotThereYetKeepsEverything() async {
+        // The protocol's default `contribute` throws 501. A client that never implemented the
+        // route must not look like a server that accepted the data.
+        let log = fresh()
+        log.add(DrinkContribution(name: "Crusher", category: .beer))
+        let report = await ContributionUploader(log: log, api: StubAPI()).drain()
+        #expect(report.uploaded == 0)
+        #expect(report.refused == 0, "501 is not a refusal of the content")
+        #expect(log.count == 1)
+    }
+
+    @Test func aBodyTheServerWillNeverTakeIsSkippedButNotDeleted() async {
+        // A 422 would block the queue forever if the drain stopped on it, and deleting it would
+        // throw away something a person typed. So: counted, kept, and stepped over.
+        let log = fresh()
+        log.add(DrinkContribution(name: "bad", category: .beer))
+        log.add(DrinkContribution(name: "good", category: .beer))
+        let api = ContributeStubAPI()
+        api.failures["bad"] = APIError.http(422)
+
+        let report = await ContributionUploader(log: log, api: api).drain()
+
+        #expect(report.uploaded == 1)
+        #expect(report.refused == 1)
+        #expect(log.all().map(\.name) == ["bad"], "the good one went, the bad one stayed")
+    }
+
+    @Test func aRetryTheServerAlreadyHadIsStillDone() async {
+        // `duplicate: true` is the answer to an upload whose response was lost. The phone's job
+        // is finished either way, so the entry must clear — otherwise it is sent forever.
+        let log = fresh()
+        log.add(DrinkContribution(name: "Crusher", category: .beer))
+        let api = ContributeStubAPI()
+        api.duplicate = true
+
+        let report = await ContributionUploader(log: log, api: api).drain()
+
+        #expect(report.uploaded == 1)
+        #expect(log.count == 0)
+    }
+
+    @Test func twoDrainsAtOnceDoNotSendTheSameThingTwice() async {
+        // Submit kicks a drain and so does coming back from the background; on a slow connection
+        // those overlap, and a contribution sent twice is a duplicate row to clean up later.
+        let log = fresh()
+        log.add(DrinkContribution(name: "Crusher", category: .beer))
+        let api = ContributeStubAPI()
+        api.delay = .milliseconds(120)
+        let uploader = ContributionUploader(log: log, api: api)
+
+        async let one = uploader.drain()
+        async let two = uploader.drain()
+        let reports = await [one, two]
+
+        #expect(api.sent.count == 1)
+        #expect(reports.map(\.uploaded).reduce(0, +) == 1)
+    }
+
+    @Test func theWireSpeaksTheServersFieldNames() throws {
+        // The server reads snake_case and a string timestamp. The model on disk is camelCase and
+        // a `Date`, and must stay that way — so this is the seam that has to be right.
+        let c = DrinkContribution(id: "c-1", name: "The Alchemist Crusher", category: .beer,
+                                  maker: "The Alchemist", abvPct: 8.0, note: "hazy",
+                                  sightings: ["CRUSHER"],
+                                  createdAt: Date(timeIntervalSince1970: 1_790_000_000))
+        let data = try JSONEncoder().encode(ContributionWire(c))
+        let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(json["abv_pct"] as? Double == 8.0)
+        #expect(json["category"] as? String == "beer")
+        #expect(json["id"] as? String == "c-1")
+        #expect(json["sightings"] as? [String] == ["CRUSHER"])
+        let stamp = try #require(json["created_at"] as? String)
+        #expect(ISO8601DateFormatter().date(from: stamp)?.timeIntervalSince1970 == 1_790_000_000)
+        #expect(json["abvPct"] == nil && json["createdAt"] == nil)
+    }
+
+    @Test func theAckReadsTheServersJSON() throws {
+        let json = #"{"accepted": true, "doc_id": "user_contribution:9f2a", "duplicate": false}"#
+        let ack = try JSONDecoder().decode(ContributionAck.self, from: Data(json.utf8))
+        #expect(ack.accepted && ack.docId == "user_contribution:9f2a" && !ack.duplicate)
+    }
+}

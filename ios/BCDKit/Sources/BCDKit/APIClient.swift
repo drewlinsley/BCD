@@ -20,6 +20,9 @@ public protocol APIClientProtocol: Sendable {
     /// Suggestions shelf by shelf. `crossStyle` ranks the shelves they have never rated on by
     /// the taste they built elsewhere; off, those shelves come back unranked and say so.
     func familyPicks(limit: Int, crossStyle: Bool) async throws -> FamilyResponse
+    /// A drink the catalog could not place, as the drinker described it. The one call that sends
+    /// authored data rather than asking for data.
+    func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck
 }
 
 extension APIClientProtocol {
@@ -47,6 +50,12 @@ extension APIClientProtocol {
 
     /// No vocabulary is a fine answer: the recognizer falls back to its own dictionary.
     public func fetchLexicon() async throws -> [String] { [] }
+
+    /// Reports the route as unimplemented rather than acknowledging something it never sent —
+    /// an ack here would tell `ContributionUploader` to delete what the drinker typed.
+    public func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck {
+        throw APIError.http(501)
+    }
 
     /// Nothing to compare against is a fine answer too, and the same one the server gives for
     /// the 95% of rows carrying their style's average: show no section rather than an error.
@@ -170,6 +179,13 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
             "/v1/recommend", body: EmptyBody(),
             query: [URLQueryItem(name: "limit", value: String(limit))])
         return resp.results
+    }
+
+    /// A drink nothing could place. It lands in bronze as a *claim* about a drink, not as a
+    /// catalog row — so this call never makes something the scanner can draw, and the ack says
+    /// only that the claim is recorded.
+    public func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck {
+        try await post("/v1/contribute", body: ContributionWire(contribution))
     }
 
     public func similar(to productId: String, limit: Int = 6) async throws -> SimilarResponse {

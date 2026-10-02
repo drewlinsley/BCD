@@ -4,6 +4,8 @@ Import from here; submodule layout may change but this surface is stable.
 """
 
 from .api import (
+    ContributionRequest,
+    ContributionResponse,
     DetectedObject,
     DetectedText,
     FeedbackRequest,
@@ -70,6 +72,8 @@ __all__ = [
     "LexiconResponse",
     "ObjectResolution",
     "ObjectStatus",
+    "ContributionRequest",
+    "ContributionResponse",
     "FeedbackRequest",
     "FeedbackResponse",
     "ExtractionMethod",

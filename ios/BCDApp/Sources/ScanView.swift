@@ -119,7 +119,12 @@ struct ScanView: View {
         // restart it on its own, so the HUD sat on a live-looking preview doing nothing
         // until the app was relaunched (2026-09-17).
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.resume() }
+            if phase == .active {
+                model.resume()
+                // Anything typed while the server was unreachable is still on disk. Coming back
+                // is the natural moment to try again, and a drain already running is a no-op.
+                Task { await env.contributionUploader.drain() }
+            }
         }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand)
@@ -349,12 +354,14 @@ final class ScanViewModel: ObservableObject {
         Task { await env.telemetry.log("scan_add_unknown_tapped", tier: .analytics) }
     }
 
-    /// A contribution came back from the sheet. Keep it on device (the record of truth until a
-    /// contribute route exists to drain it), and log that one happened — its *shape* only, never
-    /// the free text the user typed, which telemetry doesn't carry by construction.
+    /// A contribution came back from the sheet. Write it to the log FIRST — that is the record
+    /// of truth and it must survive a failed upload — then try to send it, and log that one
+    /// happened: its *shape* only, never the free text the user typed, which telemetry doesn't
+    /// carry by construction.
     func submitContribution(_ contribution: DrinkContribution) {
         env?.contributions.add(contribution)
         guard let env else { return }
+        Task { await env.contributionUploader.drain() }
         Task {
             await env.telemetry.log("scan_add_unknown_submitted", tier: .analytics, [
                 "category": .string(contribution.category.rawValue),

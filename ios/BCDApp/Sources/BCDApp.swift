@@ -36,8 +36,11 @@ final class AppEnvironment: ObservableObject {
     /// rather than on a placeholder.
     let recents: RecentSearches
     /// Drinks the user added from the scan HUD when nothing could place a label — their own
-    /// authored data, kept on device until a contribute route exists to drain it.
+    /// authored data, kept on device until the server confirms it has them.
     let contributions: ContributionLog
+    /// Sends those to the server and clears them from the log once it has. Built here rather
+    /// than inside the log so the log stays pure storage and the upload can be stubbed.
+    let contributionUploader: ContributionUploader
     /// Pseudonymous per-install id. Still the id telemetry is filed under -- it is what the
     /// event spec declares -- but no longer what the server keys a PROFILE on: that is the
     /// account behind `auth`, which the server mints and the app proves with a token.
@@ -75,6 +78,7 @@ final class AppEnvironment: ObservableObject {
         self.seen = seen
         self.recents = recents
         self.contributions = contributions
+        self.contributionUploader = ContributionUploader(log: contributions, api: api)
         self.installId = installId
         self.auth = auth
     }

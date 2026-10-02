@@ -249,8 +249,9 @@ struct AddDrinkView: View {
 
     // MARK: - the thanks
 
-    /// A short, honest confirmation. We don't yet upload contributions, so this doesn't promise
-    /// the drink will appear — only that we have it. Dismisses itself, or the toolbar's Done.
+    /// A short, honest confirmation. It says we have it, and deliberately does not promise the
+    /// drink will appear: a contribution is uploaded as a *claim*, and whether it becomes a
+    /// catalog row is a curation decision made later. Dismisses itself, or the toolbar's Done.
     private var thanks: some View {
         VStack(spacing: 14) {
             ContributionCheck(size: 72)

@@ -313,6 +313,18 @@ class PostgresStore:
                  Jsonb(_no_nuls(doc.payload))),
             )
 
+    def get_bronze(self, bronze_id: str) -> BronzeDoc | None:
+        with self._lock, self._conn.cursor() as cur:
+            r = cur.execute(
+                "SELECT id, source_id, natural_key, fetched_at, url, payload "
+                "FROM bronze WHERE id=%s",
+                (bronze_id,),
+            ).fetchone()
+        if r is None:
+            return None
+        fetched = r[3].isoformat() if isinstance(r[3], datetime) else str(r[3])
+        return BronzeDoc(r[0], r[1], r[2], fetched, r[4], r[5])
+
     def iter_bronze(self, source_id: str) -> Iterator[BronzeDoc]:
         with self._lock, self._conn.cursor() as cur:
             rows = cur.execute(
