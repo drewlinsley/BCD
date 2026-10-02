@@ -14,6 +14,9 @@ import BCDKit
 
 struct SearchView: View {
     @EnvironmentObject var env: AppEnvironment
+    /// Observed, not read through `env`: these rows outlive the sheet that changes a
+    /// verdict, and a row that cannot hear the log goes stale behind it.
+    @EnvironmentObject var reactions: ReactionLog
     @State private var query = ""
     @State private var results: [ResolvedProduct] = []
     @State private var searching = false
@@ -103,7 +106,7 @@ struct SearchView: View {
                     }
                     Spacer(minLength: 8)
                     // Recall: your own verdict, at the 24pt list size (the heavier stroke).
-                    ReactionBadge(reaction: env.reactions.reaction(for: rp.product.id))
+                    ReactionBadge(reaction: reactions.reaction(for: rp.product.id))
                 }
                 .contentShape(Rectangle())
             }
