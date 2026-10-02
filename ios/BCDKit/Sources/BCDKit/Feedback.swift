@@ -13,11 +13,20 @@ public enum Reaction: Int, CaseIterable, Codable, Sendable, Identifiable {
 
     public var id: Int { rawValue }
 
+    /// What the rung is called on screen, which is not what the case is called.
+    ///
+    /// Shorter than the case names, because these sit in a row of five under the glyphs and
+    /// "Poured it out" was the one label that wrapped to two lines, making that column taller
+    /// and the whole row ragged. The cases keep their longer spellings: the `rawValue` is the
+    /// stored and wire identity, so a label is free to be re-worded and a rung is not.
+    ///
+    /// Rung 3 is "OK" rather than "Fine" — both are the pivot, and neither may read as a mild
+    /// negative, but "Fine" is the English for faint disappointment as often as for contentment.
     public var label: String {
         switch self {
-        case .spatItOut: "Spat it out"
-        case .pouredItOut: "Poured it out"
-        case .fine: "Fine"
+        case .spatItOut: "Spat out"
+        case .pouredItOut: "Poured out"
+        case .fine: "OK"
         case .pinkieOut: "Pinkie out"
         case .chuggedIt: "Chugged it"
         }
