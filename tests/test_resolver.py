@@ -2320,3 +2320,87 @@ def test_a_name_word_with_its_first_letters_lost_is_still_read():
     assert _unread(["toppling"], {"pling"}) == []
     assert _unread(["goslings", "gold", "seal"], {"goslings", "black", "seal"}) == ["gold"]
     assert _unread(["taft", "paint", "town", "hoppy"], {"town", "hoppy"}) == ["taft", "paint"]
+
+
+# ---- a style is the second fact a one-word label needs ----
+
+def _styled(name, pid, producer_id, style, category=Category.BEER):
+    return Product(id=pid, brand_id="b", producer_id=producer_id, category=category,
+                   name=name, style=Sourced[str](value=style, provenance=_PROV)
+                   ).model_dump(mode="json")
+
+
+def test_a_one_word_label_is_certified_by_the_style_it_prints():
+    """The reported miss: a can of The Alchemist's `Crusher` resolved to nothing, ever.
+
+    The house name is nowhere on that label -- unlike every other Alchemist can, which is what
+    the drinker noticed -- so the only identifying word the camera can read is CRUSHER, and one
+    word may not certify a frame (`test_a_one_word_reading_cannot_account_for_an_object`). The
+    row was never the problem: it is retrieved, and it is the store's TOP match at 1.000.
+
+    But the can prints its style, and a style is a second fact the name did not supply. 85
+    frames of that can were logged on 2026-10-01 and not one of them drew it.
+    """
+    crusher = _styled("The Alchemist Crusher", "p:cr", "pr:al", "Double IPA")
+    gold = {"pr:al": _producer("pr:al", "The Alchemist")}
+    reading = "Crusher\nAMERICAN DOUBLE INDIA PALE ALE"
+    verdict = Resolver(_FrameStore({reading: [(crusher, 1.0)]}, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status == "resolved", (
+        f"{verdict.status}: {[c.resolved.product.name for c in verdict.candidates]}")
+    assert verdict.candidates[0].resolved.product.name == "The Alchemist Crusher"
+
+
+def test_the_style_has_to_agree_not_merely_be_printed():
+    """A style is only a second fact when it is the row's own. A label that prints a kind the
+    row is not filed as has said nothing in the row's favour, and the one-word bar stands."""
+    stout = _styled("Bone Crusher Stout", "p:bs", "pr:ar", "Oatmeal Stout")
+    gold = {"pr:ar": _producer("pr:ar", "Arcadia")}
+    reading = "Crusher\nAMERICAN DOUBLE INDIA PALE ALE"
+    verdict = Resolver(_FrameStore({reading: [(stout, 1.0)]}, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status != "resolved", (
+        f"an IPA label certified {verdict.candidates[0].resolved.product.name!r}")
+
+
+def test_a_row_with_no_style_cannot_borrow_the_labels():
+    """Silence is not agreement. A row the catalog never filed a style for has no second fact
+    to offer, and most of the catalog is in exactly that position."""
+    plain = _prod_of("Da Crusher", "p:da", "pr:x")        # no style at all
+    gold = {"pr:x": _producer("pr:x", "Pivo")}
+    reading = "Crusher\nAMERICAN DOUBLE INDIA PALE ALE"
+    verdict = Resolver(_FrameStore({reading: [(plain, 1.0)]}, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status != "resolved", (
+        f"a styleless row certified off one word: {verdict.candidates[0].resolved.product.name!r}")
+
+
+def test_the_coincidence_the_one_word_bar_was_built_against_still_fails():
+    """`Front Flips` off "DRINK FROM THE CAN!" is the measurement that set the bar, and this
+    must not lift it: that line prints no style, so there is no second fact to be had."""
+    flips = _styled("Front Flips", "p:ff", "pr:ml", "New England IPA")
+    gold = {"pr:ml": _producer("pr:ml", "Mast Landing Brewing Company")}
+    reading = "THE CAN! DRINK FRONT"
+    verdict = Resolver(_FrameStore({reading: [(flips, 0.545)]}, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status != "resolved", (
+        f"one word FRONT certified {verdict.candidates[0].resolved.product.name!r}")
+
+
+def test_the_style_picks_between_rows_the_registry_filed_several_times():
+    """What the change is really for, found in the replay rather than reasoned about.
+
+    The catalog holds six Figueroa Mountain `Hoppy Poppy` rows -- the TTB registry files a
+    brand once per label -- and a can reading HOPPY / IPA matches all of them equally. Exactly
+    one is filed as an IPA. That is the row the can is describing.
+    """
+    ipa = _styled("Figueroa Mountain Brewing Company Hoppy Poppy IPA", "p:ipa", "pr:fm", "IPA")
+    ale = _styled("Figueroa Mountain Brewing Company Hoppy Poppy", "p:ale", "pr:fm", "Ale")
+    gold = {"pr:fm": _producer("pr:fm", "Figueroa Mountain Brewing Company")}
+    reading = "HOPPY\nIPA"
+    verdict = Resolver(_FrameStore({reading: [(ale, 1.0), (ipa, 1.0)]}, gold)).resolve_object(
+        DetectedObject(id="o1", texts=[reading]))
+    assert verdict.status == "resolved", (
+        f"{verdict.status}: {[c.resolved.product.name for c in verdict.candidates]}")
+    assert verdict.candidates[0].resolved.product.id == "p:ipa", (
+        f"picked {verdict.candidates[0].resolved.product.name!r}")

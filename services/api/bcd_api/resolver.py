@@ -31,6 +31,7 @@ from bcd_schema import (
     SensoryVector,
     TasteProfile,
 )
+from bcd_schema.family import Family, family_of
 
 # A text detection resolves to a product only if its name-match clears this floor. Tuned
 # against the real catalog: real beers (Heineken 1.0, Krombacher 0.69, a "GUINNESS DRAUGHT
@@ -569,6 +570,53 @@ def _category_hint(detections) -> str | None:
     if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
         return None
     return ranked[0][0]
+
+
+def _line_family(text: str, hint: str | None) -> Family | None:
+    """The drink family named on ONE line of the label.
+
+    A can prints its style in full -- `AMERICAN DOUBLE INDIA PALE ALE` -- while the catalog
+    writes it short, `Double IPA`. `family_of` is what makes those the same answer, so the
+    comparison is between families and never between spellings.
+
+    Per line, deliberately, and this was measured: judged across the whole FRAME it cost nine
+    frames their Heady Topper and twenty-two their Colonel Taylor. A frame is often a shelf,
+    and a shelf holds several cans -- the category can be taken frame-wide because every beer
+    on it shares one, but the family belongs to a single can. The line that names the product
+    is the line whose style is that product's, and on a real can it is usually the same line:
+    the recognizer hands back `Crusher\nAMERICAN DOUBLE INDIA PALE ALE` as one detection.
+
+    The label's category constrains the reading, which is the guard that keeps a cask out of
+    it: `AGED IN BOURBON BARRELS` on a beer can names a spirits family, and `family_of`
+    refuses it once it knows the frame is beer.
+    """
+    return family_of(text, hint)
+
+
+def _own_family(resolved: ResolvedProduct) -> Family | None:
+    """The family of the row's filed style, read in its own category."""
+    p = resolved.product
+    style = p.style.value if p.style else None
+    if not style:
+        return None
+    return family_of(style, p.category.value if p.category else None)
+
+
+# A style read off a label PREFERS a candidate and never rejects one, and that asymmetry was
+# measured rather than assumed. Rejecting on disagreement cost 16 frames their Colonel Taylor,
+# 4 their Miller High Life and 2 their Focal Banger, for three different reasons that all say
+# the same thing about this evidence:
+#
+#   `FOCALBBR\nEDIA\nPALE ALE`        -- OCR ate the IN of INDIA, so the line says Pale Ale and
+#                                       the rejection threw away the IPA that was really there.
+#   `Miller.\nHIGH LIFE...HOPF\nIPA`  -- one line merged from two cans, so the NEIGHBOUR's
+#                                       style evicted the can that was named.
+#   `COLONEL E.H.\nTAYLOR\nSTRAIGHT RYE` -- the row is the brand's, filed under one of the
+#                                       line's several bottles; the label is not wrong, the
+#                                       catalog is just coarser than the shelf.
+#
+# Garbled, merged, or coarser than the row: a style word is strong enough to order two
+# candidates and nowhere near strong enough to discard one.
 
 
 def _candidate_vocabulary(resolved: ResolvedProduct) -> list[str]:
@@ -1165,6 +1213,21 @@ def _pick_among(items: list[dict], line_tokens: list[list[str]], maker_name: str
     return rec, best, at
 
 
+def _style_seconds_the_name(c: ScoredCandidate, reading: str) -> bool:
+    """Whether the reading prints a style that is the row's own — a second fact for a label
+    whose name is a single word.
+
+    Only ever consulted where one identifying word has already matched: this says the can
+    agrees about what KIND of drink it is, which no amount of name similarity can supply.
+    """
+    own = _own_family(c.resolved)
+    if own is None:
+        return False
+    p = c.resolved.product
+    said = _line_family(reading, p.category.value if p.category else None)
+    return said is not None and said is own
+
+
 def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     """`_accounts_for_sighting`, for a reading that is the camera's rather than a model's.
 
@@ -1185,7 +1248,18 @@ def _accounts_for_object(c: ScoredCandidate, reading: str) -> bool:
     # word for free: "DRINK FROM THE CAN!" misread as DRINK FRONT is, once the chrome is gone,
     # the single word FRONT, and `Front Flips` accounted for it in full. A single word is not a
     # label here any more than it is in `_is_whole_label` -- it may match, it may not certify.
-    if len(set(read)) < _MIN_SELF_PROOF_TOKENS:
+    #
+    # Unless the one word it prints is not the only thing it says. A can whose whole identity
+    # is one word -- The Alchemist's `Crusher`, where the house name appears nowhere on the
+    # label -- still prints its style, and a style is a second fact about the drink that the
+    # name did not supply. That is already what this frame calls corroboration: "the label
+    # naming both its maker and its drink, OR naming one and printing a category that matches
+    # it" (`ScanResolveResponse.corroborated`). The style has to AGREE, not merely be present,
+    # and families are compared rather than spellings, so the can's `AMERICAN DOUBLE INDIA
+    # PALE ALE` and the catalog's `Double IPA` are one answer (`_line_family`). The coincidence
+    # this gate was built against does not survive it: FRONT off "DRINK FROM THE CAN" is one
+    # word on a line that prints no style at all.
+    if len(set(read)) < _MIN_SELF_PROOF_TOKENS and not _style_seconds_the_name(c, reading):
         return False
     if not any(t in in_name for t in read):
         return False
@@ -1666,6 +1740,8 @@ class Resolver:
         identity_lines = sum(1 for d in detections if _is_identity_text(d.text))
         hint = _category_hint(detections)
         frame_kinds = {k for d in detections for k in _kinds(d.text)}
+        # One per line: the style on the line that named the product is that product's.
+        line_family = [_line_family(d.text, hint) for d in detections]
 
         # ---- pass 1: every candidate any line supports, not just that line's best ----
         # Keeping only the top hit per line is what let chrome crowd out the beer: the real
@@ -1883,6 +1959,7 @@ class Resolver:
         by_house: set[str] = set()                        # one-word labels their house proved
         for line_i, sc, rec in best_hit.values():
             resolved = self._hydrate(rec)
+            said_family = line_family[line_i] if 0 <= line_i < len(line_family) else None
             if (resolved is None or _is_business_name(resolved)
                     or _kind_contradicts(resolved, frame_kinds)):
                 continue
@@ -1926,6 +2003,12 @@ class Resolver:
                 (*self.score(resolved.product, profile),) if include_score
                 else (None, None, False)
             )
+            # The style the can prints, agreeing with the style the row is filed under, is a
+            # point for RANKING and nothing more -- exactly what the category word is, and for
+            # the same reason: `support` orders candidates while `named` is what certifies a
+            # frame, so this can separate two Crushers without ever proving one on its own.
+            if said_family is not None and _own_family(resolved) is said_family:
+                support += 1
             scored.append((
                 support,
                 ScoredCandidate(

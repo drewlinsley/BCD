@@ -183,7 +183,14 @@ _claim(Family.AMARO, "amaro", "bitters", "aperitif", "vermouth", "quinquina", "f
 
 _claim(Family.IPA, "ipa", "new england ipa", "double ipa", "west coast ipa", "session ipa",
        "black ipa", "imperial ipa", "triple ipa", "hazy double ipa", "wheat ipa",
-       "american ipa", "brut ipa", "milkshake ipa", "cold ipa", "rye ipa", "belgian ipa")
+       "american ipa", "brut ipa", "milkshake ipa", "cold ipa", "rye ipa", "belgian ipa",
+       # Spelled out, which is how a CAN says it -- the catalog writes "Double IPA", the label
+       # prints "AMERICAN DOUBLE INDIA PALE ALE". Unclaimed, the rightmost match in that line was
+       # "pale ale", so every longhand IPA on a label read as a Pale Ale. It barely shows in the
+       # catalog (one row) and it is the normal case in front of a camera.
+       "india pale ale", "american india pale ale", "double india pale ale",
+       "american double india pale ale", "imperial india pale ale", "session india pale ale",
+       "new england india pale ale", "black india pale ale", "belgian india pale ale")
 _claim(Family.PALE_ALE, "pale ale", "amber ale", "esb", "brown ale", "american pale ale",
        "single-hop pale ale", "blonde ale", "cream ale", "red ale", "irish red ale",
        "scottish ale", "barleywine", "winter warmer", "old ale", "strong ale", "altbier",

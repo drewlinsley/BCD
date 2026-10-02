@@ -228,3 +228,34 @@ def test_shelf_styles_drops_a_spelling_two_aisles_both_claim():
     from bcd_schema.family import shelf_styles
     found = shelf_styles([("beer", "Scotch ale"), ("spirit", "Scotch ale")])
     assert found == {}
+
+
+# ---- the label spells it out ---------------------------------------------------------------
+
+@pytest.mark.parametrize("style", [
+    "India Pale Ale",
+    "American India Pale Ale",
+    "Double India Pale Ale",
+    "AMERICAN DOUBLE INDIA PALE ALE",     # read verbatim off a can of Crusher
+    "Imperial India Pale Ale",
+    "Session India Pale Ale",
+    "New England India Pale Ale",
+])
+def test_a_longhand_ipa_is_an_ipa_not_a_pale_ale(style):
+    """A catalog writes `Double IPA`; a CAN prints `AMERICAN DOUBLE INDIA PALE ALE`. Until these
+    were claimed the rightmost match in that line was `pale ale`, so every spelled-out IPA on a
+    label came back a Pale Ale -- wrong shelf, and wrong answer for anything comparing what a
+    label says against what the catalog holds."""
+    assert family_of(style) is Family.IPA
+
+
+@pytest.mark.parametrize("style,family", [
+    ("Pale Ale", Family.PALE_ALE),
+    ("American Pale Ale", Family.PALE_ALE),
+    ("English Pale Ale", Family.PALE_ALE),
+    ("India Pale Lager", Family.LAGER),      # the head noun is still the lager
+])
+def test_claiming_the_longhand_did_not_swallow_the_pale_ales(style, family):
+    """The new claims end where `pale ale` ends and are longer, so they win there -- which is
+    exactly what must NOT happen to a plain pale ale."""
+    assert family_of(style) is family
