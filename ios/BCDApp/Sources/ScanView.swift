@@ -101,6 +101,12 @@ struct ScanView: View {
                 chatBar
             }
             .padding()
+            // Hosted here, on an always-present subview, rather than on the glyph (which leaves
+            // the tree the moment the camera moves off the unplaceable label) or alongside the
+            // detail `.sheet(item:)` below (two sheets on one view fight over presentation).
+            .sheet(isPresented: $model.addingUnknown) {
+                AddDrinkView(sightings: model.sightings) { model.submitContribution($0) }
+            }
         }
         .animation(.easeInOut(duration: 0.3), value: showsNotFound)
         #if DEBUG
@@ -250,6 +256,13 @@ final class ScanViewModel: ObservableObject {
     @Published var isServerUnreachable = false
     /// Readable label, nothing placed: the HUD offers to add it. Mirrored from the coordinator.
     @Published var isUnknownLabel = false
+    /// What the camera last read off a label, whether or not the catalog had it. Mirrored from
+    /// the coordinator so the add-a-drink sheet can seed itself from what the phone saw.
+    @Published var sightings: [String] = []
+    /// The add-a-drink sheet is up. Driven here rather than with view `@State` so the glyph's
+    /// tap (which goes through the model) can raise it, and so it survives the glyph itself
+    /// disappearing when the camera moves off the unplaceable label.
+    @Published var addingUnknown = false
     /// The active natural-language filter (nil = none), mirrored for the status pill.
     @Published var filterText: String?
     /// The engine the coordinator consumes. Exposed so the camera layer can present *this*
@@ -282,6 +295,7 @@ final class ScanViewModel: ObservableObject {
         coord.$isLookingAtTheLabel.assign(to: &$isLookingAtTheLabel)
         coord.$isServerUnreachable.assign(to: &$isServerUnreachable)
         coord.$isUnknownLabel.assign(to: &$isUnknownLabel)
+        coord.$lastSightings.assign(to: &$sightings)
         coord.$filterText.assign(to: &$filterText)
         // The catalog's vocabulary, for an engine whose recognizer takes custom words: told
         // about "Alchemist" it stops correcting it into "Chemist". Best effort; no words is
@@ -326,12 +340,29 @@ final class ScanViewModel: ObservableObject {
     func applyFilter(_ ask: String) async { await coordinator?.setFilter(ask) }
     func clearFilter() async { await coordinator?.clearFilter() }
 
-    /// The user took the HUD up on adding the drink it couldn't place. The capture screen this
-    /// opens isn't built yet; this is its one entry point, and for now it leaves a breadcrumb so
-    /// we can see how often the catalog's gaps get hit from the camera.
+    /// The user took the HUD up on adding the drink it couldn't place. Opens the capture sheet
+    /// (`AddDrinkView`) and leaves a breadcrumb, so we can still see how often the catalog's gaps
+    /// get hit from the camera — the tap is the signal whether or not a contribution follows.
     func beginAddUnknown() {
+        addingUnknown = true
         guard let env else { return }
         Task { await env.telemetry.log("scan_add_unknown_tapped", tier: .analytics) }
+    }
+
+    /// A contribution came back from the sheet. Keep it on device (the record of truth until a
+    /// contribute route exists to drain it), and log that one happened — its *shape* only, never
+    /// the free text the user typed, which telemetry doesn't carry by construction.
+    func submitContribution(_ contribution: DrinkContribution) {
+        env?.contributions.add(contribution)
+        guard let env else { return }
+        Task {
+            await env.telemetry.log("scan_add_unknown_submitted", tier: .analytics, [
+                "category": .string(contribution.category.rawValue),
+                "had_sightings": .bool(!contribution.sightings.isEmpty),
+                "has_maker": .bool(contribution.maker != nil),
+                "has_abv": .bool(contribution.abvPct != nil),
+            ])
+        }
     }
 }
 

@@ -4,7 +4,7 @@ import Foundation
 // the FastAPI service emits (snake_case via CodingKeys). A future codegen step can emit
 // this file from the pydantic models, same as telemetry events.
 
-public enum Category: String, Codable, Sendable {
+public enum Category: String, Codable, Sendable, CaseIterable {
     case beer, cider, wine, spirit, rtd, mead, sake, other
 }
 

@@ -418,6 +418,69 @@ struct SeenLogTests {
     }
 }
 
+@Suite("ContributionLog")
+struct ContributionLogTests {
+    /// Its own defaults suite per test, like SeenLog's, so nothing leaks between runs or onto
+    /// the simulator's real store.
+    private func fresh(limit: Int = 500) -> (ContributionLog, UserDefaults, String) {
+        let name = "bcd.tests.contrib.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return (ContributionLog(defaults: defaults, limit: limit), defaults, name)
+    }
+
+    private func stub(_ name: String, category: BCDKit.Category = .beer) -> DrinkContribution {
+        DrinkContribution(name: name, category: category)
+    }
+
+    @Test func newestContributedComesFirst() {
+        let (log, _, _) = fresh()
+        log.add(stub("Crusher"))
+        log.add(stub("Focal Banger"))
+        #expect(log.all().map(\.name) == ["Focal Banger", "Crusher"])
+    }
+
+    @Test func sameNameTwiceIsKeptTwice() {
+        // Unlike SeenLog, this is authored data, not a worklist: the catalog's deduper decides
+        // whether two "Crusher"s are the same drink, with the whole catalog to check against.
+        // The phone keeps both.
+        let (log, _, _) = fresh()
+        log.add(stub("Crusher"))
+        log.add(stub("Crusher"))
+        #expect(log.count == 2)
+    }
+
+    @Test func removingDropsOnlyThatEntry() {
+        let (log, _, _) = fresh()
+        let keep = stub("Heady Topper")
+        log.add(stub("Crusher"))
+        log.add(keep)
+        log.remove(log.all().first { $0.name == "Crusher" }!.id)
+        #expect(log.all().map(\.name) == ["Heady Topper"])
+    }
+
+    @Test func survivesANewInstanceOnTheSameStore() {
+        // The record-of-truth claim: a contribution typed and then the app relaunched (a new
+        // log over the same defaults) is still there, with its fields intact.
+        let (log, defaults, _) = fresh()
+        log.add(DrinkContribution(name: "Sip of Sunshine", category: .beer,
+                                  maker: "Lawson's", abvPct: 8.0, note: "DIPA",
+                                  sightings: ["SIP OF SUNSHINE", "LAWSON'S"]))
+        let reopened = ContributionLog(defaults: defaults)
+        let got = reopened.all()
+        #expect(got.count == 1)
+        #expect(got.first?.maker == "Lawson's")
+        #expect(got.first?.abvPct == 8.0)
+        #expect(got.first?.sightings == ["SIP OF SUNSHINE", "LAWSON'S"])
+    }
+
+    @Test func oldestFallsOffTheEnd() {
+        let (log, _, _) = fresh(limit: 2)
+        for n in ["a", "b", "c"] { log.add(stub(n)) }
+        #expect(log.all().map(\.name) == ["c", "b"])
+    }
+}
+
 // MARK: - test doubles
 
 /// An engine whose frames the test pushes one at a time, so successive ticks can see
