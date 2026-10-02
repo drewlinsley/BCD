@@ -84,6 +84,12 @@ public final class ScanCoordinator: ObservableObject {
     /// on screen — from the outside they look identical, and they are the two halves of every
     /// failure this scan path has had.
     @Published public private(set) var lastSightings: [String] = []
+    /// A label is plainly in view and readable, but nothing — the catalog, the on-device model,
+    /// or a picture — could place it. The HUD shows the empty-glass "add it?" glyph then, turning
+    /// a silent blank into an invitation. Distinct from `isServerUnreachable` (that blames the
+    /// server; this owns the gap) and from an empty frame (nothing in view at all). See
+    /// `ScanNotFoundGlyph` in the app target.
+    @Published public private(set) var isUnknownLabel = false
     /// Candidates behind the current overlays (pre-filter), so a filter change can re-pin without
     /// another round-trip.
     @Published public private(set) var candidates: [ScoredCandidate] = []
@@ -116,9 +122,20 @@ public final class ScanCoordinator: ObservableObject {
     /// returns a confident wrong row most ticks, so counting empty responses would never fire.
     private var unreadTicks = 0
     private var failedTicks = 0                     // consecutive resolve calls that threw
+    /// Consecutive resolve ticks with readable text in view but nothing on screen — no match,
+    /// no held result, no object verdict. Counted apart from `unreadTicks`, which the picture
+    /// escalation resets to pace itself; this has to outlast those attempts so the HUD can tell
+    /// when even they drew a blank. Reset only by a result appearing, an empty frame, a scene
+    /// change, or stop.
+    private var unknownTicks = 0
     /// Ticks the catalog must fail to answer before the HUD says so: one is a dropped packet,
     /// three at the tick rate is a second of silence, which is not a packet.
     static let unreachableAfterTicks = 3
+    /// Resolve ticks of readable-but-unplaceable text before the HUD offers to add the drink.
+    /// Past `visionAfterTicks`, so every automatic attempt to name the label has taken its turn
+    /// first; about three seconds at the tick rate — long enough not to flicker while OCR
+    /// settles, short enough that a genuinely unknown can gets acknowledged.
+    static let unknownAfterTicks = 8
     private var lastVisionAt: Date?
     /// Whether the camera frame itself may leave the device. Settable, not `let`: the consent
     /// it mirrors lives in Settings, and this object outlives a trip there and back.
@@ -177,6 +194,16 @@ public final class ScanCoordinator: ObservableObject {
     private var isHoldingRecentOverlays: Bool {
         guard !lineOverlays.isEmpty, let at = overlaysSetAt else { return false }
         return Date().timeIntervalSince(at) * 1000 < overlayHoldMs
+    }
+
+    /// Recompute the add-it signal from the counter and what's actually on screen. Anything
+    /// drawn — a match, a held result, an object's verdict — means the label is not unknown; an
+    /// unreachable server owns its own banner; a stopped coordinator claims nothing. Assigned
+    /// only on a change, because the frame pump calls this at camera rate.
+    private func updateUnknown() {
+        let v = isScanning && !isServerUnreachable && overlays.isEmpty
+            && unknownTicks >= Self.unknownAfterTicks
+        if v != isUnknownLabel { isUnknownLabel = v }
     }
 
     /// Where each product's chip is drawn, once it has been drawn.
@@ -296,6 +323,8 @@ public final class ScanCoordinator: ObservableObject {
         displayedCorroborated = false
         failedTicks = 0
         isServerUnreachable = false
+        unknownTicks = 0
+        isUnknownLabel = false
     }
 
     /// One live tick: re-resolve the latest frame and swap overlays in place. Exposed so the
@@ -464,6 +493,8 @@ public final class ScanCoordinator: ObservableObject {
             }
             lastResolvedKey = nil; lastInterpretKey = nil
             unreadTicks = 0          // nothing in view is not a label we failed to read
+            unknownTicks = 0         // nor one we failed to place — the phone was just lowered
+            updateUnknown()
             return
         }
         // Skip the round-trip when the OCR is unchanged since the last resolve (camera held
@@ -527,6 +558,11 @@ public final class ScanCoordinator: ObservableObject {
             lastResolvedKey = key
             lastResolveCorroborated = resp.corroborated
             unreadTicks = resp.corroborated ? 0 : unreadTicks + 1
+            // A tick showing nothing — no match, no held result, no object verdict — is one we
+            // are failing to place; counting empties here rather than resolve failures is what
+            // keeps a confident-but-wrong fragment from reading as a find. See `unknownTicks`.
+            unknownTicks = overlays.isEmpty ? unknownTicks + 1 : 0
+            updateUnknown()
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
                 "n_detections": .int(frame.count),
                 "n_resolved": .int(resp.candidates.count),
@@ -589,6 +625,8 @@ public final class ScanCoordinator: ObservableObject {
             objectStage.retry(objects)
             failedTicks += 1
             if failedTicks >= Self.unreachableAfterTicks { isServerUnreachable = true }
+            // A server we can't reach has its own banner; it must not read as an unknown drink.
+            updateUnknown()
         }
     }
 
@@ -633,6 +671,7 @@ public final class ScanCoordinator: ObservableObject {
         let live = Set(fresh.map(\.id))
         pins = pins.filter { live.contains($0.key) }     // a chip that left starts afresh
         overlays = HUDLayout.spread(fresh.map(steadied))
+        updateUnknown()
     }
 
     /// An object's chip perched above its box, off the label, tied to the box's top.
@@ -680,6 +719,7 @@ public final class ScanCoordinator: ObservableObject {
         sceneWords = []
         strangeTicks = 0
         lastResolvedKey = nil
+        unknownTicks = 0        // a new shelf is not the old one's unplaced label
         publishOverlays()
     }
 

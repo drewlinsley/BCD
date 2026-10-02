@@ -35,6 +35,9 @@ final class AppEnvironment: ObservableObject {
     /// What this install has searched for, so the Search tab opens on your own history
     /// rather than on a placeholder.
     let recents: RecentSearches
+    /// Drinks the user added from the scan HUD when nothing could place a label — their own
+    /// authored data, kept on device until a contribute route exists to drain it.
+    let contributions: ContributionLog
     /// Pseudonymous per-install id. Still the id telemetry is filed under -- it is what the
     /// event spec declares -- but no longer what the server keys a PROFILE on: that is the
     /// account behind `auth`, which the server mints and the app proves with a token.
@@ -60,6 +63,7 @@ final class AppEnvironment: ObservableObject {
          reactions: ReactionLog = ReactionLog(),
          seen: SeenLog = SeenLog(),
          recents: RecentSearches = RecentSearches(),
+         contributions: ContributionLog = ContributionLog(),
          installId: String = InstallIdentity.current,
          auth: AuthStore = AuthStore(baseURL: AppEnvironment.apiBaseURL())) {
         self.api = api
@@ -70,6 +74,7 @@ final class AppEnvironment: ObservableObject {
         self.reactions = reactions
         self.seen = seen
         self.recents = recents
+        self.contributions = contributions
         self.installId = installId
         self.auth = auth
     }
