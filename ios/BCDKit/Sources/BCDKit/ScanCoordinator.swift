@@ -558,10 +558,34 @@ public final class ScanCoordinator: ObservableObject {
             lastResolvedKey = key
             lastResolveCorroborated = resp.corroborated
             unreadTicks = resp.corroborated ? 0 : unreadTicks + 1
-            // A tick showing nothing — no match, no held result, no object verdict — is one we
-            // are failing to place; counting empties here rather than resolve failures is what
-            // keeps a confident-but-wrong fragment from reading as a find. See `unknownTicks`.
-            unknownTicks = overlays.isEmpty ? unknownTicks + 1 : 0
+            // A tick that placed nothing is one we are failing to place; counting what is on
+            // screen rather than resolve failures is what keeps a confident-but-wrong fragment
+            // from reading as a find. See `unknownTicks`.
+            //
+            // A *guess* is not a find either, and asking only whether something was drawn was
+            // the bug: a can of The Alchemist's `Crusher` was scanned 85 times and never once
+            // offered to add, because the server answered 72 of those frames with an
+            // uncorroborated candidate and each one reset this to zero. It cycled
+            // `Soul-crusher Double India Pale Ale`, `Da Crusher`, `Soul Krusher` and -- off a
+            // terminal behind the can -- `Command Z`. Measured off a real can, 120
+            // uncorroborated frames produced 29 distinct names and not one of them was the
+            // drink in front of the camera, so a run of them is the same failure as a run of
+            // blanks and now reads as one.
+            //
+            // An object overlay needs no such test: the object path draws only `.resolved`,
+            // never its ambiguous shortlist, so anything it put on screen is already proven.
+            let found = !objectStage.overlays.isEmpty
+                || (!lineOverlays.isEmpty && displayedCorroborated)
+            unknownTicks = found ? 0 : unknownTicks + 1
+            if !found && unknownTicks >= Self.unknownAfterTicks && !lineOverlays.isEmpty {
+                // Long enough. Stop showing a guess measured to be wrong and let the offer to
+                // add have the screen -- the HUD saying "is it this?" and "I can't place it"
+                // at the same time is the one thing it must not do.
+                lineOverlays = []; candidates = []; currentFrame = []
+                overlaysSetAt = nil
+                displayedCorroborated = false
+                sceneWords = []
+            }
             updateUnknown()
             await telemetry?.log("scan_frame_batch", tier: .personalization, [
                 "n_detections": .int(frame.count),
