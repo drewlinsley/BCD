@@ -394,3 +394,61 @@ def test_a_batch_write_lands_the_same_as_one_at_a_time(pg: PostgresStore):
     assert pg.get_gold("p:1")["name"] == "Batch Beer One"
     assert pg.counts()["gold"] == 3
     pg.put_gold_many([])
+
+
+# ---- the Search tab's one query ----
+
+def _names(rows):
+    return [r.get("name") for r in rows]
+
+
+def test_search_finds_a_typed_name_and_nothing_it_merely_mentions(pg: PostgresStore):
+    """The Search tab used to OR in `record::text ILIKE '%q%'`, which matched the query
+    anywhere in a product's JSON. On the live catalog that made "Lagavulin" return `Ardbeg
+    Perpetuum` and `Signatory Ardbeg` -- Islay neighbours named in some other field -- and
+    because no index can serve a cast of every record to text, the planner seq-scanned
+    534,104 rows for both arms of the OR. 4.7 seconds a search.
+    """
+    _seed_product(pg, "lag", "Lagavulin 16 Year", None)
+    _seed_product(pg, "ard", "Ardbeg Perpetuum", None)
+    # The one whose record mentions the other distillery without being named for it.
+    rec = pg.get_gold("ard")
+    rec["notes"] = "An Islay like Lagavulin"
+    pg.put_gold("ard", "product", rec)
+    pg.refresh_search_names()
+
+    found = _names(pg.search_gold_products("Lagavulin", limit=10))
+    assert "Lagavulin 16 Year" in found
+    assert "Ardbeg Perpetuum" not in found, found
+
+
+def test_search_serves_a_half_typed_name(pg: PostgresStore):
+    """A search box is typed into one letter at a time, so a prefix has to find the row."""
+    _seed_product(pg, "lag", "Lagavulin 16 Year", None)
+    pg.refresh_search_names()
+    assert "Lagavulin 16 Year" in _names(pg.search_gold_products("Lagav", limit=10))
+
+
+def test_search_survives_a_one_letter_typo(pg: PostgresStore):
+    """The other thing a search box must take. LAGAVULAN lands on exactly 0.7 against
+    `Lagavulin`, which is why the floor sits just under it rather than on it."""
+    _seed_product(pg, "lag", "Lagavulin 16 Year", None)
+    pg.refresh_search_names()
+    assert "Lagavulin 16 Year" in _names(pg.search_gold_products("Lagavulan", limit=10))
+
+
+def test_search_finds_a_drink_by_its_maker(pg: PostgresStore):
+    """Matched on the brand-qualified name, so a bottle is findable by the house even when
+    its own name never says it — which is what `refresh_search_names` exists to allow."""
+    _seed_product(pg, "ht", "Heady Topper", None)
+    rec = pg.get_gold("brand:ht")
+    rec["name"] = "The Alchemist"
+    pg.put_gold("brand:ht", "brand", rec)
+    pg.refresh_search_names()
+    assert "Heady Topper" in _names(pg.search_gold_products("The Alchemist", limit=10))
+
+
+def test_search_answers_nothing_for_nonsense(pg: PostgresStore):
+    _seed_product(pg, "lag", "Lagavulin 16 Year", None)
+    pg.refresh_search_names()
+    assert pg.search_gold_products("xyzzy", limit=10) == []
