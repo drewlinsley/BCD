@@ -370,6 +370,47 @@ import Foundation
         await coord.resolveLatest()
         #expect(!coord.isUnknownLabel)
     }
+
+    @MainActor
+    @Test func aLabelTheCatalogOnlyGuessesAtAlsoOffersToAdd() async throws {
+        // The reported miss. A can of The Alchemist's `Crusher` was scanned 85 times and the
+        // offer to add never appeared, because the signal asked whether anything was DRAWN and
+        // something always was -- a guess. The server answered 72 of those 85 frames without
+        // corroborating, cycling `Soul-crusher Double India Pale Ale`, `Da Crusher`, `Soul
+        // Krusher` and, off the terminal behind the can, `Command Z`.
+        //
+        // An uncorroborated candidate is not a find; it is measured to be wrong essentially
+        // always. A run of them is the same failure as a run of blanks and now reads as one.
+        let engine = PushEngine()
+        let coord = ScanCoordinator(engine: engine, api: GuessingAPI())
+        coord.start()
+
+        for i in 0..<ScanCoordinator.unknownAfterTicks {
+            engine.push([DetectedText(text: "CRUSHER \(i)", kind: "text",
+                                      x: 0.3, y: 0.4, w: 0.4, h: 0.1)])
+            try await Task.sleep(nanoseconds: 50_000_000)
+            #expect(!coord.isUnknownLabel)      // not before the full run
+            await coord.resolveLatest()
+        }
+        #expect(coord.isUnknownLabel)
+    }
+
+    @MainActor
+    @Test func aScanThatIsWorkingNeverOffersToAdd() async throws {
+        // The guard on the above. A label the catalog places, frame after frame, corroborates
+        // -- and must never be told it is unknown however long the camera stays on it.
+        let engine = PushEngine()
+        let coord = ScanCoordinator(engine: engine, api: CatalogStubAPI(known: ["Heady Topper"]))
+        coord.start()
+
+        for _ in 0..<(ScanCoordinator.unknownAfterTicks * 3) {
+            engine.push([DetectedText(text: "Heady Topper", kind: "text",
+                                      x: 0.3, y: 0.4, w: 0.4, h: 0.1)])
+            try await Task.sleep(nanoseconds: 20_000_000)
+            await coord.resolveLatest()
+            #expect(!coord.isUnknownLabel)
+        }
+    }
 }
 
 @Suite("SeenLog")
@@ -541,6 +582,24 @@ private final class StubAPI: APIClientProtocol, @unchecked Sendable {
 
 /// Resolves a detection only when its text is a known catalog name — so garbled OCR misses,
 /// the way the real trigram store does. Lets the LLM-fallback path be exercised deterministically.
+/// Answers every frame with a candidate the frame never corroborated — the shape a label the
+/// recogniser cannot read actually produces. Measured off a real can: 120 uncorroborated frames
+/// returned a candidate and not one was the drink in front of the camera, 29 distinct names
+/// cycling. A guess like that is not a find, and a run of them is not a scan that is working.
+private final class GuessingAPI: APIClientProtocol, @unchecked Sendable {
+    var resolveCallCount = 0
+    func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        resolveCallCount += 1
+        return ScanResolveResponse(
+            candidates: [makeCandidate(id: "guess\(resolveCallCount)",
+                                       name: "Wrong Beer \(resolveCallCount)",
+                                       abv: 5, personal: 0.5, index: 0)],
+            unresolvedIndices: [], latencyMs: 0.5, corroborated: false)
+    }
+    func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {}
+}
+
 private final class CatalogStubAPI: APIClientProtocol, @unchecked Sendable {
     let known: Set<String>
     var resolveCallCount = 0
