@@ -12,6 +12,11 @@ public protocol APIClientProtocol: Sendable {
     /// Take one verdict back. The profile comes back rebuilt without it, so the caller does
     /// not have to ask a second time to know where it left them.
     func withdrawFeedback(productId: String) async throws -> FeedbackResponse
+    /// The first-run quiz's questions. Served rather than built in, so the drinks can change
+    /// without an app release.
+    func quizDrinks() async throws -> [QuizDrink]
+    /// Answer it, and get the profile it built — the first one that is actually theirs.
+    func submitQuiz(_ answers: [QuizAnswer]) async throws -> TasteProfile
     /// Drinks to suggest, best first, for the person this client speaks for.
     func recommend(limit: Int) async throws -> [Recommendation]
     /// Catalog vocabulary for the on-device recognizer's custom-words hint.
@@ -40,6 +45,14 @@ extension APIClientProtocol {
     /// Same reasoning. A stub that cannot withdraw must say so rather than report success,
     /// because the caller clears its own copy of the verdict on the strength of this returning.
     public func withdrawFeedback(productId: String) async throws -> FeedbackResponse {
+        throw APIError.http(501)
+    }
+
+    /// Same again. A stub that answers the quiz with an empty list would show a first-run
+    /// screen with no questions on it, which reads as the quiz being over.
+    public func quizDrinks() async throws -> [QuizDrink] { throw APIError.http(501) }
+
+    public func submitQuiz(_ answers: [QuizAnswer]) async throws -> TasteProfile {
         throw APIError.http(501)
     }
 
@@ -183,6 +196,15 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// colon (`bcd:the-alchemist-crusher`) and a body needs no escaping to survive the trip.
     public func withdrawFeedback(productId: String) async throws -> FeedbackResponse {
         try await post("/v1/feedback/withdraw", body: WithdrawBody(productId: productId))
+    }
+
+    public func quizDrinks() async throws -> [QuizDrink] {
+        let got: QuizDrinks = try await get("v1/taste/quiz")
+        return got.drinks
+    }
+
+    public func submitQuiz(_ answers: [QuizAnswer]) async throws -> TasteProfile {
+        try await post("/v1/taste/quiz", body: QuizSubmission(answers: answers))
     }
 
     /// What to drink next, for whoever the bearer token says is asking. The server answers
