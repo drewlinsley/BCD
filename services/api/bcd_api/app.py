@@ -21,6 +21,7 @@ import httpx
 from bcd_ingest.merge import get_product
 from bcd_ingest.store import BronzeDoc, Store, doc_id, open_store
 from bcd_schema import (
+    Category,
     ContributionRequest,
     ContributionResponse,
     FeedbackRequest,
@@ -28,6 +29,9 @@ from bcd_schema import (
     LexiconResponse,
     Product,
     ProductSearchResponse,
+    QuizDrink,
+    QuizRequest,
+    QuizResponse,
     ResolvedProduct,
     ScanResolveRequest,
     ScanResolveResponse,
@@ -46,6 +50,7 @@ from bcd_schema.family import (
     shelf_styles,
     styles_in,
 )
+from bcd_schema.quiz import QUIZ_DRINKS, QUIZ_ORDER
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
@@ -594,6 +599,56 @@ def withdraw_feedback(req: WithdrawRequest, who: Caller) -> FeedbackResponse:
     }]})
     profile = rebuild_profile(store, collector.iter_events(TASTE_EVENTS), user_id)
     return FeedbackResponse(accepted=True, profile=profile)
+
+
+#: How much a quiz answer counts beside a real verdict. Saying what you reach for is weaker
+#: evidence than saying what you thought of something you actually drank, so a quiz answer is
+#: worth half a rating at most — and as real ratings arrive they outnumber and outweigh it
+#: without anything having to expire the quiz.
+QUIZ_WEIGHT = 0.5
+
+
+@app.get("/v1/taste/quiz", response_model=QuizResponse)
+def taste_quiz() -> QuizResponse:
+    """The questions. Served rather than built into the app so the eight drinks can change
+    without a release, and so the client never has to know a flavour vector exists."""
+    return QuizResponse(drinks=[
+        QuizDrink(family=f, prompt=QUIZ_DRINKS[f][0], category=Category(QUIZ_DRINKS[f][1]))
+        for f in QUIZ_ORDER if f in QUIZ_DRINKS
+    ])
+
+
+@app.post("/v1/taste/quiz", response_model=TasteProfile)
+def submit_quiz(req: QuizRequest, who: Caller) -> TasteProfile:
+    """Answer the first-run quiz, and get the profile it built.
+
+    This is the cold-start fix. A drinker who has rated nothing has no centroid, so `score`
+    falls back to a style prior and `/v1/recommend` answers from a seed profile — the code is
+    careful never to call that "for you", because it is somebody else's taste. Eight questions
+    and about twenty seconds later the recommendations are theirs.
+
+    Recorded as `taste_quiz_answered` events, one per answer, then rebuilt through exactly the
+    path a rating takes. Nothing downstream knows the difference, and retaking the quiz
+    supersedes rather than accumulates, the same rule a re-rate follows.
+
+    An unknown family is dropped rather than refused: the question set is served by this same
+    route and may have changed under a client that is still holding an older copy.
+    """
+    user_id = who.id
+    collector: TelemetryCollector = _state["telemetry"]
+    now = datetime.now(UTC).isoformat()
+    events = [{
+        "name": "taste_quiz_answered",
+        "event_id": str(uuid.uuid4()),
+        "ts": now,
+        "install_id": user_id,
+        "consent_tier": "personalization",
+        "family": a.family,
+        "weight": round(max(-1.0, min(1.0, a.weight)) * QUIZ_WEIGHT, 4),
+    } for a in req.answers if a.family in QUIZ_DRINKS]
+    if events:
+        collector.ingest({"events": events})
+    return rebuild_profile(_state["store"], collector.iter_events(TASTE_EVENTS), user_id)
 
 
 @app.get("/v1/profile", response_model=TasteProfile)

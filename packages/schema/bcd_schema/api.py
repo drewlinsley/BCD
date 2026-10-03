@@ -129,6 +129,38 @@ class FeedbackRequest(BaseModel):
     aspects: dict[str, float] | None = None  # optional per-axis detail ("too sweet")
 
 
+class QuizAnswer(BaseModel):
+    """One answer to the first-run quiz: a drink family, and how the drinker feels about it.
+
+    `weight` is signed and bounded like a rating's — negative for "not for me", positive for
+    "yes" — but the caller scales it below a real verdict's, because saying what you reach
+    for is weaker evidence than saying what you thought of something you drank.
+    """
+
+    family: str = Field(..., min_length=1, max_length=32)
+    weight: float = Field(..., ge=-1.0, le=1.0)
+
+
+class QuizRequest(BaseModel):
+    """A whole quiz in one call. Answering is a single act, not eight, and a half-sent quiz
+    would leave a profile built from whichever questions happened to arrive."""
+
+    answers: list[QuizAnswer] = Field(..., min_length=1, max_length=32)
+
+
+class QuizDrink(BaseModel):
+    """One question, as the server defines it — so the drinks can change without an app
+    release, and so the app never has to know a flavour vector exists."""
+
+    family: str
+    prompt: str
+    category: Category
+
+
+class QuizResponse(BaseModel):
+    drinks: list[QuizDrink] = Field(default_factory=list)
+
+
 class WithdrawRequest(BaseModel):
     """Taking one verdict back. A POST with the id in the body rather than a DELETE with it
     in the path: product ids carry a colon (`bcd:the-alchemist-crusher`), and a body needs no
