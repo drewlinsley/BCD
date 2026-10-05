@@ -21,10 +21,8 @@ import BCDKit
 struct ProductDetailView: View {
     let candidate: ScoredCandidate
     @EnvironmentObject var env: AppEnvironment
+    @EnvironmentObject var reactions: ReactionLog
 
-    /// This install's own verdict, if it has one. Re-read when the rating sheet closes,
-    /// because the Seal and the verdict line both change the moment one is given.
-    @State private var myReaction: Reaction?
     @State private var rating = false
     /// Neighbours in the sensory space. Nil until asked, so the section can stay off the screen
     /// rather than flashing an empty card on every open.
@@ -36,6 +34,11 @@ struct ProductDetailView: View {
 
     private var product: Product { candidate.resolved.product }
     private var producer: Producer { candidate.resolved.producer }
+
+    /// This install's own verdict, if it has one. Read from the log on every draw rather than
+    /// copied into `@State` when the sheet closes: the Seal and the verdict line both change
+    /// the moment one is given or taken back, and the log is the thing that knows.
+    private var myReaction: Reaction? { reactions.reaction(for: product.id) }
 
     private var producerName: String { DisplayName.producer(producer.name) }
     private var productName: String {
@@ -66,15 +69,9 @@ struct ProductDetailView: View {
                 similar = (try? await env.api.similar(to: product.id, limit: 6))?.results ?? []
             }
             .sheet(item: $drilldown) { ProductDetailView(candidate: $0) }
-            // The sheet writes through `ReactionLog`, so the verdict is on disk by the time
-            // it closes; this is what puts it on the label.
-            .onChange(of: rating) { _, open in
-                if !open { myReaction = env.reactions.reaction(for: product.id) }
-            }
             .task {
                 // Opening a product is the deliberate act that earns it a place in the Rate
                 // queue; merely crossing the viewfinder does not.
-                myReaction = env.reactions.reaction(for: product.id)
                 env.seen.record(SeenProduct(id: product.id, name: productName,
                                             producer: producerName,
                                             abvPct: product.spec.abvPct?.value))

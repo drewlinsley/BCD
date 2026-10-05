@@ -14,6 +14,9 @@ import BCDKit
 
 struct DiscoverView: View {
     @EnvironmentObject var env: AppEnvironment
+    /// Every shelf row draws the verdict, and `rated` decides which list this screen is,
+    /// so this one is observed rather than read through `env`.
+    @EnvironmentObject var reactions: ReactionLog
     @State private var picks: [Recommendation] = []
     @State private var aisles: [FamilyGroup] = []
     /// Rank the shelves they have never rated on by the taste they built elsewhere. Off by
@@ -73,7 +76,7 @@ struct DiscoverView: View {
                 ForEach(Array(picks.enumerated()), id: \.element.id) { rank, pick in
                     Button { Task { await openPick(pick, rank: rank) } } label: {
                         PickRow(pick: pick,
-                                mine: env.reactions.reaction(for: pick.productId),
+                                mine: reactions.reaction(for: pick.productId),
                                 busy: opening == pick.productId)
                     }
                     .buttonStyle(.plain)
@@ -145,7 +148,7 @@ struct DiscoverView: View {
         ForEach(Array(shelf.results.enumerated()), id: \.element.id) { rank, pick in
             Button { Task { await openShelfPick(pick, rank: rank) } } label: {
                 ShelfRow(pick: pick,
-                         mine: env.reactions.reaction(for: pick.productId),
+                         mine: reactions.reaction(for: pick.productId),
                          busy: opening == pick.productId,
                          personal: shelf.isPersonal)
             }
@@ -167,7 +170,7 @@ struct DiscoverView: View {
             })
     }
 
-    private var rated: Int { env.reactions.count }
+    private var rated: Int { reactions.count }
 
     private func load() async {
         if state != .ready { state = .loading }

@@ -2409,4 +2409,26 @@ struct ReactionLogTests {
         log.record(.pinkieOut, for: "p:ipa")
         #expect(log.reaction(for: "p:ipa") == .pinkieOut)
     }
+
+    @Test("a verdict announces itself")
+    func recordingBumpsTheRevision() {
+        // `revision` is the whole change signal: a view holding the log redraws when it
+        // moves, and nothing else tells one that a verdict landed.
+        let log = fresh()
+        let before = log.revision
+        log.record(.chuggedIt, for: "p:ipa")
+        #expect(log.revision != before)
+    }
+
+    @Test("taking one back announces itself")
+    func removingBumpsTheRevision() {
+        // The case that was broken on screen: a search row drew its glyph, the rating was
+        // then taken back from the drink's own detail screen, and the row kept the old face
+        // until the app was relaunched. The store was right; nothing published the change.
+        let log = fresh()
+        log.record(.chuggedIt, for: "p:ipa")
+        let drawn = log.revision
+        log.remove(for: "p:ipa")
+        #expect(log.revision != drawn)
+    }
 }

@@ -13,6 +13,8 @@ import AVFoundation
 
 struct ScanView: View {
     @EnvironmentObject var env: AppEnvironment
+    /// A chip carries the verdict, so the HUD has to hear when one is given or taken back.
+    @EnvironmentObject var reactions: ReactionLog
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = ScanViewModel()
     @State private var ask: String = ""
@@ -72,7 +74,7 @@ struct ScanView: View {
                             .allowsHitTesting(false)
                     }
                     OverlayChip(candidate: overlay.candidate,
-                                reaction: env.reactions
+                                reaction: reactions
                                     .reaction(for: overlay.candidate.resolved.product.id))
                         .position(x: at.x * geo.size.width,
                                   y: at.y * geo.size.height)

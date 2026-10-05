@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // The taste verdict, client side. `/v1/feedback` records a real `rating_submitted` event
 // and folds it straight into the caller's TasteProfile, so a tap here moves the same
@@ -147,10 +148,26 @@ public enum InstallIdentity {
 /// What this install has already rated, so a product shows its own verdict on recall
 /// without a round trip. The server stays the source of truth for the profile; this is a
 /// display cache and is treated as disposable.
-public final class ReactionLog: @unchecked Sendable {
+///
+/// An `ObservableObject`, because a verdict is read in one place and changed in another: a
+/// search row draws the glyph for a drink whose rating sheet is two screens away. Without a
+/// change signal an already-drawn row kept the face the log held when the row was built --
+/// rate a drink, search for it, then take the rating back from its detail screen, and the
+/// row behind still showed the old glyph until the next launch. The stored data was never
+/// wrong; nothing told SwiftUI to ask again.
+public final class ReactionLog: ObservableObject, @unchecked Sendable {
     private let key = "bcd.reactions"
     private let defaults: UserDefaults
     private let lock = NSLock()
+
+    /// Bumped on every write, and that is the whole of the change signal: a view holding
+    /// this log re-reads when it moves.
+    ///
+    /// A counter rather than the verdicts themselves. The store is `UserDefaults` and every
+    /// reader asks by product id, so publishing the dictionary would mean keeping a second
+    /// copy of it in step with the first -- two answers to one question, which is the bug
+    /// this fixes.
+    @Published public private(set) var revision = 0
 
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
@@ -169,10 +186,7 @@ public final class ReactionLog: @unchecked Sendable {
     }
 
     public func record(_ reaction: Reaction, for productId: String) {
-        lock.lock(); defer { lock.unlock() }
-        var all = defaults.dictionary(forKey: key) ?? [:]
-        all[productId] = reaction.rawValue
-        defaults.set(all, forKey: key)
+        write { $0[productId] = reaction.rawValue }
     }
 
     /// Forget a verdict. The picker could move a rating between rungs but never take one off,
@@ -182,9 +196,23 @@ public final class ReactionLog: @unchecked Sendable {
     /// Clearing here is only half of it: this log is a display cache and the server holds the
     /// profile, so the caller withdraws on the server too (`APIClientProtocol.withdrawFeedback`).
     public func remove(for productId: String) {
-        lock.lock(); defer { lock.unlock() }
+        write { $0.removeValue(forKey: productId) }
+    }
+
+    /// The one writer, so a later one cannot be added that forgets to announce itself.
+    ///
+    /// `revision` moves after the lock is dropped. `objectWillChange` delivers to its
+    /// subscribers synchronously, and a subscriber here is a view that may read straight
+    /// back through `reaction(for:)` -- which wants this same non-recursive lock.
+    ///
+    /// Called from the views, on the main actor, which is where SwiftUI requires a
+    /// published change to come from; nothing in the package writes off it.
+    private func write(_ change: (inout [String: Any]) -> Void) {
+        lock.lock()
         var all = defaults.dictionary(forKey: key) ?? [:]
-        all.removeValue(forKey: productId)
+        change(&all)
         defaults.set(all, forKey: key)
+        lock.unlock()
+        revision += 1
     }
 }
