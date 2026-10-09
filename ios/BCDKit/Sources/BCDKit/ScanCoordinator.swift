@@ -219,13 +219,26 @@ public final class ScanCoordinator: ObservableObject {
     /// outside it long enough -- the camera panned and the bottle is somewhere else -- moves
     /// the chip once, to where the anchor is now. See `HUDLayout.steadied` for the rule and
     /// the swim it replaced.
-    /// Products already reported as scanned this run. The HUD redraws at 350ms and a can
-    /// sits in the viewfinder for seconds, so the event has to be per PRODUCT, not per tick:
-    /// one Crusher looked at once is one scan, and the log already holds 85 frames of it
-    /// spanning eight days. Cleared when scanning restarts, so picking the same bottle up on
-    /// a later trip counts again — and the server keys on product id regardless, so a repeat
-    /// that slips through is still one scanned drink.
-    private var reportedScans: Set<String> = []
+    /// When each product was last drawn on the HUD. A look ENDS when a product has been off
+    /// the screen for `sightingGap`, and coming back after that is a new look.
+    ///
+    /// This is the whole definition of "considered it twice". Reporting once per product per
+    /// run — the first thing this did — collapsed the case that matters most: putting a
+    /// bottle down, looking at two others and picking it up again is deliberation, and the
+    /// client was throwing it away before the server ever saw it. Reporting every tick is the
+    /// opposite error, since the HUD redraws at 350ms.
+    ///
+    /// Updated on every tick a product is drawn, so a can held steadily in frame keeps a gap
+    /// of about 350ms and never re-reports however long it is looked at.
+    private var drawnAt: [String: Date] = [:]
+
+    /// How long a product has to be gone before coming back counts as coming back. Long
+    /// enough that a chip dropping out for a tick or two while the recognizer loses the label
+    /// is still one look; short enough that putting a bottle down and picking it up is two.
+    ///
+    /// A guess, and the one number here that wants real sessions behind it. `var` and
+    /// internal so a test can drive the clock rather than wait on it.
+    var sightingGap: TimeInterval = 15
 
     private var pins: [String: HUDLayout.Pin] = [:]
     /// The clock the pins settle by; injectable so the rule is testable without waiting.
@@ -305,7 +318,8 @@ public final class ScanCoordinator: ObservableObject {
     /// until a relaunch (2026-09-17). A scanning coordinator wakes the engine and keeps its
     /// stream; a stopped one starts over.
     public func resume(intervalMs: UInt64 = 350, venueId: String? = nil) {
-        reportedScans = []
+        // `drawnAt` deliberately survives: leaving the Scan tab and coming back to the same
+        // bottle later is looking at it again, and the gap is what decides that.
         guard isScanning else {
             startLive(intervalMs: intervalMs, venueId: venueId)
             return
@@ -720,11 +734,23 @@ public final class ScanCoordinator: ObservableObject {
     /// A candidate the resolver returned but the HUD suppressed was never shown to anybody and
     /// is not something the drinker looked at.
     ///
+    /// Once per LOOK, not once per product and not once per tick. Going back to a bottle is
+    /// the drink they cannot decide about, and that is the strongest thing a camera can say —
+    /// including twice on the same trip.
+    ///
     /// Consent is the queue's job: `TelemetryQueue.log` drops a personalization event when the
     /// tier is not allowed, so a drinker who has not agreed sends nothing from here.
     private func reportScans(_ drawn: [ResolvedOverlay]) {
-        let fresh = drawn.map(\.candidate.resolved.product.id).filter { !$0.isEmpty }
-            .filter { reportedScans.insert($0).inserted }
+        let now = Date()
+        var fresh: [String] = []
+        for id in drawn.map(\.candidate.resolved.product.id) where !id.isEmpty {
+            if let last = drawnAt[id], now.timeIntervalSince(last) < sightingGap {
+                drawnAt[id] = now          // the same look, still going
+                continue
+            }
+            drawnAt[id] = now
+            fresh.append(id)
+        }
         guard !fresh.isEmpty, let telemetry else { return }
         Task {
             for pid in fresh {

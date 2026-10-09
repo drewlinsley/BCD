@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import tempfile
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from bcd_api.resolver import Resolver
@@ -433,12 +432,14 @@ def test_one_installs_withdrawal_cannot_clear_anothers_verdict():
 # skipped the quiz and has rated nothing (2026-10-08).
 
 
-_T0 = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+_N = 0
 
 
-def _scan(pid, install="demo", tier="personalization", at=_T0):
+def _scan(pid, install="demo", tier="personalization", event_id=None):
+    global _N
+    _N += 1
     return _ev(name="scan_resolved", install=install, tier=tier, product_id=pid,
-               ts=at.isoformat())
+               event_id=event_id or f"ev-{_N}")
 
 
 def test_a_scanned_product_is_a_small_positive():
@@ -448,40 +449,34 @@ def test_a_scanned_product_is_a_small_positive():
     assert all(w > 0 for w in weights.values())
 
 
-def test_one_long_look_is_one_look_however_many_frames_it_took():
-    """The HUD redraws every 350ms and a can sits in the viewfinder for seconds. Twenty
-    events a minute apart are one bottle being read, not twenty opinions."""
-    events = [_scan("p:ipa", at=_T0 + timedelta(minutes=i)) for i in range(20)]
-    assert sightings_from_events(events, "demo") == {"p:ipa": 1}
-    assert scans_from_events(events, "demo") == {"p:ipa": pytest.approx(0.15)}
+def test_looking_at_it_twice_counts_twice_even_on_one_trip():
+    """Putting a bottle down, looking at two others and picking it up again is someone
+    deliberating — the strongest thing a camera can say about a drink they have not tasted.
+    A thirty-minute gate used to collapse this and it was wrong (user, 2026-10-08)."""
+    events = [_scan("p:ipa"), _scan("p:ipa")]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 2}
+    assert scans_from_events(events, "demo") == {"p:ipa": pytest.approx(0.30)}
 
 
-def test_going_back_to_a_bottle_on_another_trip_counts_again():
-    """The strongest thing a camera can say. Picking the same bottle up on three separate
-    occasions is the drink they cannot decide about, and collapsing that to one look threw
-    the signal away (user, 2026-10-08)."""
-    events = [_scan("p:ipa", at=_T0),
-              _scan("p:ipa", at=_T0 + timedelta(days=1)),
-              _scan("p:ipa", at=_T0 + timedelta(days=9))]
-    assert sightings_from_events(events, "demo") == {"p:ipa": 3}
-    assert scans_from_events(events, "demo") == {"p:ipa": pytest.approx(0.45)}
+def test_one_steady_look_is_one_look_however_many_ticks_it_took():
+    """Decided on the client, which can see it: a product already on the HUD is not reported
+    again, so the 350ms redraw never reaches here as a second look."""
+    assert sightings_from_events([_scan("p:ipa")], "demo") == {"p:ipa": 1}
 
 
-def test_a_tab_switch_is_not_another_trip():
-    """The client reports a product once per scan RUN, and a run restarts whenever the Scan
-    tab is re-entered. Leaving for Discover and coming back with the can still in frame must
-    not read as going back to the shop, so the gap is judged here from the timestamps."""
-    events = [_scan("p:ipa", at=_T0), _scan("p:ipa", at=_T0 + timedelta(seconds=20))]
-    assert sightings_from_events(events, "demo") == {"p:ipa": 1}
+def test_a_batch_sent_twice_is_not_two_looks():
+    """What the time gate was really guarding against, done exactly instead of by heuristic:
+    a retransmission carries the same event id."""
+    once = _scan("p:ipa", event_id="ev-fixed")
+    assert sightings_from_events([once, dict(once)], "demo") == {"p:ipa": 1}
 
 
-def test_going_back_forever_never_outweighs_having_drunk_it():
-    """Capped below a rating. However many times they pick it up, they still have not
-    tasted it."""
-    events = [_scan("p:ipa", at=_T0 + timedelta(days=i)) for i in range(40)]
-    assert sightings_from_events(events, "demo") == {"p:ipa": 40}
-    assert scans_from_events(events, "demo")["p:ipa"] == pytest.approx(0.6)
-    assert scans_from_events(events, "demo")["p:ipa"] < 1.0
+def test_an_event_with_no_id_still_counts():
+    """The client has always sent one. Losing a real look to a missing field is the worse
+    failure."""
+    bare = _ev(name="scan_resolved", install="demo", tier="personalization",
+               product_id="p:ipa")
+    assert sightings_from_events([bare, dict(bare)], "demo") == {"p:ipa": 2}
 
 
 def test_a_scan_is_worth_far_less_than_a_rating_or_a_quiz_answer():

@@ -2589,6 +2589,39 @@ struct ReactionLogTests {
     }
 
     @MainActor
+    @Test func pickingItUpAgainIsASecondLook() async throws {
+        // Put a bottle down, look at two others, pick it up again: that is someone
+        // deliberating, and it is the strongest thing a camera can say about a drink they
+        // have not tasted. Reporting once per product per run collapsed it, and a
+        // thirty-minute server gate collapsed it again (user, 2026-10-08).
+        //
+        // A look ends when the product has been off the HUD for `sightingGap`, so this drives
+        // the clock rather than waiting on it.
+        let engine = PushEngine()
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: true),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.sightingGap = 0.05        // drive the clock rather than wait fifteen seconds
+        coord.start()
+
+        func look(at name: String) async throws {
+            engine.push([DetectedText(text: name, kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)])
+            try await Task.sleep(nanoseconds: 60_000_000)
+            await coord.resolveLatest()
+            try await Task.sleep(nanoseconds: 40_000_000)
+        }
+
+        try await look(at: "Widow Jane")
+        try await look(at: "Angels Envy")      // put it down, look at another
+        try await look(at: "Widow Jane")       // and pick it up again
+        try await queue.flush()
+
+        // Two looks at the bottle they cannot decide about, one at the other.
+        #expect(await sink.count(of: "scan_resolved") == 3)
+    }
+
+    @MainActor
     @Test func nothingIsReportedWithoutPersonalizationConsent() async throws {
         // The queue drops the tier, so a drinker who has not agreed sends nothing from the
         // viewfinder — the same gate the quiz and the rating picker sit behind.
