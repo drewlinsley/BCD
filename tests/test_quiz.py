@@ -254,3 +254,56 @@ def test_a_stale_client_asking_about_a_dropped_drink_is_not_an_error(client, tok
                                       {"family": "ipa", "weight": 1.0}]})
     assert r.status_code == 200
     assert r.json()["sensory_ideal"] is not None
+
+
+# ---- the shelves hear it ---------------------------------------------------------------
+
+# A quiz answer names a FAMILY — that is the whole of its design — and Discover is the one
+# screen organised by family. Until this, answering "Stout: yes" and then finding the Stout
+# shelf dark, under a header calling the list a starting point, was the quiz being heard by
+# the ranker and by nothing else (2026-10-08).
+
+def test_a_quiz_yes_speaks_for_that_shelf(store):
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    mine = _families_spoken_for(store, judged=(),
+                                quiz={"stout": 1.0, "bourbon": 1.0, "ipa": 1.0})
+    assert mine == {Family.STOUT, Family.BOURBON, Family.IPA}
+
+
+def test_a_quiz_no_does_not(store):
+    """Saying you do not drink gin moves the centroid away, which is worth having. It is not
+    a reason to rank the gin shelf FOR you: asking which gin is least unlike the taste of
+    someone who just said they do not drink gin is a real cosine and not a recommendation."""
+    from bcd_api.app import _families_spoken_for
+
+    assert _families_spoken_for(store, judged=(), quiz={"gin": -1.0, "vodka": -1.0}) == set()
+
+
+def test_a_family_this_build_does_not_know_is_skipped_not_fatal(store):
+    """The questions are served, so the server can ask about a family an older build's
+    `Family` enum has never heard of. One unknown question must not take the shelf list
+    with it."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    mine = _families_spoken_for(store, judged=(), quiz={"stout": 1.0, "perry": 1.0})
+    assert mine == {Family.STOUT}
+
+
+def test_ratings_and_quiz_answers_both_count(store):
+    """The quiz is an accelerant, not a replacement: a shelf is theirs if they have said
+    anything about it, by either route."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema import Category, ExtractionMethod, Product, Provenance, Sourced
+    from bcd_schema.family import Family
+
+    prov = Provenance(source_id="t", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
+    store.put_gold("beer:rated", "product", Product(
+        id="beer:rated", brand_id="b", producer_id="p", category=Category.BEER,
+        name="A Porter", style=Sourced[str](value="Porter", provenance=prov),
+    ).model_dump(mode="json"))
+
+    mine = _families_spoken_for(store, judged=["beer:rated"], quiz={"stout": 1.0})
+    assert mine == {Family.STOUT, Family.PORTER}

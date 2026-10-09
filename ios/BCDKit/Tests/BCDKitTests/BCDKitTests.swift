@@ -2432,3 +2432,70 @@ struct ReactionLogTests {
         #expect(log.revision != drawn)
     }
 }
+
+/// `GET /v1/product/{id}/score` — the answer the detail screen's seal draws.
+///
+/// Three of the four doors onto that screen pass no score, so the seal read "not scored for
+/// you yet" about drinks the server would have called a 91% match. Nothing was wrong with the
+/// score; nothing had asked for it.
+@Suite struct PersonalScoreTests {
+    private func decode(_ json: String) throws -> PersonalScore {
+        try JSONDecoder().decode(PersonalScore.self, from: json.data(using: .utf8)!)
+    }
+
+    @Test func aScoredAnswerCarriesEverythingTheSealAndTheLineNeed() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": true, "personal_score": 0.909,
+         "reason": "matches your bitterness preference", "cold_start": true,
+         "evidence": "known", "basis": "yours"}
+        """)
+        #expect(s.scored)
+        #expect(s.personalScore == 0.909)
+        #expect(s.reason == "matches your bitterness preference")
+        #expect(s.coldStart)
+        #expect(s.evidence == .known)
+    }
+
+    /// Not a score of zero. "We have nothing to go on yet" and "we predict you will hate it"
+    /// are different claims and the seal draws them differently — a 0% stamp on a drink
+    /// nobody has been asked about would be the cold start telling a lie with a number.
+    @Test func anUnscoredAnswerIsAbsentRatherThanZero() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": false, "basis": "no_profile"}
+        """)
+        #expect(!s.scored)
+        #expect(s.personalScore == nil)
+        #expect(s.reason == nil)
+        #expect(!s.coldStart)
+        #expect(s.basis == "no_profile")
+    }
+
+    /// A server that grows a fourth evidence tier must not fail the call on a phone that has
+    /// only three: the same tolerance `Recommendation` shows, since the seal draws the score
+    /// and the tier is a footnote.
+    @Test func anUnknownEvidenceTierDoesNotFailTheAnswer() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": true, "personal_score": 0.7,
+         "reason": "why", "evidence": "divined", "basis": "yours"}
+        """)
+        #expect(s.scored)
+        #expect(s.personalScore == 0.7)
+        #expect(s.evidence == nil)
+    }
+
+    /// The stub answers unscored rather than throwing, so a preview exercises the state the
+    /// seal already draws instead of an error path it has none for.
+    @Test func theDefaultImplementationIsHonestlyUnscored() async throws {
+        struct Bare: APIClientProtocol {
+            func resolveScan(_: ScanResolveRequest) async throws -> ScanResolveResponse {
+                ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: 0)
+            }
+            func searchProducts(_: String) async throws -> [ResolvedProduct] { [] }
+            func sendTelemetry(_: TelemetryBatch) async throws {}
+        }
+        let answer = try await Bare().productScore(for: "ttb:1")
+        #expect(!answer.scored)
+        #expect(answer.personalScore == nil)
+        #expect(answer.productId == "ttb:1")
+    }
+}

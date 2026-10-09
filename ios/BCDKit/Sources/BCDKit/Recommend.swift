@@ -85,3 +85,59 @@ public struct RecommendResponse: Codable, Sendable {
         self.results = results
     }
 }
+
+/// What `GET /v1/product/{id}/score` answers: how likely this drinker is to like one drink.
+///
+/// The detail screen is reachable by four doors and only one of them is the recommender, so a
+/// drink found by name or opened from another drink's Similar profile arrived with nothing
+/// personal attached and the screen's seal said "not scored for you yet" about a beer the
+/// server would have called a 91% match. This is that question asked on its own.
+///
+/// `scored` is false rather than the score being zero, because they are different claims: no
+/// profile yet, or no flavour vector on this row, is not a prediction of nought. The server
+/// never answers from its seed profile here — a number stamped on a label has to be about the
+/// person reading it.
+public struct PersonalScore: Decodable, Sendable, Equatable {
+    public let productId: String
+    public let scored: Bool
+    public let personalScore: Double?
+    public let reason: String?
+    public let coldStart: Bool
+    public let evidence: Recommendation.Evidence?
+    /// Why there is no score, when there is none: `no_profile` or `no_vector`. `yours` when
+    /// there is one. Carried for diagnosis — the screen only reads `scored`.
+    public let basis: String?
+
+    enum CodingKeys: String, CodingKey {
+        case scored, reason, evidence, basis
+        case productId = "product_id"
+        case personalScore = "personal_score"
+        case coldStart = "cold_start"
+    }
+
+    public init(productId: String, scored: Bool, personalScore: Double? = nil,
+                reason: String? = nil, coldStart: Bool = false,
+                evidence: Recommendation.Evidence? = nil, basis: String? = nil) {
+        self.productId = productId
+        self.scored = scored
+        self.personalScore = personalScore
+        self.reason = reason
+        self.coldStart = coldStart
+        self.evidence = evidence
+        self.basis = basis
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        productId = try c.decode(String.self, forKey: .productId)
+        scored = try c.decodeIfPresent(Bool.self, forKey: .scored) ?? false
+        personalScore = try c.decodeIfPresent(Double.self, forKey: .personalScore)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        coldStart = try c.decodeIfPresent(Bool.self, forKey: .coldStart) ?? false
+        // An evidence tier this build does not know reads as nil rather than failing the
+        // call, the same tolerance `Recommendation` shows.
+        evidence = (try? c.decodeIfPresent(Recommendation.Evidence.self, forKey: .evidence))
+            ?? nil
+        basis = try c.decodeIfPresent(String.self, forKey: .basis)
+    }
+}

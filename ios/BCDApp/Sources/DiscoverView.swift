@@ -8,14 +8,19 @@ import BCDKit
 // screen you were on — and gave two different jobs one icon.
 //
 // The header is careful about whose taste it is. The server answers from a learned profile
-// once you have rated something and from its seed profile before that, and both come back
-// looking identical — so the client, which is the only side that knows how many verdicts
-// this install has given, says which one you are reading.
+// once it has one and from its seed profile before that, and both come back looking
+// identical, so something has to say which one you are reading.
+//
+// That used to be the local rating count, and it was wrong from the day the quiz shipped: a
+// quiz answer names a FAMILY, so it writes nothing to the reaction log. Answer all eight,
+// get a list built from your own centroid, and this screen still called it "Somewhere to
+// start" with every shelf dark (2026-10-08). The profile belongs to the server, so the
+// server is asked — `AppEnvironment.knowsYou`.
 
 struct DiscoverView: View {
     @EnvironmentObject var env: AppEnvironment
-    /// Every shelf row draws the verdict, and `rated` decides which list this screen is,
-    /// so this one is observed rather than read through `env`.
+    /// Every shelf row draws this install's own verdict, and a verdict given two screens away
+    /// has to reach the row behind it, so this one is observed rather than read through `env`.
     @EnvironmentObject var reactions: ReactionLog
     @State private var picks: [Recommendation] = []
     @State private var aisles: [FamilyGroup] = []
@@ -45,6 +50,11 @@ struct DiscoverView: View {
                 // It can also light up a whole shelf -- rate one gin and Gin stops being dark.
                 .onChange(of: env.ratingsVersion) { _, _ in Task { await load() } }
                 .onChange(of: crossStyle) { _, _ in Task { await load() } }
+                // The profile answer arrives from its own request on launch, which races this
+                // screen's first load: without this the flat list wins the race and stays,
+                // because nothing asks again. Also how the screen reorganises itself the
+                // moment the quiz is answered, with the cover still sliding away.
+                .onChange(of: env.knowsYou) { _, _ in Task { await load() } }
                 .sheet(item: $detail) { ProductDetailView(candidate: $0) }
         }
     }
@@ -63,10 +73,10 @@ struct DiscoverView: View {
                 Button("Try again") { Task { await load() } }
             }
         case .ready:
-            // Before anything is rated there is one list, because there is one profile behind
-            // every shelf and it is the seed's. Splitting it into twenty-two would be twenty-two
-            // ways of saying the same thing about a drinker nobody knows yet.
-            if rated == 0 { startingList } else { shelfList }
+            // Before the server knows anyone there is one list, because there is one profile
+            // behind every shelf and it is the seed's. Splitting it into twenty-two would be
+            // twenty-two ways of saying the same thing about a drinker nobody knows yet.
+            if env.knowsYou { shelfList } else { startingList }
         }
     }
 
@@ -170,12 +180,16 @@ struct DiscoverView: View {
             })
     }
 
+    /// How many drinks this install has rated. Reported, not branched on: what decides which
+    /// list this screen is, is whether the SERVER holds a centroid (`env.knowsYou`), and since
+    /// the quiz those stopped being the same question.
     private var rated: Int { reactions.count }
 
     private func load() async {
         if state != .ready { state = .loading }
+        let knows = env.knowsYou
         do {
-            if rated == 0 {
+            if !knows {
                 picks = try await env.api.recommend(limit: 15)
                 aisles = []
             } else {
@@ -194,11 +208,11 @@ struct DiscoverView: View {
             state = .ready
             _ = await env.telemetry.log(
                 TelemetryEvent.recommendationsShown.rawValue, tier: .analytics,
-                ["n_results": .int(rated == 0 ? picks.count
+                ["n_results": .int(!knows ? picks.count
                                    : aisles.flatMap(\.families)
                                        .reduce(0) { $0 + $1.results.count }),
                  "n_rated": .int(rated),
-                 "top_evidence": .string(rated == 0
+                 "top_evidence": .string(!knows
                                          ? (picks.first?.evidence.rawValue ?? "guessed")
                                          : (aisles.first?.families.first?.results.first?
                                             .evidence.rawValue ?? "guessed"))])

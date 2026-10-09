@@ -65,9 +65,22 @@ from .auth import (
     verify_id_token,
 )
 from .index import IndexedStore, LabelIndex
-from .recommend import rank_catalog, rank_family, shelf_vector, similar_profile
+from .recommend import (
+    EVIDENCE,
+    evidence_tier,
+    rank_catalog,
+    rank_family,
+    shelf_vector,
+    similar_profile,
+)
 from .resolver import Resolver
-from .taste import TASTE_EVENTS, load_profile, rated_products, rebuild_profile
+from .taste import (
+    TASTE_EVENTS,
+    load_profile,
+    quiz_from_events,
+    rated_products,
+    rebuild_profile,
+)
 from .telemetry_ingest import TelemetryCollector
 from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 
@@ -455,7 +468,7 @@ def recommend_families(who: Caller, limit: int = 6,
     profile = _profile_for(user_id)
     events = list(collector.iter_events(TASTE_EVENTS))
     judged = rated_products(store, events, user_id)
-    mine = _families_rated_in(store, judged)
+    mine = _families_spoken_for(store, judged, quiz_from_events(events, user_id))
 
     order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
     # Ordered rated-in shelves first WITHIN their aisle, below; the sort above only decides
@@ -511,12 +524,32 @@ def _shelf_styles(store: Store) -> dict[Family, list[str]]:
     return cached
 
 
-def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:
-    """The shelves this drinker has passed a verdict on. What separates a ranked family from a
-    dark one, so it is read from the verdicts themselves rather than from the profile: the
+def _families_spoken_for(store: Store, judged: Collection[str],
+                         quiz: dict[str, float]) -> set[Family]:
+    """The shelves this drinker has said something about. What separates a ranked family from
+    a dark one, so it is read from the verdicts themselves rather than from the profile: the
     profile's style affinities are already averaged and would call a shelf theirs on the
-    strength of a style that merely resembles one they rated."""
+    strength of a style that merely resembles one they rated.
+
+    A quiz answer counts, because a quiz answer names a FAMILY -- that is the whole of its
+    design -- and Discover is the one screen organised by family. Answering "Stout: yes" and
+    then finding the Stout shelf dark, under a header calling the list a starting point, was
+    the quiz being heard by the ranker and by nothing else (2026-10-08).
+
+    Only a yes. A "not for me" moves the centroid away, which is worth having, but it is not a
+    reason to rank that shelf FOR them: asking which gin is least unlike the taste of someone
+    who just said they do not drink gin is a real cosine and not a real recommendation, which
+    is the same rule `shelf_vector` applies to a shelf nobody has rated on.
+    """
     out: set[Family] = set()
+    for answered, weight in quiz.items():
+        if weight > 0:
+            try:
+                out.add(Family(answered))
+            except ValueError:
+                # The quiz served a family this build does not know. Skip it rather than
+                # failing the whole shelf list over a question that is new on the server.
+                continue
     for pid in judged:
         rec = get_product(store, pid)
         if not rec:
@@ -542,6 +575,48 @@ def similar(product_id: str, limit: int = 6) -> dict:
         raise HTTPException(status_code=404, detail="no such product")
     return {"product_id": rec.get("id", product_id),
             **similar_profile(store, Product.model_validate(rec), limit=limit)}
+
+
+@app.get("/v1/product/{product_id}/score")
+def product_score(product_id: str, who: Caller) -> dict:
+    """How likely this drinker is to like this one drink.
+
+    The same arithmetic `/v1/recommend` runs, asked of one row instead of the catalog, because
+    the detail screen is reachable by four doors and only one of them is the recommender. A
+    drink found by name, picked out of a scan's "is it this one?" list, or opened from another
+    drink's Similar profile arrived carrying no score at all, so the screen's seal read "not
+    scored for you yet" about a beer the server would have called a 91% match. Nothing was
+    wrong with the score; nothing had asked for it.
+
+    Answered from the drinker's OWN profile, never the seed. `_profile_for` falls back to a
+    demo centroid so a fresh install's lists do not look dead, which is the right trade for a
+    list of suggestions and the wrong one for a number stamped on a label: "matches your citrus
+    preference" has to be about this reader or it should not be on the screen. With no profile
+    of their own the answer is `scored: false`, and the seal says so.
+
+    A score is also only a score when it is a real cosine. With no vector on the product,
+    `Resolver.score` falls through to the style-affinity prior, which is a flat 0.5 for any
+    style the drinker has never rated inside -- a number that looks like a prediction and is
+    the absence of one.
+    """
+    store: Store = _state["store"]
+    rec = get_product(store, product_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="no such product")
+    product = Product.model_validate(rec)
+    pid = rec.get("id", product_id)
+
+    profile = load_profile(store, who.id)
+    if profile is None or profile.sensory_ideal is None:
+        return {"product_id": pid, "scored": False, "basis": "no_profile"}
+    if product.sensory is None:
+        return {"product_id": pid, "scored": False, "basis": "no_vector"}
+
+    resolver: Resolver = _state["resolver"]
+    score, reason, cold = resolver.score(product, profile)
+    return {"product_id": pid, "scored": True, "personal_score": score, "reason": reason,
+            "cold_start": cold, "evidence": EVIDENCE[evidence_tier(product.sensory)],
+            "basis": "yours"}
 
 
 @app.post("/v1/feedback", response_model=FeedbackResponse)

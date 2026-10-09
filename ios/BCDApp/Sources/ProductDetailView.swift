@@ -28,6 +28,10 @@ struct ProductDetailView: View {
     /// rather than flashing an empty card on every open.
     @State private var similar: [SimilarProduct]?
     @State private var openingSimilar: String?
+    /// The server's answer to "would this reader like it", for a drink that arrived without
+    /// one. Nil until it answers, so the seal holds its unscored state rather than flashing a
+    /// number in.
+    @State private var fetchedScore: PersonalScore?
     /// A neighbour opened from this screen. Presented rather than pushed: this view owns a
     /// `NavigationStack`, and nesting one inside another costs the back button.
     @State private var drilldown: ScoredCandidate?
@@ -39,6 +43,21 @@ struct ProductDetailView: View {
     /// copied into `@State` when the sheet closes: the Seal and the verdict line both change
     /// the moment one is given or taken back, and the log is the thing that knows.
     private var myReaction: Reaction? { reactions.reaction(for: product.id) }
+
+    // What the screen predicts, whoever worked it out. A recommendation arrives already
+    // scored; a drink found by name, picked out of the scan's "is it this one?" list, or
+    // opened from another drink's Similar profile arrives with nothing, and three of the four
+    // doors onto this screen are those. The seal said "not scored for you yet" about beers the
+    // server would have called a 91% match — nothing was wrong with the score, nothing had
+    // asked for it (2026-10-08).
+
+    private var personalScore: Double? {
+        candidate.personalScore ?? fetchedScore?.personalScore
+    }
+
+    private var reason: String? { candidate.reason ?? fetchedScore?.reason }
+
+    private var coldStart: Bool { candidate.coldStart || (fetchedScore?.coldStart ?? false) }
 
     private var producerName: String { DisplayName.producer(producer.name) }
     private var productName: String {
@@ -67,6 +86,12 @@ struct ProductDetailView: View {
             }
             .task(id: product.id) {
                 similar = (try? await env.api.similar(to: product.id, limit: 6))?.results ?? []
+            }
+            // Only when the drink arrived without one: a recommendation already carries the
+            // answer, and asking again would be the same cosine computed twice.
+            .task(id: product.id) {
+                guard candidate.personalScore == nil else { return }
+                fetchedScore = try? await env.api.productScore(for: product.id)
             }
             .sheet(item: $drilldown) { ProductDetailView(candidate: $0) }
             .task {
@@ -118,7 +143,7 @@ struct ProductDetailView: View {
                     Button { rating = true } label: { Seal(rated: mine) }
                         .buttonStyle(.plain)
                         .accessibilityHint("Change your rating")
-                } else if let score = candidate.personalScore {
+                } else if let score = personalScore {
                     Seal(score: score)
                 } else {
                     Seal()
@@ -194,14 +219,14 @@ struct ProductDetailView: View {
     @ViewBuilder private var verdict: some View {
         if myReaction != nil {
             EmptyView()
-        } else if candidate.personalScore != nil {
+        } else if personalScore != nil {
             VStack(alignment: .leading, spacing: 6) {
-                if let reason = candidate.reason {
+                if let reason {
                     Text(reason.prefix(1).uppercased() + reason.dropFirst())
                         .font(.subheadline)
                         .foregroundStyle(Brand.text)
                 }
-                if candidate.coldStart {
+                if coldStart {
                     Text("Scored from its recipe and style — no personal reviews.")
                         .font(.caption)
                         .foregroundStyle(Brand.textMuted)
