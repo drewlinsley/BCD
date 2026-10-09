@@ -81,7 +81,7 @@ from .taste import (
     quiz_from_events,
     rated_products,
     rebuild_profile,
-    scans_from_events,
+    sightings_from_events,
 )
 from .telemetry_ingest import TelemetryCollector
 from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
@@ -371,9 +371,13 @@ def recommend(who: Caller, limit: int = 10) -> dict:
     user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
+    events = list(collector.iter_events(TASTE_EVENTS))
     results = rank_catalog(store, _state["resolver"], _profile_for(user_id), limit=limit,
-                           exclude=rated_products(store, collector.iter_events(TASTE_EVENTS),
-                                                  user_id))
+                           exclude=rated_products(store, events, user_id),
+                           # What they have scanned is what is on the shelf in front of them,
+                           # so it leads: a suggestion they cannot buy today is worth less
+                           # than one they can, however good the cosine.
+                           sightings=sightings_from_events(events, user_id))
     return {"user_id": user_id, "results": results}
 
 
@@ -470,8 +474,9 @@ def recommend_families(who: Caller, limit: int = 6,
     profile = _profile_for(user_id)
     events = list(collector.iter_events(TASTE_EVENTS))
     judged = rated_products(store, events, user_id)
+    sightings = sightings_from_events(events, user_id)
     mine = _families_spoken_for(store, judged, quiz_from_events(events, user_id),
-                                scanned=scans_from_events(events, user_id))
+                                scanned=sightings)
 
     order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
     # Ordered rated-in shelves first WITHIN their aisle, below; the sort above only decides
@@ -487,7 +492,7 @@ def recommend_families(who: Caller, limit: int = 6,
     for family, vec, rows in zip(order, vectors, fetched, strict=True):
         shelf = rank_family(store, _state["resolver"], profile, rows,
                             personal=vec is not None, rated_in=family in mine,
-                            limit=limit, exclude=judged)
+                            limit=limit, exclude=judged, sightings=sightings)
         # A shelf with nothing on it is not a shelf. Cider is in the table for completeness
         # and the catalog files all 333 of its rows with a null style.
         if shelf["results"]:

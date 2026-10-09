@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import tempfile
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from bcd_api.resolver import Resolver
@@ -15,6 +16,7 @@ from bcd_api.taste import (
     rebuild_profile,
     save_profile,
     scans_from_events,
+    sightings_from_events,
     signals_from_events,
 )
 from bcd_ingest.merge import put_redirect
@@ -431,8 +433,12 @@ def test_one_installs_withdrawal_cannot_clear_anothers_verdict():
 # skipped the quiz and has rated nothing (2026-10-08).
 
 
-def _scan(pid, install="demo", tier="personalization"):
-    return _ev(name="scan_resolved", install=install, tier=tier, product_id=pid)
+_T0 = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
+
+
+def _scan(pid, install="demo", tier="personalization", at=_T0):
+    return _ev(name="scan_resolved", install=install, tier=tier, product_id=pid,
+               ts=at.isoformat())
 
 
 def test_a_scanned_product_is_a_small_positive():
@@ -442,10 +448,40 @@ def test_a_scanned_product_is_a_small_positive():
     assert all(w > 0 for w in weights.values())
 
 
-def test_a_product_seen_twenty_times_counts_once():
-    """The HUD redraws every 350ms and a can sits in the viewfinder for seconds. Keyed by
-    product, so a long look is not twenty opinions."""
-    assert scans_from_events([_scan("p:ipa")] * 20, "demo") == {"p:ipa": pytest.approx(0.15)}
+def test_one_long_look_is_one_look_however_many_frames_it_took():
+    """The HUD redraws every 350ms and a can sits in the viewfinder for seconds. Twenty
+    events a minute apart are one bottle being read, not twenty opinions."""
+    events = [_scan("p:ipa", at=_T0 + timedelta(minutes=i)) for i in range(20)]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 1}
+    assert scans_from_events(events, "demo") == {"p:ipa": pytest.approx(0.15)}
+
+
+def test_going_back_to_a_bottle_on_another_trip_counts_again():
+    """The strongest thing a camera can say. Picking the same bottle up on three separate
+    occasions is the drink they cannot decide about, and collapsing that to one look threw
+    the signal away (user, 2026-10-08)."""
+    events = [_scan("p:ipa", at=_T0),
+              _scan("p:ipa", at=_T0 + timedelta(days=1)),
+              _scan("p:ipa", at=_T0 + timedelta(days=9))]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 3}
+    assert scans_from_events(events, "demo") == {"p:ipa": pytest.approx(0.45)}
+
+
+def test_a_tab_switch_is_not_another_trip():
+    """The client reports a product once per scan RUN, and a run restarts whenever the Scan
+    tab is re-entered. Leaving for Discover and coming back with the can still in frame must
+    not read as going back to the shop, so the gap is judged here from the timestamps."""
+    events = [_scan("p:ipa", at=_T0), _scan("p:ipa", at=_T0 + timedelta(seconds=20))]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 1}
+
+
+def test_going_back_forever_never_outweighs_having_drunk_it():
+    """Capped below a rating. However many times they pick it up, they still have not
+    tasted it."""
+    events = [_scan("p:ipa", at=_T0 + timedelta(days=i)) for i in range(40)]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 40}
+    assert scans_from_events(events, "demo")["p:ipa"] == pytest.approx(0.6)
+    assert scans_from_events(events, "demo")["p:ipa"] < 1.0
 
 
 def test_a_scan_is_worth_far_less_than_a_rating_or_a_quiz_answer():

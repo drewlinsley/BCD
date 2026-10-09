@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bcd_ingest.merge import get_product, resolve_id
@@ -60,10 +60,22 @@ _LIST_WEIGHTS = {"cellar": 0.6, "had_it": 0.5, "wishlist": 0.3, "want_to_try": 0
 #: sends no event at all.
 _SCAN_EVENT = "scan_resolved"
 
-#: What one scanned product is worth against a rating's 1.0 and a quiz answer's 0.5. Low on
+#: What one look at a product is worth against a rating's 1.0 and a quiz answer's 0.5. Low on
 #: purpose: scanning is how you ask what something IS, so plenty of scans are of drinks the
-#: drinker will put straight back. Four of them are about one quiz answer.
+#: drinker will put straight back.
 _SCAN_WEIGHT = 0.15
+
+#: And what a drink they keep going back to is worth. Picking the same bottle up on three
+#: separate trips is a stronger question than picking it up once -- it is the drink they
+#: cannot decide about. Capped below a rating's 1.0, because they still have not drunk it.
+_SCAN_MAX = 0.6
+
+#: Two sightings of one product closer together than this are one look. The HUD redraws every
+#: 350ms, and the client already reports a product once per scan run -- but a run restarts
+#: whenever the Scan tab is re-entered, so a tab switch with the can still in frame would
+#: otherwise read as a second trip to the shop. Judged on the server from the timestamps,
+#: where no client lifecycle can inflate it.
+_SCAN_SAME_LOOK = timedelta(minutes=30)
 
 #: The only events a profile is ever built from — used to filter the log on replay. The
 #: withdrawal belongs here or replay would drop it and the rating it retracts would return.
@@ -156,30 +168,69 @@ def quiz_from_events(
     return {f: w for f, w in out.items() if w}
 
 
-def scans_from_events(
+def sightings_from_events(
     events: Iterable[dict[str, Any]], install_id: str
-) -> dict[str, float]:
-    """Products this person pointed a camera at, each at the same small positive weight.
+) -> dict[str, int]:
+    """How many separate times this person looked at each product.
 
-    Read exactly as ratings and quiz answers are: consent-gated, this install only. Keyed by
-    product so a product seen twenty times counts once — the HUD redraws every 350ms and the
-    client already reports a product once per run, but the log spans months and a can looked
-    at on two separate trips must not outvote a rating.
+    Separate is the whole difficulty. The HUD redraws every 350ms and a can sits in the
+    viewfinder for seconds, so raw events are not occasions; but a bottle picked up again on
+    another trip IS a second occasion, and collapsing those to one throws away the strongest
+    thing a camera can tell us — this is the drink they cannot decide about.
 
-    Weight is flat rather than a function of how long it was on screen. Dwell is a measure of
-    how hard the label was to read as much as of interest, and the honest unit here is "this
-    was considered", which has no degrees.
+    So two sightings of one product within `_SCAN_SAME_LOOK` are one look. Judged here from
+    the timestamps rather than trusted from the client, whose per-run dedupe resets whenever
+    the Scan tab is re-entered: a tab switch with the can still in frame is not a second trip.
+
+    An event with no usable timestamp counts as its own look rather than being dropped. The
+    alternative is losing a real sighting to a clock problem, and the cap bounds the damage.
+
+    Read exactly as ratings and quiz answers are: consent-gated, this install only.
     """
-    out: dict[str, float] = {}
+    last: dict[str, datetime] = {}
+    out: dict[str, int] = {}
     for ev in events:
         if ev.get("name") != _SCAN_EVENT or ev.get("install_id") != install_id:
             continue
         if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
             continue
         pid = ev.get("product_id")
-        if pid:
-            out[pid] = _SCAN_WEIGHT
+        if not pid:
+            continue
+        when = _parsed_ts(ev.get("ts"))
+        seen_at = last.get(pid)
+        if when is None or seen_at is None or (when - seen_at) >= _SCAN_SAME_LOOK:
+            out[pid] = out.get(pid, 0) + 1
+        if when is not None:
+            # The latest moment of the look, so a long browse does not become two.
+            last[pid] = when
     return out
+
+
+def _parsed_ts(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def scans_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, float]:
+    """Products this person pointed a camera at, weighted by how often they went back.
+
+    One look is `_SCAN_WEIGHT`; each further look adds another, to `_SCAN_MAX`. Linear and
+    capped rather than flat, because going back to a bottle three times is a stronger question
+    than glancing at it once — and capped below a rating, because they still have not drunk it.
+
+    Not weighted by how LONG it was on screen. Dwell measures how hard the label was to read
+    as much as it measures interest; going back to it on another day does not.
+    """
+    return {pid: min(_SCAN_WEIGHT * n, _SCAN_MAX)
+            for pid, n in sightings_from_events(events, install_id).items()}
 
 
 def rated_products(
