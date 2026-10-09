@@ -56,8 +56,11 @@ struct RootView: View {
             // Answered or skipped, ask the server again before the app appears behind it:
             // eight answers are a profile, and the screens underneath decide what to call
             // their lists by whether one exists.
+            // `consent` as well as `env`: answering the quiz is what grants personalization,
+            // so the screen needs the real store and not a fresh one.
             QuizView { quizAsked = true; Task { await env.refreshProfile() } }
                 .environmentObject(env)
+                .environmentObject(env.consent)
         }
     }
 }

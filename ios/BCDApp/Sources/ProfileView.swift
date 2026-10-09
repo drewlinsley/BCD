@@ -27,6 +27,9 @@ struct ProfileView: View {
     @EnvironmentObject var consent: ConsentStore
     /// The provenance line counts them, so it has to be told when the count changes.
     @EnvironmentObject var reactions: ReactionLog
+    /// Whether the quiz was answered on this install — the other thing the card is built
+    /// from, and one the profile itself does not record.
+    @AppStorage("bcd.quizAnswered") private var quizAnswered = false
     /// nil until the fetch settles. `loadFailed` is separate on purpose: a profile that came
     /// back empty and a profile that never arrived look identical if you only track one.
     @State private var profile: TasteProfile?
@@ -201,11 +204,22 @@ struct ProfileView: View {
 
     /// Where this came from, in one line. The rating count is the local one: it is what the
     /// drinker did, and it says whether a confident-sounding memo rests on three verdicts.
+    ///
+    /// The quiz is named alongside it, because it is the other thing that builds this card and
+    /// counting only ratings misdescribed it: answer eight questions, rate nothing, and the
+    /// line read "Built from your 0 ratings" under a page of real leanings (2026-10-08). The
+    /// third screen to make the same mistake — a quiz answer is a family, so it writes no
+    /// rating, and anything that measures the drinker by `ReactionLog.count` cannot see it.
     private func provenance(_ p: TasteProfile) -> String {
         let n = reactions.count
-        let ratings = n == 1 ? "1 rating" : "\(n) ratings"
-        guard let when = Self.updated(p.updatedAt) else { return "Built from your \(ratings)." }
-        return "Built from your \(ratings) · updated \(when)."
+        let sources = [quizAnswered ? "your quiz answers" : nil,
+                       n > 0 ? (n == 1 ? "1 rating" : "\(n) ratings") : nil].compactMap { $0 }
+        // Neither, and yet a card: not reachable today, but a profile is the server's and this
+        // count is the phone's, so they can disagree after a reinstall.
+        let built = sources.isEmpty ? "Built from your taste so far"
+                                    : "Built from " + sources.joined(separator: " and ")
+        guard let when = Self.updated(p.updatedAt) else { return built + "." }
+        return "\(built) · updated \(when)."
     }
 
     private static func updated(_ iso: String?) -> String? {
