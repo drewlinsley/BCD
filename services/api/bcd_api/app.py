@@ -12,6 +12,7 @@ import json
 import os
 import time
 import uuid
+from collections import Counter
 from collections.abc import Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -80,6 +81,7 @@ from .taste import (
     quiz_from_events,
     rated_products,
     rebuild_profile,
+    scans_from_events,
 )
 from .telemetry_ingest import TelemetryCollector
 from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
@@ -468,7 +470,8 @@ def recommend_families(who: Caller, limit: int = 6,
     profile = _profile_for(user_id)
     events = list(collector.iter_events(TASTE_EVENTS))
     judged = rated_products(store, events, user_id)
-    mine = _families_spoken_for(store, judged, quiz_from_events(events, user_id))
+    mine = _families_spoken_for(store, judged, quiz_from_events(events, user_id),
+                                scanned=scans_from_events(events, user_id))
 
     order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
     # Ordered rated-in shelves first WITHIN their aisle, below; the sort above only decides
@@ -524,8 +527,15 @@ def _shelf_styles(store: Store) -> dict[Family, list[str]]:
     return cached
 
 
+#: How many different drinks someone has to have scanned on a shelf before it is ranked for
+#: them. One is a glance -- you pick a bottle up to find out what it is. Two is a pattern, and
+#: the aisle you are standing in.
+_SCANS_FOR_A_SHELF = 2
+
+
 def _families_spoken_for(store: Store, judged: Collection[str],
-                         quiz: dict[str, float]) -> set[Family]:
+                         quiz: dict[str, float],
+                         scanned: Collection[str] = ()) -> set[Family]:
     """The shelves this drinker has said something about. What separates a ranked family from
     a dark one, so it is read from the verdicts themselves rather than from the profile: the
     profile's style affinities are already averaged and would call a shelf theirs on the
@@ -540,6 +550,11 @@ def _families_spoken_for(store: Store, judged: Collection[str],
     reason to rank that shelf FOR them: asking which gin is least unlike the taste of someone
     who just said they do not drink gin is a real cosine and not a real recommendation, which
     is the same rule `shelf_vector` applies to a shelf nobody has rated on.
+
+    Scanning counts too, at `_SCANS_FOR_A_SHELF` different drinks on the shelf. It is the only
+    one of the three that costs the drinker nothing and the only one that reaches someone who
+    skipped the quiz and has rated nothing: stand in the bourbon aisle reading labels and the
+    Bourbon shelf is the one worth ranking, whether or not they ever said so.
     """
     out: set[Family] = set()
     for answered, weight in quiz.items():
@@ -557,6 +572,19 @@ def _families_spoken_for(store: Store, judged: Collection[str],
         family = family_of((rec.get("style") or {}).get("value"))
         if family:
             out.add(family)
+
+    # Deduped here rather than trusted from the caller: the bar is how many DIFFERENT drinks
+    # were looked at, and a function that silently counts a repeated id twice would light a
+    # shelf off one can the moment someone passed a list instead of a mapping.
+    seen: Counter[Family] = Counter()
+    for pid in set(scanned):
+        rec = get_product(store, pid)
+        if not rec:
+            continue
+        family = family_of((rec.get("style") or {}).get("value"))
+        if family:
+            seen[family] += 1
+    out |= {f for f, n in seen.items() if n >= _SCANS_FOR_A_SHELF}
     return out
 
 

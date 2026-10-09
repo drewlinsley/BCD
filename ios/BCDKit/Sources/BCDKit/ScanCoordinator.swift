@@ -219,6 +219,14 @@ public final class ScanCoordinator: ObservableObject {
     /// outside it long enough -- the camera panned and the bottle is somewhere else -- moves
     /// the chip once, to where the anchor is now. See `HUDLayout.steadied` for the rule and
     /// the swim it replaced.
+    /// Products already reported as scanned this run. The HUD redraws at 350ms and a can
+    /// sits in the viewfinder for seconds, so the event has to be per PRODUCT, not per tick:
+    /// one Crusher looked at once is one scan, and the log already holds 85 frames of it
+    /// spanning eight days. Cleared when scanning restarts, so picking the same bottle up on
+    /// a later trip counts again — and the server keys on product id regardless, so a repeat
+    /// that slips through is still one scanned drink.
+    private var reportedScans: Set<String> = []
+
     private var pins: [String: HUDLayout.Pin] = [:]
     /// The clock the pins settle by; injectable so the rule is testable without waiting.
     var now: () -> Date = Date.init
@@ -297,6 +305,7 @@ public final class ScanCoordinator: ObservableObject {
     /// until a relaunch (2026-09-17). A scanning coordinator wakes the engine and keeps its
     /// stream; a stopped one starts over.
     public func resume(intervalMs: UInt64 = 350, venueId: String? = nil) {
+        reportedScans = []
         guard isScanning else {
             startLive(intervalMs: intervalMs, venueId: venueId)
             return
@@ -695,7 +704,34 @@ public final class ScanCoordinator: ObservableObject {
         let live = Set(fresh.map(\.id))
         pins = pins.filter { live.contains($0.key) }     // a chip that left starts afresh
         overlays = HUDLayout.spread(fresh.map(steadied))
+        reportScans(fresh)
         updateUnknown()
+    }
+
+    /// Tell the profile what the drinker is looking at.
+    ///
+    /// What someone points a camera at is what they are considering — standing in front of
+    /// it, reading the label, deciding. That is weaker than a verdict and weaker than saying
+    /// what you reach for, and it is the only signal of the three that costs them nothing and
+    /// that reaches someone who skipped the quiz and has rated nothing. Scan IPAs and the
+    /// recommendations become IPAs.
+    ///
+    /// Reported from here because this is the one funnel where what the HUD DRAWS is decided.
+    /// A candidate the resolver returned but the HUD suppressed was never shown to anybody and
+    /// is not something the drinker looked at.
+    ///
+    /// Consent is the queue's job: `TelemetryQueue.log` drops a personalization event when the
+    /// tier is not allowed, so a drinker who has not agreed sends nothing from here.
+    private func reportScans(_ drawn: [ResolvedOverlay]) {
+        let fresh = drawn.map(\.candidate.resolved.product.id).filter { !$0.isEmpty }
+            .filter { reportedScans.insert($0).inserted }
+        guard !fresh.isEmpty, let telemetry else { return }
+        Task {
+            for pid in fresh {
+                await telemetry.log("scan_resolved", tier: .personalization,
+                                    ["product_id": .string(pid), "source": .string("ocr_match")])
+            }
+        }
     }
 
     /// An object's chip perched above its box, off the label, tied to the box's top.

@@ -64,8 +64,13 @@ events:
       - {name: cold_start, type: bool}
       - {name: rank, type: int}
   - name: scan_resolved
-    tier: analytics
+    tier: personalization
     pii: none
+    desc: >
+      A product the HUD actually drew. Personalization, not analytics, because it feeds the
+      taste profile: what someone points a camera at is what they are considering, so
+      scanning IPAs is a reason to recommend IPAs. Emitted once per product per scan run,
+      never per 350ms tick.
     properties:
       - {name: product_id, type: string}
       - {name: source, type: enum, values: [barcode, ocr_match, cold_llm]}

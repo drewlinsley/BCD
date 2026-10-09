@@ -567,6 +567,21 @@ private final class CountingSink: APIClientProtocol, @unchecked Sendable {
     func sendTelemetry(_ batch: TelemetryBatch) async throws { batches += 1 }
 }
 
+/// Remembers the event names that went out, so a test can count one kind. `pendingCount`
+/// cannot: the scan path also logs `scan_frame_batch` at the same tier, so a bare count
+/// answers a different question than the one being asked.
+private actor RecordingSink: APIClientProtocol {
+    private var names: [String] = []
+    nonisolated func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: nil)
+    }
+    nonisolated func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {
+        names.append(contentsOf: batch.events.map(\.name))
+    }
+    func count(of name: String) -> Int { names.filter { $0 == name }.count }
+}
+
 private final class StubAPI: APIClientProtocol, @unchecked Sendable {
     var resolveCallCount = 0
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
@@ -2540,5 +2555,58 @@ struct ReactionLogTests {
         let answer = QuizLean.sometimes.answer(for: "lager")
         #expect(answer.family == "lager")
         #expect(answer.weight == 0.5)
+    }
+}
+
+/// Listening to the HUD. What someone points a camera at is what they are considering, so
+/// scanning IPAs is a reason to recommend IPAs — and it is the only taste signal that costs
+/// the drinker nothing and reaches someone who skipped the quiz and has rated nothing.
+@Suite struct ScanIsATasteSignal {
+    @MainActor
+    @Test func aDrawnProductIsReportedOnce() async throws {
+        // The HUD redraws at 350ms and a can sits in the viewfinder for seconds. Reported per
+        // PRODUCT, not per tick, or one bottle looked at once would outvote a rating.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
+        ])
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: true),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        await coord.resolveLatest()
+        try await Task.sleep(nanoseconds: 60_000_000)
+        // Same can, more ticks. The drinker is still looking at one drink.
+        for _ in 0..<5 {
+            await coord.resolveLatest()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(coord.overlays.count == 1)
+        try await queue.flush()
+        #expect(await sink.count(of: "scan_resolved") == 1)
+    }
+
+    @MainActor
+    @Test func nothingIsReportedWithoutPersonalizationConsent() async throws {
+        // The queue drops the tier, so a drinker who has not agreed sends nothing from the
+        // viewfinder — the same gate the quiz and the rating picker sit behind.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
+        ])
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: false),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        try await Task.sleep(nanoseconds: 60_000_000)
+        try await queue.flush()
+
+        #expect(coord.overlays.count == 1, "the HUD still draws it")
+        #expect(await sink.count(of: "scan_resolved") == 0,
+                "but nothing is learned from it")
     }
 }

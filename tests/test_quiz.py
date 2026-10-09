@@ -351,3 +351,56 @@ def test_ratings_and_quiz_answers_both_count(store):
 
     mine = _families_spoken_for(store, judged=["beer:rated"], quiz={"stout": 1.0})
     assert mine == {Family.STOUT, Family.PORTER}
+
+
+# ---- and the shelves hear the camera too -----------------------------------------------
+
+# "If they're scanning bourbon, rec bourbon." The only one of the three signals that costs
+# the drinker nothing, and the only one that reaches someone who skipped the quiz and has
+# rated nothing (2026-10-08).
+
+
+def _beer(store, pid, style):
+    from bcd_schema import Category, ExtractionMethod, Product, Provenance, Sourced
+    prov = Provenance(source_id="t", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
+    store.put_gold(pid, "product", Product(
+        id=pid, brand_id="b", producer_id="p", category=Category.BEER, name=pid,
+        style=Sourced[str](value=style, provenance=prov)).model_dump(mode="json"))
+    return pid
+
+
+def test_two_scans_on_a_shelf_make_it_theirs(store):
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Imperial Stout")]
+    assert _families_spoken_for(store, (), {}, scanned=scanned) == {Family.STOUT}
+
+
+def test_one_scan_is_a_glance_not_a_shelf(store):
+    """You pick a bottle up to find out what it is. One is that; two is the aisle you are
+    standing in."""
+    from bcd_api.app import _families_spoken_for
+
+    assert _families_spoken_for(store, (), {}, scanned=[_beer(store, "b:1", "Stout")]) == set()
+
+
+def test_scanning_the_same_drink_twice_is_still_one_drink(store):
+    """`scans_from_events` keys on product, so the shelf bar counts different drinks rather
+    than how long one can sat in the viewfinder."""
+    from bcd_api.app import _families_spoken_for
+
+    one = _beer(store, "b:1", "Stout")
+    assert _families_spoken_for(store, (), {}, scanned=[one, one]) == set()
+
+
+def test_all_three_signals_light_shelves_together(store):
+    """A rating, a quiz answer and a camera are three ways of saying the same kind of thing,
+    and a shelf is theirs if any of them says it."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    rated = _beer(store, "b:rated", "Porter")
+    scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Stout")]
+    mine = _families_spoken_for(store, [rated], {"ipa": 1.0}, scanned=scanned)
+    assert mine == {Family.PORTER, Family.IPA, Family.STOUT}

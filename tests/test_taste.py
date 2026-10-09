@@ -14,6 +14,7 @@ from bcd_api.taste import (
     rated_products,
     rebuild_profile,
     save_profile,
+    scans_from_events,
     signals_from_events,
 )
 from bcd_ingest.merge import put_redirect
@@ -419,3 +420,75 @@ def test_one_installs_withdrawal_cannot_clear_anothers_verdict():
         _ev(name="rating_withdrawn", product_id="p:ipa", install="someone-else"),
     ]
     assert signals_from_events(events, "demo") == {"p:ipa": 1.0}
+
+
+
+# ---- scans ------------------------------------------------------------------------------
+
+# What someone points a camera at is what they are considering: standing in front of it,
+# reading the label, deciding. Weaker than a verdict and weaker than a stated preference, and
+# the only one of the three that costs the drinker nothing — so it is what reaches someone who
+# skipped the quiz and has rated nothing (2026-10-08).
+
+
+def _scan(pid, install="demo", tier="personalization"):
+    return _ev(name="scan_resolved", install=install, tier=tier, product_id=pid)
+
+
+def test_a_scanned_product_is_a_small_positive():
+    weights = scans_from_events([_scan("p:ipa")], "demo")
+    assert weights == {"p:ipa": pytest.approx(0.15)}
+    # Positive, always. You cannot read a dislike off a glance.
+    assert all(w > 0 for w in weights.values())
+
+
+def test_a_product_seen_twenty_times_counts_once():
+    """The HUD redraws every 350ms and a can sits in the viewfinder for seconds. Keyed by
+    product, so a long look is not twenty opinions."""
+    assert scans_from_events([_scan("p:ipa")] * 20, "demo") == {"p:ipa": pytest.approx(0.15)}
+
+
+def test_a_scan_is_worth_far_less_than_a_rating_or_a_quiz_answer():
+    """Scanning is how you ask what something IS, so plenty of scans are of drinks that go
+    straight back on the shelf. The ordering is the whole safety of the signal."""
+    scan = scans_from_events([_scan("p:ipa")], "demo")["p:ipa"]
+    chugged = signals_from_events([_ev(product_id="p:ipa", rating=5.0)], "demo")["p:ipa"]
+    assert scan < 0.5, "a scan must sit below a quiz answer's weight"
+    assert scan < abs(chugged)
+
+
+def test_scans_are_consent_gated_exactly_as_everything_else_is():
+    assert scans_from_events([_scan("p:ipa", tier="analytics")], "demo") == {}
+
+
+def test_another_installs_scans_are_not_yours():
+    assert scans_from_events([_scan("p:ipa", install="someone-else")], "demo") == {}
+
+
+def test_a_verdict_on_a_scanned_drink_replaces_the_glance_at_it(store):
+    """You scanned it, then you drank it and said what you thought. The rating is the better
+    evidence and must not be averaged with the look that preceded it."""
+    looked = rebuild_profile(store, [_scan("p:ipa")], "demo")
+    assert looked.sensory_ideal is not None
+    assert looked.sensory_ideal.axes.get("bitterness", 0) > 0
+
+    both = rebuild_profile(store, [_scan("p:ipa"),
+                                   _ev(product_id="p:ipa", rating=1.0)], "demo-2")
+    # A spat-out IPA is a dislike, not a dislike softened by the look that came before it.
+    assert both.sensory_ideal is None
+
+
+def test_scanning_never_bars_a_drink_from_being_recommended(store):
+    """The reason you scanned it is that you might buy it. `rated_products` keeps judged
+    drinks out of "For you"; a scanned one must stay in, or the signal would hide the very
+    thing it is evidence of."""
+    assert rated_products(store, [_scan("p:ipa")], "demo") == set()
+
+
+def test_scanning_alone_builds_a_profile_for_someone_who_said_nothing(store):
+    """The point of the whole signal. No quiz, no ratings — just a camera pointed at two
+    IPAs — and there is somewhere to recommend from."""
+    profile = rebuild_profile(store, [_scan("p:ipa"), _scan("p:ddh")], "demo")
+    assert profile.sensory_ideal is not None
+    axes = profile.sensory_ideal.axes
+    assert axes.get("citrus", 0) > axes.get("smoky_peat", 0), axes
