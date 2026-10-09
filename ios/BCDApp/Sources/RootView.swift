@@ -4,6 +4,12 @@ import BCDKit
 struct RootView: View {
     @EnvironmentObject var env: AppEnvironment
 
+    /// Whether the first-run quiz has been put to this install — answered OR skipped. Its own
+    /// flag rather than `reactions.count == 0`, because someone who answered and then removed
+    /// their only rating has already been asked, and being asked twice reads as the app
+    /// forgetting them. @AppStorage so it survives a relaunch, which is the point.
+    @AppStorage("bcd.quizAsked") private var quizAsked = false
+
     var body: some View {
         // Five, because iPhone shows five and hides the rest behind a "More" list. Alerts is
         // the one that gives: every alert in it is `SentinelAlert.demo` and both its buttons
@@ -33,5 +39,17 @@ struct RootView: View {
         }
         .tint(Brand.amber)
         .task { try? await env.telemetry.log("session_start", tier: .analytics) }
+        // The one screen that comes before the app. A drinker with no profile gets
+        // recommendations built from a seed that is somebody else's taste, and the list says
+        // "matches your tropical preference" to someone who has never said anything.
+        //
+        // A sheet, not a gate: it carries its own Skip, and dismissing it for any reason
+        // marks it asked. A first run nobody can get past would be a worse failure than a
+        // cold start, and rating anything builds the same profile by the same path.
+        .fullScreenCover(isPresented: .init(get: { !quizAsked },
+                                            set: { if !$0 { quizAsked = true } })) {
+            QuizView { quizAsked = true }
+                .environmentObject(env)
+        }
     }
 }

@@ -77,6 +77,41 @@ public struct FeedbackRequest: Codable, Sendable {
     }
 }
 
+/// One question of the first-run quiz, as the server defines it.
+///
+/// The app is told what to ask and what to call it and never sees a flavour vector: which
+/// eight drinks these are, and what each one means in the sensory space, is the server's
+/// business and can change without an app release.
+public struct QuizDrink: Decodable, Sendable, Equatable, Identifiable {
+    public let family: String
+    public let prompt: String
+    public let category: Category
+
+    public var id: String { family }
+
+    public init(family: String, prompt: String, category: Category) {
+        self.family = family
+        self.prompt = prompt
+        self.category = category
+    }
+}
+
+struct QuizDrinks: Decodable { let drinks: [QuizDrink] }
+
+/// One answer. `weight` is signed like a rating's and the server scales it down — saying what
+/// you reach for is weaker evidence than saying what you thought of something you drank.
+public struct QuizAnswer: Encodable, Sendable, Equatable {
+    public let family: String
+    public let weight: Double
+
+    public init(family: String, weight: Double) {
+        self.family = family
+        self.weight = weight
+    }
+}
+
+struct QuizSubmission: Encodable { let answers: [QuizAnswer] }
+
 /// What `POST /v1/feedback/withdraw` takes — the id of the verdict being taken back.
 ///
 /// Its own type rather than a `FeedbackRequest` with a nil rating: a withdrawal is not a

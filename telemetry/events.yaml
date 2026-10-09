@@ -121,6 +121,14 @@ events:
     pii: none
     properties:
       - {name: product_id, type: string}
+  # The first-run quiz. Names a drink FAMILY and never a product, so answering it cannot
+  # bar a drink from the recommendations the quiz exists to make possible.
+  - name: taste_quiz_answered
+    tier: personalization
+    pii: none
+    properties:
+      - {name: family, type: string}
+      - {name: weight, type: float}
   - name: list_add
     tier: personalization
     pii: none

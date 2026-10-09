@@ -31,6 +31,7 @@ from bcd_schema import (
     SensoryVector,
     TasteProfile,
 )
+from bcd_schema.quiz import QUIZ_DRINKS
 
 # Events that carry taste signal. A rating is the explicit ask; a list add is weaker and
 # directional (saving something is interest, not a verdict). `scan_corrected_by_user` is
@@ -41,12 +42,17 @@ _RATING_EVENT = "rating_submitted"
 #: the log and stops counting. That is what lets it travel the client's batch upload exactly
 #: as a rating does, instead of needing a second, deleting path through the telemetry store.
 _WITHDRAWN_EVENT = "rating_withdrawn"
+#: The first-run quiz. Not a rating: nobody said they drank the thing, they said what they
+#: reach for. It seeds the same centroid because a stated preference and a verdict are both
+#: evidence about the same taste -- but it names a FAMILY, never a product, so it cannot put
+#: a drink in `rated_products` and quietly bar it from the recommendations it exists to make.
+_QUIZ_EVENT = "taste_quiz_answered"
 _LIST_EVENT = "list_add"
 _LIST_WEIGHTS = {"cellar": 0.6, "had_it": 0.5, "wishlist": 0.3, "want_to_try": 0.3}
 
 #: The only events a profile is ever built from — used to filter the log on replay. The
 #: withdrawal belongs here or replay would drop it and the rating it retracts would return.
-TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _LIST_EVENT})
+TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _QUIZ_EVENT, _LIST_EVENT})
 
 # Consent tiers under which a profile may be built at all (see telemetry/events.yaml).
 _PERSONALIZATION_CONSENT = frozenset({"personalization", "data_sharing"})
@@ -111,6 +117,29 @@ def signals_from_events(
     return {pid: w for pid, w in signals.items() if w}
 
 
+def quiz_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, float]:
+    """The first-run quiz's answers, one signed weight per drink family.
+
+    Read exactly as ratings are: consent-gated, this install only, and a later answer
+    supersedes an earlier one, because retaking the quiz is a correction and not a second
+    vote. An answer of 0 is "no opinion" and is dropped rather than stored as a neutral,
+    so skipping a question says nothing instead of saying the middle.
+    """
+    out: dict[str, float] = {}
+    for ev in events:
+        if ev.get("name") != _QUIZ_EVENT or ev.get("install_id") != install_id:
+            continue
+        if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
+            continue
+        family = ev.get("family")
+        weight = ev.get("weight")
+        if family in QUIZ_DRINKS and isinstance(weight, (int, float)):
+            out[family] = max(-1.0, min(1.0, float(weight)))
+    return {f: w for f, w in out.items() if w}
+
+
 def rated_products(
     store: Any, events: Iterable[dict[str, Any]], install_id: str
 ) -> set[str]:
@@ -154,11 +183,22 @@ def build_profile(
     signals: dict[str, float],
     store: Any,
     previous: TasteProfile | None = None,
+    quiz: dict[str, float] | None = None,
 ) -> TasteProfile:
     """Assemble a TasteProfile from signed per-product signals.
 
     Products the store doesn't know, or that carry no sensory vector, contribute nothing
     to the centroid but can still inform style affinity — a rating is never silently lost.
+
+    `quiz` is the first-run answers, keyed by drink family. They enter the same buckets as
+    a rating and nothing downstream knows the difference, which is the point: a drinker who
+    has rated nothing has no centroid, and with no centroid `score` falls back to a style
+    prior and `/v1/recommend` answers from a seed profile that is somebody else's taste.
+    The quiz is what makes the first recommendation theirs.
+
+    They are deliberately NOT products. A quiz answer carries the family's STYLE_PRIOR
+    vector — the same vector the catalog's own style-filed rows carry — so it lands in the
+    space the drinker's later ratings will, without claiming they drank anything.
     """
     liked: list[tuple[float, list[float]]] = []
     disliked: list[tuple[float, list[float]]] = []
@@ -184,6 +224,20 @@ def build_profile(
                 liked_styles.append(style)
         if weight > 0 and product.spec and product.spec.abv_pct:
             liked_abvs.append(float(product.spec.abv_pct.value))
+
+    # Answers to the quiz, if it was taken. Weighted by the caller, which is where the rule
+    # that a stated preference counts for less than a verdict lives.
+    for family, weight in (quiz or {}).items():
+        drink = QUIZ_DRINKS.get(family)
+        if drink is None:
+            continue
+        prompt, _category, confidence, axes = drink
+        vector = SensoryVector(source=SensorySource.STYLE_PRIOR,
+                               confidence=confidence, axes=axes).to_array()
+        (liked if weight > 0 else disliked).append((abs(weight), vector))
+        style_weights[prompt].append(weight)
+        if weight > 0:
+            liked_styles.append(prompt)
 
     ideal = _centroid(liked, disliked)
     n = len(liked) + len(disliked)
@@ -363,7 +417,11 @@ def rebuild_profile(
     nudging the stored vector) keeps the profile a pure function of consented events —
     so a withdrawn consent or a deleted event actually disappears from the result."""
     previous = load_profile(store, install_id)
-    signals = signals_from_events(_canonical(store, events), install_id)
-    profile = build_profile(install_id, signals, store, previous=previous)
+    # One pass of the log, read twice: `_canonical` resolves merge tombstones and is not
+    # free, and the quiz carries no product id to resolve.
+    canonical = list(_canonical(store, events))
+    signals = signals_from_events(canonical, install_id)
+    quiz = quiz_from_events(canonical, install_id)
+    profile = build_profile(install_id, signals, store, previous=previous, quiz=quiz)
     save_profile(store, profile)
     return profile
