@@ -2499,3 +2499,46 @@ struct ReactionLogTests {
         #expect(answer.productId == "ttb:1")
     }
 }
+
+/// The quiz's answer scale. Three rungs, and the middle one is a soft yes rather than the
+/// neutral the design deliberately leaves out.
+@Suite struct QuizLeanTests {
+    @Test func thereAreThreeRungsAndNoNeutral() {
+        #expect(QuizLean.allCases.count == 3)
+        // Zero is the absence of an opinion, and that is said by not answering — the server
+        // drops a zero rather than storing a middle.
+        #expect(!QuizLean.allCases.contains { $0.rawValue == 0 })
+    }
+
+    /// "Sometimes" is a yes with less conviction, at exactly half a yes — the same relation
+    /// the rating scale gives a soft positive against a strong one. If these two drift apart,
+    /// the quiz and the ratings stop meaning the same thing to the same centroid.
+    @Test func sometimesIsHalfAYesJustAsAPinkieIsHalfAChug() {
+        #expect(QuizLean.sometimes.rawValue == QuizLean.yes.rawValue / 2)
+        #expect(Reaction.pinkieOut.weight == Reaction.chuggedIt.weight / 2)
+        #expect(QuizLean.sometimes.rawValue / QuizLean.yes.rawValue
+                == Reaction.pinkieOut.weight / Reaction.chuggedIt.weight)
+    }
+
+    @Test func sometimesIsPositiveSoItSpeaksForItsShelf() {
+        // The server lights a shelf on a yes and leaves it dark on a no (`_families_spoken_for`
+        // tests `weight > 0`). Someone who sometimes drinks lager does drink lager.
+        #expect(QuizLean.sometimes.rawValue > 0)
+        #expect(QuizLean.no.rawValue < 0)
+    }
+
+    /// Short enough that three of them and a drink's name share a phone's width. "Not for me"
+    /// did not: at "Wheat beer" it wrapped to two lines and "Sometimes" hyphenated.
+    @Test func everyLabelIsShortEnoughToSitThreeAcross() {
+        for lean in QuizLean.allCases {
+            #expect(!lean.label.isEmpty)
+            #expect(lean.label.count <= 9, "\(lean.label) is too long for three across")
+        }
+    }
+
+    @Test func aRungBecomesTheAnswerTheServerIsSent() {
+        let answer = QuizLean.sometimes.answer(for: "lager")
+        #expect(answer.family == "lager")
+        #expect(answer.weight == 0.5)
+    }
+}

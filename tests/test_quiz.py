@@ -256,6 +256,41 @@ def test_a_stale_client_asking_about_a_dropped_drink_is_not_an_error(client, tok
     assert r.json()["sensory_ideal"] is not None
 
 
+# ---- "sometimes" ------------------------------------------------------------------------
+
+# A third rung, added 2026-10-08. Not the neutral the design leaves out: a neutral is the
+# absence of an opinion, and that is still said by not answering. Nobody answers "sometimes"
+# meaning never — it is a yes with less conviction, at half a yes, which is the same relation
+# `Reaction.weight` gives "pinkie out" against "chugged it".
+
+
+def test_sometimes_pulls_the_centroid_the_same_way_a_yes_does_only_less(store):
+    sometimes = build_profile("demo", {}, store, quiz={"ipa": 0.25})
+    yes = build_profile("demo", {}, store, quiz={"ipa": 0.5})
+
+    assert sometimes.sensory_ideal is not None and yes.sensory_ideal is not None
+    # Same direction...
+    assert sometimes.sensory_ideal.axes.get("bitterness", 0) > 0
+    # ...and the quiz's own weight is what separates them, so a stated habit never speaks
+    # louder than a stated preference.
+    assert (sometimes.sensory_ideal.axes.get("bitterness", 0)
+            <= yes.sensory_ideal.axes.get("bitterness", 0))
+
+
+def test_a_sometimes_is_kept_where_a_skipped_question_is_dropped():
+    """The two were the same thing while the quiz had two rungs. They are not now, and the
+    difference is the whole reason the rung exists."""
+    assert quiz_from_events([_ev("lager", 0.25)], "demo") == {"lager": 0.25}
+    assert quiz_from_events([_ev("lager", 0.0)], "demo") == {}
+
+
+def test_sometimes_everything_still_builds_a_centroid(store):
+    """A cautious drinker who answers "sometimes" to all eight has still said plenty. The
+    only answer set that builds nothing is one with no positive in it at all."""
+    every = dict.fromkeys(QUIZ_ORDER, 0.25)
+    assert build_profile("demo", {}, store, quiz=every).sensory_ideal is not None
+
+
 # ---- the shelves hear it ---------------------------------------------------------------
 
 # A quiz answer names a FAMILY — that is the whole of its design — and Discover is the one
@@ -270,6 +305,15 @@ def test_a_quiz_yes_speaks_for_that_shelf(store):
     mine = _families_spoken_for(store, judged=(),
                                 quiz={"stout": 1.0, "bourbon": 1.0, "ipa": 1.0})
     assert mine == {Family.STOUT, Family.BOURBON, Family.IPA}
+
+
+def test_a_sometimes_speaks_for_its_shelf_too(store):
+    """Someone who sometimes drinks lager does drink lager, and a shelf they drink from is
+    one worth ranking for them. The bar is a positive answer, not a loud one."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    assert _families_spoken_for(store, judged=(), quiz={"lager": 0.25}) == {Family.LAGER}
 
 
 def test_a_quiz_no_does_not(store):

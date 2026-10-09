@@ -27,15 +27,12 @@ struct QuizView: View {
     @State private var sending = false
     @State private var failed = false
 
-    /// Three rungs, not five. The rating scale is a verdict on a drink you had; this is the
-    /// much coarser question of what you reach for, and offering five would invite a
-    /// precision nobody has about a whole category. The middle is absent on purpose —
-    /// skipping is how you say nothing, and the server stores no neutral for it.
-    private enum Lean: Double, CaseIterable {
-        case no = -1, yes = 1
-        var label: String { self == .yes ? "Yes" : "Not for me" }
-        var tint: Color { self == .yes ? Brand.amber : Brand.textMuted }
-    }
+    /// The answer scale lives in BCDKit (`QuizLean`), beside the rating weights it is
+    /// calibrated against — the number travels to the server, so it is wire semantics and not
+    /// a property of this screen. Here it only needs a colour: both positives are amber,
+    /// because the word carries the degree and only one can be chosen at a time, so a second
+    /// hue would be decoration that has to be learned.
+    private typealias Lean = QuizLean
 
     var body: some View {
         NavigationStack {
@@ -70,24 +67,31 @@ struct QuizView: View {
 
                 ForEach(drinks) { drink in
                     HStack(spacing: 10) {
+                        // The name gives, never the buttons. The questions are served, so a
+                        // longer drink name can arrive without a release, and when it does it
+                        // must shrink rather than squeeze three controls into hyphenation.
                         Text(drink.prompt)
                             .font(.headline)
                             .foregroundStyle(Brand.text)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                         Spacer(minLength: 8)
                         ForEach(Lean.allCases, id: \.rawValue) { lean in
                             Button { pick(lean, for: drink) } label: {
                                 Text(lean.label)
                                     .font(.subheadline)
+                                    .lineLimit(1)
+                                    .fixedSize()
                                     .padding(.horizontal, 12).padding(.vertical, 7)
                                     .background(
                                         Capsule().fill(answers[drink.family] == lean.rawValue
-                                                       ? lean.tint.opacity(0.15) : .clear))
+                                                       ? tint(lean).opacity(0.15) : .clear))
                                     .overlay(
                                         Capsule().stroke(answers[drink.family] == lean.rawValue
-                                                         ? lean.tint : Brand.hairline,
+                                                         ? tint(lean) : Brand.hairline,
                                                          lineWidth: 1))
                                     .foregroundStyle(answers[drink.family] == lean.rawValue
-                                                     ? lean.tint : Brand.textMuted)
+                                                     ? tint(lean) : Brand.textMuted)
                             }
                             .buttonStyle(.plain)
                         }
@@ -132,6 +136,10 @@ struct QuizView: View {
         .padding(28)
     }
 
+    private func tint(_ lean: Lean) -> Color {
+        lean == .no ? Brand.textMuted : Brand.amber
+    }
+
     private func pick(_ lean: Lean, for drink: QuizDrink) {
         // Tapping the chosen one again clears it: changing your mind to "no opinion" has to
         // be reachable, or a mis-tap is permanent and the profile carries it.
@@ -150,7 +158,9 @@ struct QuizView: View {
     private func submit() async {
         sending = true
         defer { sending = false }
-        let payload = answers.map { QuizAnswer(family: $0.key, weight: $0.value) }
+        let payload = answers.compactMap { family, weight in
+            QuizLean(rawValue: weight)?.answer(for: family)
+        }
         do {
             // The server records one `taste_quiz_answered` per answer as it builds the
             // profile, so there is nothing for the client to log here: a second copy carrying
