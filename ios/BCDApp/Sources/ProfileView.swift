@@ -34,6 +34,9 @@ struct ProfileView: View {
     /// back empty and a profile that never arrived look identical if you only track one.
     @State private var profile: TasteProfile?
     @State private var loadFailed = false
+    /// Whether the quiz is open over this screen. The only way back to it: it is presented
+    /// once on first launch and never again, and the screen it points at is this one.
+    @State private var retakingQuiz = false
     @State private var authState: AuthStore.State?
     @State private var signingIn = false
     @State private var signInError: String?
@@ -43,7 +46,10 @@ struct ProfileView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Your taste") { taste }
+                Section("Your taste") {
+                    taste
+                    quiz
+                }
                 Section("Account") { account }
                 Section("Privacy") {
                     Toggle("Analytics", isOn: $consent.analytics)
@@ -69,7 +75,46 @@ struct ProfileView: View {
             // screen is open only if the switch above changes what may be collected. Re-read
             // on that rather than on every appearance.
             .onChange(of: consent.personalization) { _, _ in Task { await load() } }
+            // A sheet, not a `fullScreenCover`. On first launch the quiz is a screen that
+            // comes before the app; reached from here it is one more thing in a settings
+            // list, and taking the whole screen for it would overstate it.
+            //
+            // `env` and `consent` are handed over explicitly, exactly as `RootView` does:
+            // answering is what grants personalization, so the sheet needs the real store.
+            .sheet(isPresented: $retakingQuiz) {
+                QuizView { retakingQuiz = false; Task { await load() } }
+                    .environmentObject(env)
+                    .environmentObject(consent)
+            }
         }
+    }
+
+    /// The way back to the quiz, and the only one.
+    ///
+    /// It is presented once, from a `fullScreenCover` gated on `bcd.quizAsked`, and that flag
+    /// is set by answering OR skipping OR dismissing — so skipping it put it out of reach for
+    /// the life of the install. Two pieces of copy already promised otherwise, including the
+    /// one shown when the server is unreachable: "you can answer this later under You". The
+    /// case where the quiz most needs a second chance was the case that promised one and had
+    /// none (2026-10-08).
+    ///
+    /// Retaking is supported underneath without anything new: a later answer supersedes
+    /// rather than accumulates, the same rule a re-rate follows.
+    @ViewBuilder private var quiz: some View {
+        Button { retakingQuiz = true } label: {
+            HStack(spacing: 8) {
+                // Not "Retake" for someone who never took it — a skipper would be being
+                // asked to do again a thing they have not done.
+                Text(quizAnswered ? "Retake the quiz" : "Tell us what you drink")
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Brand.textMuted)
+            }
+            .font(.callout)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - account
