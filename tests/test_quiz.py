@@ -254,3 +254,153 @@ def test_a_stale_client_asking_about_a_dropped_drink_is_not_an_error(client, tok
                                       {"family": "ipa", "weight": 1.0}]})
     assert r.status_code == 200
     assert r.json()["sensory_ideal"] is not None
+
+
+# ---- "sometimes" ------------------------------------------------------------------------
+
+# A third rung, added 2026-10-08. Not the neutral the design leaves out: a neutral is the
+# absence of an opinion, and that is still said by not answering. Nobody answers "sometimes"
+# meaning never — it is a yes with less conviction, at half a yes, which is the same relation
+# `Reaction.weight` gives "pinkie out" against "chugged it".
+
+
+def test_sometimes_pulls_the_centroid_the_same_way_a_yes_does_only_less(store):
+    sometimes = build_profile("demo", {}, store, quiz={"ipa": 0.25})
+    yes = build_profile("demo", {}, store, quiz={"ipa": 0.5})
+
+    assert sometimes.sensory_ideal is not None and yes.sensory_ideal is not None
+    # Same direction...
+    assert sometimes.sensory_ideal.axes.get("bitterness", 0) > 0
+    # ...and the quiz's own weight is what separates them, so a stated habit never speaks
+    # louder than a stated preference.
+    assert (sometimes.sensory_ideal.axes.get("bitterness", 0)
+            <= yes.sensory_ideal.axes.get("bitterness", 0))
+
+
+def test_a_sometimes_is_kept_where_a_skipped_question_is_dropped():
+    """The two were the same thing while the quiz had two rungs. They are not now, and the
+    difference is the whole reason the rung exists."""
+    assert quiz_from_events([_ev("lager", 0.25)], "demo") == {"lager": 0.25}
+    assert quiz_from_events([_ev("lager", 0.0)], "demo") == {}
+
+
+def test_sometimes_everything_still_builds_a_centroid(store):
+    """A cautious drinker who answers "sometimes" to all eight has still said plenty. The
+    only answer set that builds nothing is one with no positive in it at all."""
+    every = dict.fromkeys(QUIZ_ORDER, 0.25)
+    assert build_profile("demo", {}, store, quiz=every).sensory_ideal is not None
+
+
+# ---- the shelves hear it ---------------------------------------------------------------
+
+# A quiz answer names a FAMILY — that is the whole of its design — and Discover is the one
+# screen organised by family. Until this, answering "Stout: yes" and then finding the Stout
+# shelf dark, under a header calling the list a starting point, was the quiz being heard by
+# the ranker and by nothing else (2026-10-08).
+
+def test_a_quiz_yes_speaks_for_that_shelf(store):
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    mine = _families_spoken_for(store, judged=(),
+                                quiz={"stout": 1.0, "bourbon": 1.0, "ipa": 1.0})
+    assert mine == {Family.STOUT, Family.BOURBON, Family.IPA}
+
+
+def test_a_sometimes_speaks_for_its_shelf_too(store):
+    """Someone who sometimes drinks lager does drink lager, and a shelf they drink from is
+    one worth ranking for them. The bar is a positive answer, not a loud one."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    assert _families_spoken_for(store, judged=(), quiz={"lager": 0.25}) == {Family.LAGER}
+
+
+def test_a_quiz_no_does_not(store):
+    """Saying you do not drink gin moves the centroid away, which is worth having. It is not
+    a reason to rank the gin shelf FOR you: asking which gin is least unlike the taste of
+    someone who just said they do not drink gin is a real cosine and not a recommendation."""
+    from bcd_api.app import _families_spoken_for
+
+    assert _families_spoken_for(store, judged=(), quiz={"gin": -1.0, "vodka": -1.0}) == set()
+
+
+def test_a_family_this_build_does_not_know_is_skipped_not_fatal(store):
+    """The questions are served, so the server can ask about a family an older build's
+    `Family` enum has never heard of. One unknown question must not take the shelf list
+    with it."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    mine = _families_spoken_for(store, judged=(), quiz={"stout": 1.0, "perry": 1.0})
+    assert mine == {Family.STOUT}
+
+
+def test_ratings_and_quiz_answers_both_count(store):
+    """The quiz is an accelerant, not a replacement: a shelf is theirs if they have said
+    anything about it, by either route."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema import Category, ExtractionMethod, Product, Provenance, Sourced
+    from bcd_schema.family import Family
+
+    prov = Provenance(source_id="t", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
+    store.put_gold("beer:rated", "product", Product(
+        id="beer:rated", brand_id="b", producer_id="p", category=Category.BEER,
+        name="A Porter", style=Sourced[str](value="Porter", provenance=prov),
+    ).model_dump(mode="json"))
+
+    mine = _families_spoken_for(store, judged=["beer:rated"], quiz={"stout": 1.0})
+    assert mine == {Family.STOUT, Family.PORTER}
+
+
+# ---- and the shelves hear the camera too -----------------------------------------------
+
+# "If they're scanning bourbon, rec bourbon." The only one of the three signals that costs
+# the drinker nothing, and the only one that reaches someone who skipped the quiz and has
+# rated nothing (2026-10-08).
+
+
+def _beer(store, pid, style):
+    from bcd_schema import Category, ExtractionMethod, Product, Provenance, Sourced
+    prov = Provenance(source_id="t", method=ExtractionMethod.REGULATORY_FILING, confidence=1.0)
+    store.put_gold(pid, "product", Product(
+        id=pid, brand_id="b", producer_id="p", category=Category.BEER, name=pid,
+        style=Sourced[str](value=style, provenance=prov)).model_dump(mode="json"))
+    return pid
+
+
+def test_two_scans_on_a_shelf_make_it_theirs(store):
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Imperial Stout")]
+    assert _families_spoken_for(store, (), {}, scanned=scanned) == {Family.STOUT}
+
+
+def test_one_scan_is_a_glance_not_a_shelf(store):
+    """You pick a bottle up to find out what it is. One is that; two is the aisle you are
+    standing in."""
+    from bcd_api.app import _families_spoken_for
+
+    assert _families_spoken_for(store, (), {}, scanned=[_beer(store, "b:1", "Stout")]) == set()
+
+
+def test_scanning_the_same_drink_twice_is_still_one_drink(store):
+    """`scans_from_events` keys on product, so the shelf bar counts different drinks rather
+    than how long one can sat in the viewfinder."""
+    from bcd_api.app import _families_spoken_for
+
+    one = _beer(store, "b:1", "Stout")
+    assert _families_spoken_for(store, (), {}, scanned=[one, one]) == set()
+
+
+def test_all_three_signals_light_shelves_together(store):
+    """A rating, a quiz answer and a camera are three ways of saying the same kind of thing,
+    and a shelf is theirs if any of them says it."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    rated = _beer(store, "b:rated", "Porter")
+    scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Stout")]
+    mine = _families_spoken_for(store, [rated], {"ipa": 1.0}, scanned=scanned)
+    assert mine == {Family.PORTER, Family.IPA, Family.STOUT}

@@ -50,9 +50,30 @@ _QUIZ_EVENT = "taste_quiz_answered"
 _LIST_EVENT = "list_add"
 _LIST_WEIGHTS = {"cellar": 0.6, "had_it": 0.5, "wishlist": 0.3, "want_to_try": 0.3}
 
+#: A product the HUD drew. Weaker evidence than anything else here and the only kind that is
+#: free: pointing a camera at a bottle is not a verdict on it, but it is not nothing either --
+#: you are standing in front of it deciding. So it counts, positively, at a fraction of a
+#: stated preference, and it is the signal that works for someone who skipped the quiz and has
+#: rated nothing.
+#:
+#: There is no negative. You cannot read a dislike off a glance, and the shelf you walked past
+#: sends no event at all.
+_SCAN_EVENT = "scan_resolved"
+
+#: What one look at a product is worth against a rating's 1.0 and a quiz answer's 0.5. Low on
+#: purpose: scanning is how you ask what something IS, so plenty of scans are of drinks the
+#: drinker will put straight back.
+_SCAN_WEIGHT = 0.15
+
+#: And what a drink they keep going back to is worth. Picking the same bottle up on three
+#: separate trips is a stronger question than picking it up once -- it is the drink they
+#: cannot decide about. Capped below a rating's 1.0, because they still have not drunk it.
+_SCAN_MAX = 0.6
+
 #: The only events a profile is ever built from — used to filter the log on replay. The
 #: withdrawal belongs here or replay would drop it and the rating it retracts would return.
-TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _QUIZ_EVENT, _LIST_EVENT})
+TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _QUIZ_EVENT, _LIST_EVENT,
+                          _SCAN_EVENT})
 
 # Consent tiers under which a profile may be built at all (see telemetry/events.yaml).
 _PERSONALIZATION_CONSENT = frozenset({"personalization", "data_sharing"})
@@ -138,6 +159,62 @@ def quiz_from_events(
         if family in QUIZ_DRINKS and isinstance(weight, (int, float)):
             out[family] = max(-1.0, min(1.0, float(weight)))
     return {f: w for f, w in out.items() if w}
+
+
+def sightings_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, int]:
+    """How many separate times this person looked at each product.
+
+    A look is decided where it can be seen: the client reports one when a product appears on
+    the HUD after being off it, so a can held steadily in frame is one look however many
+    350ms ticks it takes, and putting a bottle down, looking at two others and picking it up
+    again is two. Twice on one trip still counts twice -- that is someone deliberating, which
+    is the strongest thing a camera can say about a drink they have not tasted.
+
+    There is no time rule here. There was one, a thirty-minute gate meant to stop a tab switch
+    reading as a second trip, and it threw away the same-trip revisit along with it. What it
+    was really guarding against is a batch sent twice, and that is exact rather than
+    heuristic: a retransmission carries the same `event_id`, so the ids are what get counted.
+
+    An event with no id counts on its own, since the client has always sent one and the
+    alternative is losing a real look to a missing field.
+
+    Read exactly as ratings and quiz answers are: consent-gated, this install only.
+    """
+    seen_ids: set[str] = set()
+    out: dict[str, int] = {}
+    for ev in events:
+        if ev.get("name") != _SCAN_EVENT or ev.get("install_id") != install_id:
+            continue
+        if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
+            continue
+        pid = ev.get("product_id")
+        if not pid:
+            continue
+        event_id = ev.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            if event_id in seen_ids:
+                continue
+            seen_ids.add(event_id)
+        out[pid] = out.get(pid, 0) + 1
+    return out
+
+
+def scans_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, float]:
+    """Products this person pointed a camera at, weighted by how often they went back.
+
+    One look is `_SCAN_WEIGHT`; each further look adds another, to `_SCAN_MAX`. Linear and
+    capped rather than flat, because going back to a bottle three times is a stronger question
+    than glancing at it once — and capped below a rating, because they still have not drunk it.
+
+    Not weighted by how LONG it was on screen. Dwell measures how hard the label was to read
+    as much as it measures interest; putting it down and picking it up again does not.
+    """
+    return {pid: min(_SCAN_WEIGHT * n, _SCAN_MAX)
+            for pid, n in sightings_from_events(events, install_id).items()}
 
 
 def rated_products(
@@ -420,7 +497,13 @@ def rebuild_profile(
     # One pass of the log, read twice: `_canonical` resolves merge tombstones and is not
     # free, and the quiz carries no product id to resolve.
     canonical = list(_canonical(store, events))
-    signals = signals_from_events(canonical, install_id)
+    # Scans first, so a real verdict on the same drink overwrites the glance at it. They go
+    # in through `signals` rather than beside it because a scanned product IS a product and
+    # carries its own vector: scan five IPAs and the centroid becomes IPA-shaped out of what
+    # those five actually taste like, which is better evidence than the style's average and
+    # works for all twenty-two shelves rather than the quiz's eight.
+    signals = {**scans_from_events(canonical, install_id),
+               **signals_from_events(canonical, install_id)}
     quiz = quiz_from_events(canonical, install_id)
     profile = build_profile(install_id, signals, store, previous=previous, quiz=quiz)
     save_profile(store, profile)

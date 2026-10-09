@@ -102,6 +102,39 @@ def test_a_match_outranks_a_partial_match_whatever_stands_behind_it():
     assert rank_key(0.92, guess) < rank_key(0.85, guess)  # ...and then the score
 
 
+# A scan happens in the shop, with the bottle in your hand. So the scanned set is the
+# BUYABLE set, and a recommendation the drinker cannot act on today is worth less than one
+# they can, however good the cosine (user, 2026-10-08).
+
+
+def test_the_bottle_in_their_hand_leads_an_equal_match():
+    rated = Product.model_validate(_product("r", "R", "x",
+                                            _sv(SensorySource.RECONCILED, 0.9, citrus=1)))
+    guess = Product.model_validate(_product("g", "G", "x",
+                                            _sv(SensorySource.STYLE_PRIOR, 0.3, citrus=1)))
+    # Better evidence and the same score, but it is not on the shelf in front of them.
+    assert rank_key(0.9, guess, sightings=1) < rank_key(0.9, rated)
+
+
+def test_the_one_they_keep_going_back_to_leads_the_ones_they_glanced_at():
+    """Going back to a bottle is the drink they cannot decide about, which is exactly the
+    question a recommendation is for."""
+    a = Product.model_validate(_product("a", "A", "x", _sv(SensorySource.RECONCILED, 0.9, citrus=1)))
+    b = Product.model_validate(_product("b", "B", "x", _sv(SensorySource.RECONCILED, 0.9, citrus=1)))
+    assert rank_key(0.9, a, sightings=3) < rank_key(0.9, b, sightings=1)
+
+
+def test_scanning_something_does_not_promote_it_into_a_band_it_does_not_belong_in():
+    """Scanning is how you ask what something IS, so plenty of scans are of drinks that go
+    straight back on the shelf. The band still leads: a drink that does not match must not
+    be called a match because it was looked at."""
+    good = Product.model_validate(_product("g", "G", "x",
+                                           _sv(SensorySource.RECONCILED, 0.9, citrus=1)))
+    poor = Product.model_validate(_product("p", "P", "x",
+                                           _sv(SensorySource.RECONCILED, 0.9, citrus=1)))
+    assert rank_key(0.92, good) < rank_key(0.55, poor, sightings=5)
+
+
 def test_what_we_know_ranks_above_the_floors_ties(store):
     got = rank_catalog(store, Resolver(store), PROFILE, limit=10)
     names = [r["name"] for r in got]

@@ -12,6 +12,7 @@ import json
 import os
 import time
 import uuid
+from collections import Counter
 from collections.abc import Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -65,9 +66,23 @@ from .auth import (
     verify_id_token,
 )
 from .index import IndexedStore, LabelIndex
-from .recommend import rank_catalog, rank_family, shelf_vector, similar_profile
+from .recommend import (
+    EVIDENCE,
+    evidence_tier,
+    rank_catalog,
+    rank_family,
+    shelf_vector,
+    similar_profile,
+)
 from .resolver import Resolver
-from .taste import TASTE_EVENTS, load_profile, rated_products, rebuild_profile
+from .taste import (
+    TASTE_EVENTS,
+    load_profile,
+    quiz_from_events,
+    rated_products,
+    rebuild_profile,
+    sightings_from_events,
+)
 from .telemetry_ingest import TelemetryCollector
 from .vision import MAX_IMAGE_BYTES, VisionProvider, provider_from_env
 
@@ -356,9 +371,13 @@ def recommend(who: Caller, limit: int = 10) -> dict:
     user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
+    events = list(collector.iter_events(TASTE_EVENTS))
     results = rank_catalog(store, _state["resolver"], _profile_for(user_id), limit=limit,
-                           exclude=rated_products(store, collector.iter_events(TASTE_EVENTS),
-                                                  user_id))
+                           exclude=rated_products(store, events, user_id),
+                           # What they have scanned is what is on the shelf in front of them,
+                           # so it leads: a suggestion they cannot buy today is worth less
+                           # than one they can, however good the cosine.
+                           sightings=sightings_from_events(events, user_id))
     return {"user_id": user_id, "results": results}
 
 
@@ -455,7 +474,9 @@ def recommend_families(who: Caller, limit: int = 6,
     profile = _profile_for(user_id)
     events = list(collector.iter_events(TASTE_EVENTS))
     judged = rated_products(store, events, user_id)
-    mine = _families_rated_in(store, judged)
+    sightings = sightings_from_events(events, user_id)
+    mine = _families_spoken_for(store, judged, quiz_from_events(events, user_id),
+                                scanned=sightings)
 
     order = sorted(FAMILIES, key=lambda f: (f not in mine, FAMILIES.index(f)))
     # Ordered rated-in shelves first WITHIN their aisle, below; the sort above only decides
@@ -471,7 +492,7 @@ def recommend_families(who: Caller, limit: int = 6,
     for family, vec, rows in zip(order, vectors, fetched, strict=True):
         shelf = rank_family(store, _state["resolver"], profile, rows,
                             personal=vec is not None, rated_in=family in mine,
-                            limit=limit, exclude=judged)
+                            limit=limit, exclude=judged, sightings=sightings)
         # A shelf with nothing on it is not a shelf. Cider is in the table for completeness
         # and the catalog files all 333 of its rows with a null style.
         if shelf["results"]:
@@ -511,12 +532,44 @@ def _shelf_styles(store: Store) -> dict[Family, list[str]]:
     return cached
 
 
-def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:
-    """The shelves this drinker has passed a verdict on. What separates a ranked family from a
-    dark one, so it is read from the verdicts themselves rather than from the profile: the
+#: How many different drinks someone has to have scanned on a shelf before it is ranked for
+#: them. One is a glance -- you pick a bottle up to find out what it is. Two is a pattern, and
+#: the aisle you are standing in.
+_SCANS_FOR_A_SHELF = 2
+
+
+def _families_spoken_for(store: Store, judged: Collection[str],
+                         quiz: dict[str, float],
+                         scanned: Collection[str] = ()) -> set[Family]:
+    """The shelves this drinker has said something about. What separates a ranked family from
+    a dark one, so it is read from the verdicts themselves rather than from the profile: the
     profile's style affinities are already averaged and would call a shelf theirs on the
-    strength of a style that merely resembles one they rated."""
+    strength of a style that merely resembles one they rated.
+
+    A quiz answer counts, because a quiz answer names a FAMILY -- that is the whole of its
+    design -- and Discover is the one screen organised by family. Answering "Stout: yes" and
+    then finding the Stout shelf dark, under a header calling the list a starting point, was
+    the quiz being heard by the ranker and by nothing else (2026-10-08).
+
+    Only a yes. A "not for me" moves the centroid away, which is worth having, but it is not a
+    reason to rank that shelf FOR them: asking which gin is least unlike the taste of someone
+    who just said they do not drink gin is a real cosine and not a real recommendation, which
+    is the same rule `shelf_vector` applies to a shelf nobody has rated on.
+
+    Scanning counts too, at `_SCANS_FOR_A_SHELF` different drinks on the shelf. It is the only
+    one of the three that costs the drinker nothing and the only one that reaches someone who
+    skipped the quiz and has rated nothing: stand in the bourbon aisle reading labels and the
+    Bourbon shelf is the one worth ranking, whether or not they ever said so.
+    """
     out: set[Family] = set()
+    for answered, weight in quiz.items():
+        if weight > 0:
+            try:
+                out.add(Family(answered))
+            except ValueError:
+                # The quiz served a family this build does not know. Skip it rather than
+                # failing the whole shelf list over a question that is new on the server.
+                continue
     for pid in judged:
         rec = get_product(store, pid)
         if not rec:
@@ -524,6 +577,19 @@ def _families_rated_in(store: Store, judged: Collection[str]) -> set[Family]:
         family = family_of((rec.get("style") or {}).get("value"))
         if family:
             out.add(family)
+
+    # Deduped here rather than trusted from the caller: the bar is how many DIFFERENT drinks
+    # were looked at, and a function that silently counts a repeated id twice would light a
+    # shelf off one can the moment someone passed a list instead of a mapping.
+    seen: Counter[Family] = Counter()
+    for pid in set(scanned):
+        rec = get_product(store, pid)
+        if not rec:
+            continue
+        family = family_of((rec.get("style") or {}).get("value"))
+        if family:
+            seen[family] += 1
+    out |= {f for f, n in seen.items() if n >= _SCANS_FOR_A_SHELF}
     return out
 
 
@@ -542,6 +608,48 @@ def similar(product_id: str, limit: int = 6) -> dict:
         raise HTTPException(status_code=404, detail="no such product")
     return {"product_id": rec.get("id", product_id),
             **similar_profile(store, Product.model_validate(rec), limit=limit)}
+
+
+@app.get("/v1/product/{product_id}/score")
+def product_score(product_id: str, who: Caller) -> dict:
+    """How likely this drinker is to like this one drink.
+
+    The same arithmetic `/v1/recommend` runs, asked of one row instead of the catalog, because
+    the detail screen is reachable by four doors and only one of them is the recommender. A
+    drink found by name, picked out of a scan's "is it this one?" list, or opened from another
+    drink's Similar profile arrived carrying no score at all, so the screen's seal read "not
+    scored for you yet" about a beer the server would have called a 91% match. Nothing was
+    wrong with the score; nothing had asked for it.
+
+    Answered from the drinker's OWN profile, never the seed. `_profile_for` falls back to a
+    demo centroid so a fresh install's lists do not look dead, which is the right trade for a
+    list of suggestions and the wrong one for a number stamped on a label: "matches your citrus
+    preference" has to be about this reader or it should not be on the screen. With no profile
+    of their own the answer is `scored: false`, and the seal says so.
+
+    A score is also only a score when it is a real cosine. With no vector on the product,
+    `Resolver.score` falls through to the style-affinity prior, which is a flat 0.5 for any
+    style the drinker has never rated inside -- a number that looks like a prediction and is
+    the absence of one.
+    """
+    store: Store = _state["store"]
+    rec = get_product(store, product_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="no such product")
+    product = Product.model_validate(rec)
+    pid = rec.get("id", product_id)
+
+    profile = load_profile(store, who.id)
+    if profile is None or profile.sensory_ideal is None:
+        return {"product_id": pid, "scored": False, "basis": "no_profile"}
+    if product.sensory is None:
+        return {"product_id": pid, "scored": False, "basis": "no_vector"}
+
+    resolver: Resolver = _state["resolver"]
+    score, reason, cold = resolver.score(product, profile)
+    return {"product_id": pid, "scored": True, "personal_score": score, "reason": reason,
+            "cold_start": cold, "evidence": EVIDENCE[evidence_tier(product.sensory)],
+            "basis": "yours"}
 
 
 @app.post("/v1/feedback", response_model=FeedbackResponse)

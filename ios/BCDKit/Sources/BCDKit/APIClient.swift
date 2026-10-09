@@ -23,6 +23,9 @@ public protocol APIClientProtocol: Sendable {
     func fetchLexicon() async throws -> [String]
     /// What else tastes like one product. About the bottle, not about you.
     func similar(to productId: String, limit: Int) async throws -> SimilarResponse
+    /// How likely this drinker is to like one drink — the recommender's own arithmetic, asked
+    /// of a row that did not arrive through the recommender.
+    func productScore(for productId: String) async throws -> PersonalScore
     /// What the server has learned about the person this client speaks for.
     func profile() async throws -> TasteProfile
     /// Suggestions shelf by shelf. `crossStyle` ranks the shelves they have never rated on by
@@ -83,6 +86,13 @@ extension APIClientProtocol {
     /// the 95% of rows carrying their style's average: show no section rather than an error.
     public func similar(to productId: String, limit: Int) async throws -> SimilarResponse {
         SimilarResponse(basis: .styleOnly, results: [])
+    }
+
+    /// Unscored, which is what a stub honestly is and what the screen already draws. Not a
+    /// 501: the seal has a state for having nothing to say, and reaching it by the same path
+    /// as a real "no profile yet" is what a stub should exercise.
+    public func productScore(for productId: String) async throws -> PersonalScore {
+        PersonalScore(productId: productId, scored: false, basis: "no_profile")
     }
 
     /// A profile that has learned nothing, which is also what a real fresh install gets back.
@@ -253,6 +263,24 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// learned yet", not an error — so the caller must not read an empty profile as a failure.
     public func profile() async throws -> TasteProfile {
         try await get("v1/profile")
+    }
+
+    /// Scoring one row for the caller. Authorized, unlike `similar`, because this one IS about
+    /// the reader — the server reads who is asking from the bearer token.
+    public func productScore(for productId: String) async throws -> PersonalScore {
+        // Built component by component for the same reason `similar` is: ids carry colons and
+        // pre-encoding gets the `%` escaped in turn.
+        let url = baseURL.appendingPathComponent("v1/product")
+            .appendingPathComponent(productId)
+            .appendingPathComponent("score")
+        let request = try await authorized(url, method: "GET")
+        let (data, resp) = try await session.data(for: request)
+        try Self.check(resp)
+        do {
+            return try decoder.decode(PersonalScore.self, from: data)
+        } catch {
+            throw APIError.decoding("\(error)")
+        }
     }
 
     /// Suggestions shelf by shelf, rated-in shelves first. One call rather than one per shelf:

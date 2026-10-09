@@ -567,6 +567,21 @@ private final class CountingSink: APIClientProtocol, @unchecked Sendable {
     func sendTelemetry(_ batch: TelemetryBatch) async throws { batches += 1 }
 }
 
+/// Remembers the event names that went out, so a test can count one kind. `pendingCount`
+/// cannot: the scan path also logs `scan_frame_batch` at the same tier, so a bare count
+/// answers a different question than the one being asked.
+private actor RecordingSink: APIClientProtocol {
+    private var names: [String] = []
+    nonisolated func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
+        ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: nil)
+    }
+    nonisolated func searchProducts(_ query: String) async throws -> [ResolvedProduct] { [] }
+    func sendTelemetry(_ batch: TelemetryBatch) async throws {
+        names.append(contentsOf: batch.events.map(\.name))
+    }
+    func count(of name: String) -> Int { names.filter { $0 == name }.count }
+}
+
 private final class StubAPI: APIClientProtocol, @unchecked Sendable {
     var resolveCallCount = 0
     func resolveScan(_ req: ScanResolveRequest) async throws -> ScanResolveResponse {
@@ -2430,5 +2445,201 @@ struct ReactionLogTests {
         let drawn = log.revision
         log.remove(for: "p:ipa")
         #expect(log.revision != drawn)
+    }
+}
+
+/// `GET /v1/product/{id}/score` — the answer the detail screen's seal draws.
+///
+/// Three of the four doors onto that screen pass no score, so the seal read "not scored for
+/// you yet" about drinks the server would have called a 91% match. Nothing was wrong with the
+/// score; nothing had asked for it.
+@Suite struct PersonalScoreTests {
+    private func decode(_ json: String) throws -> PersonalScore {
+        try JSONDecoder().decode(PersonalScore.self, from: json.data(using: .utf8)!)
+    }
+
+    @Test func aScoredAnswerCarriesEverythingTheSealAndTheLineNeed() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": true, "personal_score": 0.909,
+         "reason": "matches your bitterness preference", "cold_start": true,
+         "evidence": "known", "basis": "yours"}
+        """)
+        #expect(s.scored)
+        #expect(s.personalScore == 0.909)
+        #expect(s.reason == "matches your bitterness preference")
+        #expect(s.coldStart)
+        #expect(s.evidence == .known)
+    }
+
+    /// Not a score of zero. "We have nothing to go on yet" and "we predict you will hate it"
+    /// are different claims and the seal draws them differently — a 0% stamp on a drink
+    /// nobody has been asked about would be the cold start telling a lie with a number.
+    @Test func anUnscoredAnswerIsAbsentRatherThanZero() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": false, "basis": "no_profile"}
+        """)
+        #expect(!s.scored)
+        #expect(s.personalScore == nil)
+        #expect(s.reason == nil)
+        #expect(!s.coldStart)
+        #expect(s.basis == "no_profile")
+    }
+
+    /// A server that grows a fourth evidence tier must not fail the call on a phone that has
+    /// only three: the same tolerance `Recommendation` shows, since the seal draws the score
+    /// and the tier is a footnote.
+    @Test func anUnknownEvidenceTierDoesNotFailTheAnswer() throws {
+        let s = try decode("""
+        {"product_id": "ttb:1", "scored": true, "personal_score": 0.7,
+         "reason": "why", "evidence": "divined", "basis": "yours"}
+        """)
+        #expect(s.scored)
+        #expect(s.personalScore == 0.7)
+        #expect(s.evidence == nil)
+    }
+
+    /// The stub answers unscored rather than throwing, so a preview exercises the state the
+    /// seal already draws instead of an error path it has none for.
+    @Test func theDefaultImplementationIsHonestlyUnscored() async throws {
+        struct Bare: APIClientProtocol {
+            func resolveScan(_: ScanResolveRequest) async throws -> ScanResolveResponse {
+                ScanResolveResponse(candidates: [], unresolvedIndices: [], latencyMs: 0)
+            }
+            func searchProducts(_: String) async throws -> [ResolvedProduct] { [] }
+            func sendTelemetry(_: TelemetryBatch) async throws {}
+        }
+        let answer = try await Bare().productScore(for: "ttb:1")
+        #expect(!answer.scored)
+        #expect(answer.personalScore == nil)
+        #expect(answer.productId == "ttb:1")
+    }
+}
+
+/// The quiz's answer scale. Three rungs, and the middle one is a soft yes rather than the
+/// neutral the design deliberately leaves out.
+@Suite struct QuizLeanTests {
+    @Test func thereAreThreeRungsAndNoNeutral() {
+        #expect(QuizLean.allCases.count == 3)
+        // Zero is the absence of an opinion, and that is said by not answering — the server
+        // drops a zero rather than storing a middle.
+        #expect(!QuizLean.allCases.contains { $0.rawValue == 0 })
+    }
+
+    /// "Sometimes" is a yes with less conviction, at exactly half a yes — the same relation
+    /// the rating scale gives a soft positive against a strong one. If these two drift apart,
+    /// the quiz and the ratings stop meaning the same thing to the same centroid.
+    @Test func sometimesIsHalfAYesJustAsAPinkieIsHalfAChug() {
+        #expect(QuizLean.sometimes.rawValue == QuizLean.yes.rawValue / 2)
+        #expect(Reaction.pinkieOut.weight == Reaction.chuggedIt.weight / 2)
+        #expect(QuizLean.sometimes.rawValue / QuizLean.yes.rawValue
+                == Reaction.pinkieOut.weight / Reaction.chuggedIt.weight)
+    }
+
+    @Test func sometimesIsPositiveSoItSpeaksForItsShelf() {
+        // The server lights a shelf on a yes and leaves it dark on a no (`_families_spoken_for`
+        // tests `weight > 0`). Someone who sometimes drinks lager does drink lager.
+        #expect(QuizLean.sometimes.rawValue > 0)
+        #expect(QuizLean.no.rawValue < 0)
+    }
+
+    /// Short enough that three of them and a drink's name share a phone's width. "Not for me"
+    /// did not: at "Wheat beer" it wrapped to two lines and "Sometimes" hyphenated.
+    @Test func everyLabelIsShortEnoughToSitThreeAcross() {
+        for lean in QuizLean.allCases {
+            #expect(!lean.label.isEmpty)
+            #expect(lean.label.count <= 9, "\(lean.label) is too long for three across")
+        }
+    }
+
+    @Test func aRungBecomesTheAnswerTheServerIsSent() {
+        let answer = QuizLean.sometimes.answer(for: "lager")
+        #expect(answer.family == "lager")
+        #expect(answer.weight == 0.5)
+    }
+}
+
+/// Listening to the HUD. What someone points a camera at is what they are considering, so
+/// scanning IPAs is a reason to recommend IPAs — and it is the only taste signal that costs
+/// the drinker nothing and reaches someone who skipped the quiz and has rated nothing.
+@Suite struct ScanIsATasteSignal {
+    @MainActor
+    @Test func aDrawnProductIsReportedOnce() async throws {
+        // The HUD redraws at 350ms and a can sits in the viewfinder for seconds. Reported per
+        // PRODUCT, not per tick, or one bottle looked at once would outvote a rating.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
+        ])
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: true),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        await coord.resolveLatest()
+        try await Task.sleep(nanoseconds: 60_000_000)
+        // Same can, more ticks. The drinker is still looking at one drink.
+        for _ in 0..<5 {
+            await coord.resolveLatest()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(coord.overlays.count == 1)
+        try await queue.flush()
+        #expect(await sink.count(of: "scan_resolved") == 1)
+    }
+
+    @MainActor
+    @Test func pickingItUpAgainIsASecondLook() async throws {
+        // Put a bottle down, look at two others, pick it up again: that is someone
+        // deliberating, and it is the strongest thing a camera can say about a drink they
+        // have not tasted. Reporting once per product per run collapsed it, and a
+        // thirty-minute server gate collapsed it again (user, 2026-10-08).
+        //
+        // A look ends when the product has been off the HUD for `sightingGap`, so this drives
+        // the clock rather than waiting on it.
+        let engine = PushEngine()
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: true),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.sightingGap = 0.05        // drive the clock rather than wait fifteen seconds
+        coord.start()
+
+        func look(at name: String) async throws {
+            engine.push([DetectedText(text: name, kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)])
+            try await Task.sleep(nanoseconds: 60_000_000)
+            await coord.resolveLatest()
+            try await Task.sleep(nanoseconds: 40_000_000)
+        }
+
+        try await look(at: "Widow Jane")
+        try await look(at: "Angels Envy")      // put it down, look at another
+        try await look(at: "Widow Jane")       // and pick it up again
+        try await queue.flush()
+
+        // Two looks at the bottle they cannot decide about, one at the other.
+        #expect(await sink.count(of: "scan_resolved") == 3)
+    }
+
+    @MainActor
+    @Test func nothingIsReportedWithoutPersonalizationConsent() async throws {
+        // The queue drops the tier, so a drinker who has not agreed sends nothing from the
+        // viewfinder — the same gate the quiz and the rating picker sit behind.
+        let engine = MockScanEngine(scripted: [
+            [DetectedText(text: "Krombacher", kind: "text", x: 0.3, y: 0.4, w: 0.2, h: 0.1)],
+        ])
+        let sink = RecordingSink()
+        let queue = TelemetryQueue(consent: ConsentState(analytics: true, personalization: false),
+                                   sink: sink)
+        let coord = ScanCoordinator(engine: engine, api: StubAPI(), telemetry: queue)
+        coord.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await coord.resolveLatest()
+        try await Task.sleep(nanoseconds: 60_000_000)
+        try await queue.flush()
+
+        #expect(coord.overlays.count == 1, "the HUD still draws it")
+        #expect(await sink.count(of: "scan_resolved") == 0,
+                "but nothing is learned from it")
     }
 }
