@@ -100,7 +100,17 @@ events:
     pii: none
     properties:
       - {name: product_id, type: string}
-      - {name: referrer, type: enum, values: [scan, search, alert, recommend, list]}
+      - {name: referrer, type: enum, values: [scan, search, alert, recommend, similar, list]}
+  - name: search_result_opened
+    tier: personalization
+    pii: none
+    desc: >
+      user looked a drink up by name and opened it. A taste signal, weighed with camera
+      sightings on one tally: both are someone going to look at one specific drink. Only the
+      search door of the four onto the product screen -- the others are the app's own
+      suggestions, and weighing those would train the profile on its own output.
+    properties:
+      - {name: product_id, type: string}
   - name: provenance_expanded
     tier: analytics
     pii: none

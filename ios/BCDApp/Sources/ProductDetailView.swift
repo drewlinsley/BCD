@@ -18,8 +18,20 @@ import BCDKit
 // and the strength carry it, and everything else is an line that either appears or
 // doesn't.
 
+/// Which door the drinker came through. Was a literal `"scan"` typed into the telemetry call,
+/// on every open from all four doors, so the analytics said every drink in the app was found by
+/// camera -- and there was no way to tell the one door that is a taste signal from the three
+/// that are the app's own suggestions.
+///
+/// No default value. A default is how the wrong answer got sent from four call sites for weeks;
+/// without one the compiler names every door that forgets to say which it is.
+enum ProductReferrer: String {
+    case scan, search, recommend, similar, list, alert
+}
+
 struct ProductDetailView: View {
     let candidate: ScoredCandidate
+    let referrer: ProductReferrer
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var reactions: ReactionLog
 
@@ -93,7 +105,7 @@ struct ProductDetailView: View {
                 guard candidate.personalScore == nil else { return }
                 fetchedScore = try? await env.api.productScore(for: product.id)
             }
-            .sheet(item: $drilldown) { ProductDetailView(candidate: $0) }
+            .sheet(item: $drilldown) { ProductDetailView(candidate: $0, referrer: .similar) }
             .task {
                 // Opening a product is the deliberate act that earns it a place in the Rate
                 // queue; merely crossing the viewfinder does not.
@@ -101,7 +113,15 @@ struct ProductDetailView: View {
                                             producer: producerName,
                                             abvPct: product.spec.abvPct?.value))
                 try? await env.telemetry.log("product_view", tier: .analytics,
-                    ["product_id": .string(product.id), "referrer": .string("scan")])
+                    ["product_id": .string(product.id),
+                     "referrer": .string(referrer.rawValue)])
+                // Looking a drink up by name and opening it is a taste signal, weighed with
+                // what the camera saw. Only this door: the others are lists this app built, and
+                // weighing a tap on its own suggestion would teach it that it was right.
+                if referrer == .search {
+                    try? await env.telemetry.log("search_result_opened", tier: .personalization,
+                                                 ["product_id": .string(product.id)])
+                }
             }
         }
     }

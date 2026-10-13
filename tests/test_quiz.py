@@ -374,7 +374,7 @@ def test_two_scans_on_a_shelf_make_it_theirs(store):
     from bcd_schema.family import Family
 
     scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Imperial Stout")]
-    assert _families_spoken_for(store, (), {}, scanned=scanned) == {Family.STOUT}
+    assert _families_spoken_for(store, (), {}, considered=scanned) == {Family.STOUT}
 
 
 def test_one_scan_is_a_glance_not_a_shelf(store):
@@ -382,16 +382,16 @@ def test_one_scan_is_a_glance_not_a_shelf(store):
     standing in."""
     from bcd_api.app import _families_spoken_for
 
-    assert _families_spoken_for(store, (), {}, scanned=[_beer(store, "b:1", "Stout")]) == set()
+    assert _families_spoken_for(store, (), {}, considered=[_beer(store, "b:1", "Stout")]) == set()
 
 
 def test_scanning_the_same_drink_twice_is_still_one_drink(store):
-    """`scans_from_events` keys on product, so the shelf bar counts different drinks rather
+    """`considered_products` keys on product, so the shelf bar counts different drinks rather
     than how long one can sat in the viewfinder."""
     from bcd_api.app import _families_spoken_for
 
     one = _beer(store, "b:1", "Stout")
-    assert _families_spoken_for(store, (), {}, scanned=[one, one]) == set()
+    assert _families_spoken_for(store, (), {}, considered=[one, one]) == set()
 
 
 def test_all_three_signals_light_shelves_together(store):
@@ -402,5 +402,15 @@ def test_all_three_signals_light_shelves_together(store):
 
     rated = _beer(store, "b:rated", "Porter")
     scanned = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Stout")]
-    mine = _families_spoken_for(store, [rated], {"ipa": 1.0}, scanned=scanned)
+    mine = _families_spoken_for(store, [rated], {"ipa": 1.0}, considered=scanned)
     assert mine == {Family.PORTER, Family.IPA, Family.STOUT}
+
+
+def test_two_searches_on_a_shelf_make_it_theirs_as_well(store):
+    """`considered` is either door. Looking two bourbons up by name says as much about which
+    aisle is worth ranking as reading two labels off the shelf does."""
+    from bcd_api.app import _families_spoken_for
+    from bcd_schema.family import Family
+
+    searched = [_beer(store, "b:1", "Stout"), _beer(store, "b:2", "Oatmeal Stout")]
+    assert _families_spoken_for(store, (), {}, considered=searched) == {Family.STOUT}
