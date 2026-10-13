@@ -271,13 +271,16 @@ def test_reason_does_not_claim_a_match_it_did_not_find(store):
     assert "outside your usual" in weak_reason
 
 
-def test_seed_profile_answers_for_any_new_install(monkeypatch):
-    """A real install id must still get the seed profile until it has rated something.
+def test_the_probe_answers_for_any_new_install(monkeypatch):
+    """A real install id must still get the seed as a PROBE until it has rated something.
 
     The fallback used to be keyed on the user id, so it only ever matched the literal
     "demo". That was invisible while the client sent no id at all; the moment it started
     sending its own, every fresh install matched no seed, got `None`, and scored a flat
     0.5 on the entire catalog.
+
+    Still load-bearing after the split: with no vector to look from, `rank_catalog` falls
+    back to reading all 534k gold rows, measured at about 69 minutes.
     """
     # `bcd_api.__init__` re-exports the FastAPI instance under the name `app`, which
     # shadows the submodule — reach the module itself rather than the instance.
@@ -286,9 +289,35 @@ def test_seed_profile_answers_for_any_new_install(monkeypatch):
     monkeypatch.setitem(api._state, "store", _EmptyStore())
     monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
 
-    seeded = api._profile_for("9f3c-not-demo")
+    seeded = api._probe_profile("9f3c-not-demo")
     assert seeded is not None
     assert seeded.sensory_ideal is not None
+
+
+def test_the_seed_is_never_anybody_own_profile(monkeypatch):
+    """The other half of the split. Everything that SHOWS a number asks `_own_profile`, and
+    for someone who has said nothing the honest answer is that there is no answer."""
+    api = importlib.import_module("bcd_api.app")
+
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+
+    assert api._own_profile("9f3c-not-demo") is None
+
+
+def test_a_profile_with_no_centroid_is_not_a_taste(monkeypatch):
+    """Answer "no" to all eight quiz questions and a profile row exists with nothing in it.
+    It is not somebody's taste, so it must not be scored against either."""
+    api = importlib.import_module("bcd_api.app")
+
+    empty = TasteProfile(user_id="mine", version=1, sensory_ideal=None)
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+    monkeypatch.setattr(api, "load_profile", lambda store, uid: empty)
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+
+    assert api._own_profile("mine") is None
+    # And the probe still has somewhere to look from.
+    assert api._probe_profile("mine").user_id == "demo"
 
 
 def test_learned_profile_beats_the_seed(monkeypatch):
@@ -308,8 +337,10 @@ def test_learned_profile_beats_the_seed(monkeypatch):
     monkeypatch.setattr(api, "load_profile", lambda store, uid: learned if uid == "mine" else None)
     monkeypatch.setitem(api._state, "store", _EmptyStore())
 
-    assert api._profile_for("mine") is learned
-    assert api._profile_for("someone-else").user_id == "demo"
+    assert api._own_profile("mine") is learned
+    assert api._probe_profile("mine") is learned
+    assert api._own_profile("someone-else") is None
+    assert api._probe_profile("someone-else").user_id == "demo"
 
 
 class _EmptyStore:

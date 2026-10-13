@@ -14,10 +14,16 @@ public struct Recommendation: Codable, Sendable, Identifiable, Equatable {
     /// Predicted enjoyment, 0-1. The list arrives already ordered; this is for showing, not
     /// for re-sorting (the server's order also weighs the evidence behind each vector, which
     /// the score alone does not carry).
-    public let score: Double
+    ///
+    /// Nil when the list was ordered by a profile that is not the reader's -- a cold start,
+    /// ranked from the seed so there is somewhere to begin. The order is still worth showing;
+    /// the number would be a claim about somebody else. Was non-optional with a `?? 0`
+    /// fallback, which printed a confident "0" beside every drink (2026-10-12).
+    public let score: Double?
     /// The one-line "why", written in the same band the score falls in ("matches your
-    /// tropical preference", "some citrus, which you like").
-    public let reason: String
+    /// tropical preference", "some citrus, which you like"). Nil with the score, and for the
+    /// same reason: it names an axis of a taste, and there has to be whose.
+    public let reason: String?
     /// Scored from chemistry or a style prior rather than from reviews — the thing that lets
     /// a drink nobody has rated still be recommended.
     public let coldStart: Bool
@@ -44,8 +50,9 @@ public struct Recommendation: Codable, Sendable, Identifiable, Equatable {
         case coldStart = "cold_start"
     }
 
-    public init(productId: String, name: String, producer: String? = nil, score: Double,
-                reason: String, coldStart: Bool = false, evidence: Evidence = .guessed) {
+    public init(productId: String, name: String, producer: String? = nil,
+                score: Double? = nil, reason: String? = nil,
+                coldStart: Bool = false, evidence: Evidence = .guessed) {
         self.productId = productId
         self.name = name
         self.producer = producer
@@ -63,8 +70,10 @@ public struct Recommendation: Codable, Sendable, Identifiable, Equatable {
         productId = try c.decode(String.self, forKey: .productId)
         name = try c.decode(String.self, forKey: .name)
         producer = try c.decodeIfPresent(String.self, forKey: .producer)
-        score = try c.decodeIfPresent(Double.self, forKey: .score) ?? 0
-        reason = try c.decodeIfPresent(String.self, forKey: .reason) ?? ""
+        // No `?? 0` / `?? ""`: absent means nothing is claimed, and a defaulted zero would
+        // be drawn as a prediction of zero.
+        score = try c.decodeIfPresent(Double.self, forKey: .score)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
         coldStart = try c.decodeIfPresent(Bool.self, forKey: .coldStart) ?? false
         let raw = try c.decodeIfPresent(String.self, forKey: .evidence) ?? ""
         evidence = Evidence(rawValue: raw) ?? .guessed

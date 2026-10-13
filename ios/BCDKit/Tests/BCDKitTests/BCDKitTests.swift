@@ -1792,8 +1792,45 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         """.data(using: .utf8)!
         let resp = try JSONDecoder().decode(RecommendResponse.self, from: json)
         #expect(resp.results.first?.evidence == .guessed)
-        #expect(resp.results.first?.score == 0)
-        #expect(resp.results.first?.reason == "")
+        #expect(resp.results.first?.score == nil)
+        #expect(resp.results.first?.reason == nil)
+    }
+
+    /// Exact JSON the route emits for someone who has said nothing: ordered from the seed
+    /// profile, with every number withheld because none of them is about the reader.
+    @Test func aColdStartListCarriesNoNumbers() throws {
+        let json = """
+        {
+          "user_id": "acct:fresh",
+          "basis": "no_profile",
+          "results": [
+            {
+              "product_id": "ttb:1", "name": "Loud IPA", "producer": "A House",
+              "score": null, "reason": null, "cold_start": null, "evidence": "known"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        let row = try #require(try JSONDecoder()
+            .decode(RecommendResponse.self, from: json).results.first)
+        #expect(row.name == "Loud IPA")
+        // What is true of the drink survives; what would be a claim about the drinker does not.
+        #expect(row.evidence == .known)
+        #expect(row.score == nil)
+        #expect(row.reason == nil)
+        #expect(row.coldStart == false)
+    }
+
+    /// The failure this was: a non-optional `score` with a `?? 0` fallback drew a confident
+    /// "0" in amber beside every drink on a cold start.
+    @Test func aMissingScoreIsNotZero() throws {
+        let json = """
+        {"user_id": "u", "results": [{"product_id": "p", "name": "N", "evidence": "known"}]}
+        """.data(using: .utf8)!
+        let row = try #require(try JSONDecoder()
+            .decode(RecommendResponse.self, from: json).results.first)
+        #expect(row.score == nil)
+        #expect(row.score != 0)
     }
 
     @Test func evidenceSaysWhereTheAnswerCameFrom() {
@@ -1811,7 +1848,9 @@ private func garble(_ camera: PhotoCamera, _ coord: ScanCoordinator, ticks: Int)
         """.data(using: .utf8)!
         let got = try JSONDecoder().decode(RecommendResponse.self, from: json).results
         #expect(got.map(\.productId) == ["a", "b"])
-        #expect(got[0].score < got[1].score)
+        let first = try #require(got[0].score)
+        let second = try #require(got[1].score)
+        #expect(first < second)
     }
 
     /// A stub that does not implement the route says so, rather than answering "nothing".

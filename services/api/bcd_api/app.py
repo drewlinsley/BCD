@@ -187,7 +187,10 @@ def scan_resolve(req: ScanResolveRequest,
                  who: Caller) -> ScanResolveResponse:
     user_id = who.id
     resolver: Resolver = _state["resolver"]
-    profile = _profile_for(user_id)
+    # Their own taste or none. The chip's percentage is a claim about the reader, and the seed
+    # would stamp one on every label for someone who has never said anything. Recognition is
+    # unaffected either way: the profile only ever reaches `Resolver.score`.
+    profile = _own_profile(user_id)
     t0 = time.perf_counter()
     resp = resolver.resolve(req, profile=profile)
     resp.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -310,7 +313,7 @@ async def scan_vision(req: ScanVisionRequest,
     # `Tree House` for Julius and `Green` for Green City, every one of them a fragment of the
     # name rather than the row it names.
     resolver: Resolver = _state["resolver"]
-    profile = _profile_for(user_id)
+    profile = _own_profile(user_id)
     kept: list = []
     claimed: set[str] = set()
     for i, sighting in enumerate(sightings):
@@ -373,13 +376,23 @@ def recommend(who: Caller, limit: int = 10) -> dict:
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
     events = list(collector.iter_events(TASTE_EVENTS))
-    results = rank_catalog(store, _state["resolver"], _profile_for(user_id), limit=limit,
+    # Two profiles, one of which may be a stranger's. `own` decides whether the rows carry
+    # numbers; the probe decides what order they come in, and falls back to the seed because
+    # the no-profile branch of `rank_catalog` is a 534k-row scan. So someone who has said
+    # nothing still gets a coherent shelf to start from -- it just no longer claims to be
+    # about them.
+    own = _own_profile(user_id)
+    results = rank_catalog(store, _state["resolver"], _probe_profile(user_id), limit=limit,
                            exclude=rated_products(store, events, user_id),
                            # What they have scanned is what is on the shelf in front of them,
                            # so it leads: a suggestion they cannot buy today is worth less
                            # than one they can, however good the cosine.
-                           sightings=sightings_from_events(events, user_id))
-    return {"user_id": user_id, "results": results}
+                           sightings=sightings_from_events(events, user_id),
+                           theirs=own is not None)
+    # Said once, at the top, in the same vocabulary `/v1/product/{id}/score` uses: the client
+    # should not have to infer it from a missing key.
+    return {"user_id": user_id, "basis": "yours" if own is not None else "no_profile",
+            "results": results}
 
 
 class SignInRequest(BaseModel):
@@ -472,7 +485,11 @@ def recommend_families(who: Caller, limit: int = 6,
     user_id = who.id
     collector: TelemetryCollector = _state["telemetry"]
     store: Store = _state["store"]
-    profile = _profile_for(user_id)
+    # No seed here at all. `shelf_vector` returns None without a real profile, so every shelf
+    # comes back `unrated` and scoreless for someone who has said nothing -- including under
+    # `cross_style=true`, which otherwise ranked all twenty-two by a stranger's taste and
+    # labelled them `cross`, "ranked by a taste learned on another shelf".
+    profile = _own_profile(user_id)
     events = list(collector.iter_events(TASTE_EVENTS))
     judged = rated_products(store, events, user_id)
     # Two counts, on purpose. `sightings` is what the camera saw, and only the camera: it
@@ -625,11 +642,10 @@ def product_score(product_id: str, who: Caller) -> dict:
     scored for you yet" about a beer the server would have called a 91% match. Nothing was
     wrong with the score; nothing had asked for it.
 
-    Answered from the drinker's OWN profile, never the seed. `_profile_for` falls back to a
-    demo centroid so a fresh install's lists do not look dead, which is the right trade for a
-    list of suggestions and the wrong one for a number stamped on a label: "matches your citrus
-    preference" has to be about this reader or it should not be on the screen. With no profile
-    of their own the answer is `scored: false`, and the seal says so.
+    Answered from the drinker's OWN profile, never the seed -- `_own_profile`, which is now
+    what everything that shows a number asks. "Matches your citrus preference" has to be about
+    this reader or it should not be on the screen. With no profile of their own the answer is
+    `scored: false`, and the seal says so.
 
     A score is also only a score when it is a real cosine. With no vector on the product,
     `Resolver.score` falls through to the style-affinity prior, which is a flat 0.5 for any
@@ -767,10 +783,11 @@ def submit_quiz(req: QuizRequest, who: Caller) -> TasteProfile:
 def get_profile(who: Caller) -> TasteProfile:
     """What we think of YOUR taste, or an empty profile — never the seed.
 
-    `_profile_for` falls back to the seed so a fresh install still gets a sensible ranking, and
-    that is right for ranking and wrong here: this route is read by the "Your taste" card, and
-    a card that shows the seed tells a drinker who has rated nothing that they lean hoppy with
-    an ABV band of 5-9%. It is about them or it is empty, and `version: 0` is how it says empty.
+    `_probe_profile` falls back to the seed so a fresh install still gets a sensible ranking,
+    and that is right for the ORDER of a list and wrong here: this route is read by the "Your
+    taste" card, and a card that shows the seed tells a drinker who has rated nothing that they
+    lean hoppy with an ABV band of 5-9%. It is about them or it is empty, and `version: 0` is
+    how it says empty.
     """
     learned = load_profile(_state["store"], who.id)
     return learned or TasteProfile(user_id=who.id, version=0)
@@ -850,20 +867,39 @@ async def telemetry(batch: dict) -> dict:
     return {"accepted": len(accepted)}
 
 
-def _profile_for(user_id: str) -> TasteProfile | None:
-    """A learned profile beats the seed as soon as it has a real centroid; before that the
-    seed answers, so a fresh install still gets personalized-looking scores.
+def _own_profile(user_id: str) -> TasteProfile | None:
+    """This drinker's taste, or nothing. Never the seed.
 
-    The fallback is deliberately not keyed on `user_id`. It used to be, which was harmless
-    only while every client sent the literal id "demo" — the moment a real install
-    identified itself it matched no seed, got no profile, and every product scored a flat
-    0.5. The seed is a starting point for anyone who has not rated anything yet, not a
-    profile that belongs to one id.
+    What every NUMBER is asked of. A score and a sentence naming an axis are claims about the
+    reader, and for someone who has said nothing there is no honest one to make -- the seed is
+    a stranger's taste, and a profile with no centroid (every quiz answer a "no") is not a
+    taste at all.
     """
     learned = load_profile(_state["store"], user_id)
     if learned is not None and learned.sensory_ideal is not None:
         return learned
-    return _state["profiles"].get(user_id) or _state["profiles"].get("demo")
+    return None
+
+
+def _probe_profile(user_id: str) -> TasteProfile | None:
+    """Their own taste if they have one, and otherwise the seed -- as a place to look FROM.
+
+    The seed does two jobs and only one of them is honest, so they are separated here. As a
+    probe vector into the index it is load-bearing and invisible: `rank_catalog`'s no-profile
+    branch is `list(store.iter_gold("product"))` over 534,104 rows, measured at about 69
+    minutes before scoring even begins, and the seed's vector is what routes the request into
+    the ANN path instead. As a claim about the reader it is a lie, told to the one person who
+    reaches it -- someone who declined personalization -- so callers pass `theirs=False` and
+    the numbers do not come back. Use `_own_profile` for anything that gets shown.
+
+    The fallback is deliberately not keyed on `user_id`. It used to be, which was harmless
+    only while every client sent the literal id "demo" — the moment a real install
+    identified itself it matched no seed, got no profile, and every product scored a flat
+    0.5. The seed is a place to start for anyone who has not rated anything yet, not a
+    profile that belongs to one id.
+    """
+    return (_own_profile(user_id) or _state["profiles"].get(user_id)
+            or _state["profiles"].get("demo"))
 
 
 @app.post("/v1/hooks/parallel")

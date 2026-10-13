@@ -256,6 +256,11 @@ struct DiscoverView: View {
 /// One suggestion. The score is shown because the whole point is that it is a prediction
 /// about you, and the evidence chip because a guess from a style centroid and a profile of
 /// this exact drink are not the same claim.
+///
+/// Which is also why the score comes off when there is no prediction to make. On a cold start
+/// the server orders the list from a seed profile and sends no number, so the row shows the
+/// drink and its evidence and claims nothing; the section footer already says where the list
+/// came from.
 struct PickRow: View {
     let pick: Recommendation
     let mine: Reaction?
@@ -272,9 +277,14 @@ struct PickRow: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
-                    Text(pick.reason)
-                        .font(.caption).foregroundStyle(Brand.amber)
-                        .lineLimit(1)
+                    // Both absent on a cold start, where the order comes from the seed rather
+                    // than from this reader. The row keeps what is true of the drink itself:
+                    // its name, its maker, and what stands behind its flavour profile.
+                    if let reason = pick.reason, !reason.isEmpty {
+                        Text(reason)
+                            .font(.caption).foregroundStyle(Brand.amber)
+                            .lineLimit(1)
+                    }
                     EvidenceChip(evidence: pick.evidence)
                 }
             }
@@ -283,10 +293,10 @@ struct PickRow: View {
                 ProgressView().controlSize(.small)
             } else if mine != nil {
                 ReactionBadge(reaction: mine)
-            } else {
+            } else if let score = pick.score {
                 // Truncated, not rounded -- the detail screen prints `Int(score * 100)`,
                 // and a number that changes by one when you tap the row reads as a bug.
-                Text("\(Int(pick.score * 100))")
+                Text("\(Int(score * 100))")
                     .font(.callout.monospacedDigit().weight(.semibold))
                     .foregroundStyle(Brand.amber)
             }

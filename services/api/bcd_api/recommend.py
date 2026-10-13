@@ -127,7 +127,8 @@ def _legible(name: str) -> int:
 
 def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None, *,
                  limit: int = 10, exclude: Collection[str] = (),
-                 sightings: Mapping[str, int] | None = None) -> list[dict]:
+                 sightings: Mapping[str, int] | None = None,
+                 theirs: bool = True) -> list[dict]:
     """The `limit` products to recommend, best first, each with its maker, its score, its
     one-line reason, the cold-start flag and what the evidence behind it is.
 
@@ -135,6 +136,13 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
     whole vector groups rather than to the rows named in it, because this module's own rule
     is that rows sharing a vector are the same recommendation: dropping only the rated row
     would put a sibling in its place, which is the same suggestion under another name.
+
+    `theirs=False` says the profile is a probe and not the reader's -- the seed one, for
+    someone who has told us nothing. The order still comes from it, because a coherent
+    starting shelf beats an arbitrary one and because the alternative is a full-catalog scan.
+    The NUMBERS do not come back: a score and "matches your tropical preference" are claims
+    about the reader, and there is no reader here. Enforced in here rather than at the call
+    site, because this is the function that emits them and a caller can forget.
     """
     if profile is not None and profile.sensory_ideal is not None:
         ideal = profile.sensory_ideal.to_array()
@@ -195,7 +203,12 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
     chosen.sort(key=lambda e: e[0])
 
     return [{"product_id": product.id, "name": product.name, "producer": _maker(product),
-             "score": score, "reason": reason, "cold_start": cold,
+             # Absent, not zero, when the profile behind the order is not the reader's. A key
+             # the client reads as 0 would print a confident "0" beside every drink, which is
+             # a worse answer than no answer.
+             "score": score if theirs else None,
+             "reason": reason if theirs else None,
+             "cold_start": cold if theirs else None,
              "evidence": EVIDENCE[evidence_tier(product.sensory)]}
             for _key, product, score, reason, cold in chosen[:limit]]
 

@@ -1583,6 +1583,22 @@ class Resolver:
         score = max(0.0, min(1.0, 0.5 + 0.5 * sim))
         return (round(score, 3), _match_reason(score, sensory, profile.sensory_ideal), cold_start)
 
+    def _personal(self, product: Product, profile: TasteProfile | None,
+                  include_score: bool = True) -> tuple[float | None, str | None, bool]:
+        """The number, the reason and the cold-start flag for a chip -- or three absences.
+
+        Two reasons to answer nothing. The caller did not ask (`include_score`), or there is
+        no taste to ask about: with no profile `score` falls through to a flat style prior,
+        and 0.5 stamped on a label is a number that looks like a prediction and is the absence
+        of one. The seed used to fill that gap on every scan by someone who had said nothing.
+
+        `score` keeps the prior, because `rank_catalog` wants it: a flat number is useless on
+        a label and fine as a tie-break inside an ORDER that claims nothing.
+        """
+        if not include_score or profile is None or profile.sensory_ideal is None:
+            return (None, None, False)
+        return self.score(product, profile)
+
     # How many catalog rows one clean reading is allowed to consider. The first is usually
     # right; the rest matter when a shorter row wins by saying less — `word_similarity` is 1.0
     # for ANY name wholly inside the query, so a product literally named `Lawson's` scores a
@@ -1611,7 +1627,7 @@ class Resolver:
             if not _accounts_for_sighting(resolved.product.name,
                                           resolved.producer.name, reading):
                 continue
-            personal, why, cold = self.score(resolved.product, profile)
+            personal, why, cold = self._personal(resolved.product, profile)
             return ScoredCandidate(detection_index=index, resolved=resolved,
                                    match_score=round(min(1.0, float(raw)), 3),
                                    personal_score=personal, reason=why, cold_start=cold)
@@ -1999,10 +2015,7 @@ class Resolver:
             if named <= 1 and identity_lines >= _MIN_FRAME_FOR_PENALTY:
                 score *= _UNCORROBORATED
             score = round(score, 3)
-            personal, reason, cold = (
-                (*self.score(resolved.product, profile),) if include_score
-                else (None, None, False)
-            )
+            personal, reason, cold = self._personal(resolved.product, profile, include_score)
             # The style the can prints, agreeing with the style the row is filed under, is a
             # point for RANKING and nothing more -- exactly what the category word is, and for
             # the same reason: `support` orders candidates while `named` is what certifies a
@@ -2368,10 +2381,8 @@ class Resolver:
             rec = self._resolve_by_upc(obj.barcode)
             resolved = self._hydrate(rec) if rec is not None else None
             if resolved is not None:
-                personal, why, cold = (
-                    (*self.score(resolved.product, profile),) if include_score
-                    else (None, None, False)
-                )
+                personal, why, cold = self._personal(resolved.product, profile,
+                                                     include_score)
                 cand = ScoredCandidate(resolved=resolved, match_score=1.0,
                                        personal_score=personal, reason=why, cold_start=cold)
                 return ObjectResolution(object_id=obj.id, status="resolved", query=query,
