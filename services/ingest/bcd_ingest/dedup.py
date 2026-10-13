@@ -40,6 +40,20 @@ _DIGITS = re.compile(r"\d+")
 # brands that share a product name (Hoepfner/Gösser) top out at 0.43.
 _BRAND_SIM = 0.80
 
+#: Two words this close are the same word, one of them mistyped. Measured 2026-10-12 over
+#: 40,000 catalog names (20,394 distinct identifying tokens): a single human typo -- a dropped
+#: letter, two transposed, one doubled, one wrong key -- scores >= 0.80 against the original for
+#: 99.8% of five-and-six letter words and 99.9% of longer ones, while two genuinely DIFFERENT
+#: catalog words reach 0.80 in 0.05% and 0.02% of pairs respectively.
+_TYPO_SIM = 0.80
+
+#: And under five letters a word must match exactly, because the measurement says fuzzy matching
+#: there is a losing trade: at 0.80 it catches half the typos in a four-letter word (50.8%) at
+#: three to five times the false-pair rate (0.09%), and dropping the bar to 0.75 to catch 83.5%
+#: takes false pairs to 0.28%. A short word is both more damaged by one wrong letter and more
+#: likely to collide with an unrelated one -- "bock"/"back", "gose"/"rose".
+_TYPO_MIN_LEN = 5
+
 # Age statements written in different languages. The only words allowed to be present on
 # one side and absent on the other: "Lagavulin 16 ans" is "Lagavulin 16 Year Old".
 _AGE_EQUIV = {"ans", "ano", "anos", "año", "años", "anni", "jahre", "jahren",
@@ -160,6 +174,71 @@ def _covered(sub: dict, sup: dict) -> bool:
     if not uncovered <= _AGE_EQUIV:
         return False
     return bool((sub["nt"] - uncovered) - _STYLE)
+
+
+def same_word(a: str, b: str) -> bool:
+    """Whether two tokens are one word, allowing for the way people type on a phone.
+
+    For reading a name a DRINKER typed, which is the one place in this system where the input
+    is known to contain typos: every other source is a filing or a scrape, where a wrong letter
+    means a different product rather than a slipped thumb.
+    """
+    if a == b:
+        return True
+    if len(a) < _TYPO_MIN_LEN or len(b) < _TYPO_MIN_LEN:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= _TYPO_SIM
+
+
+def _covered_allowing_typos(sub: dict, sup: dict) -> bool:
+    """`_covered`, for a typed name: a token counts as present if some token on the other side
+    is the same word mistyped."""
+    uncovered = {t for t in sub["nt"] if not any(same_word(t, s) for s in sup["full"])}
+    if not uncovered:
+        return True
+    if not uncovered <= _AGE_EQUIV:
+        return False
+    return bool((sub["nt"] - uncovered) - _STYLE)
+
+
+def match_typed_name(name: str, maker: str | None,
+                     products: Iterable[dict]) -> list[str]:
+    """Catalog ids a drink somebody TYPED could already be, misspellings included.
+
+    The same three gates `find_substring_merges` applies, because the question is the same one
+    -- is this row already the row somebody means -- with typo tolerance added and the strict
+    "more specific" requirement dropped: a contribution matching a row exactly is the case this
+    exists to catch, and "Hazy Little Thing" for "Sierra Nevada Hazy Little Thing" is the next.
+
+    Returns every id that survives, and the CALLER must care how many there are. One is an
+    answer; several mean the typed name does not say which, and that is not a merge to make
+    automatically. A bare "Crusher" covers The Alchemist's, a different brewery's own bare
+    "Crusher", and `Bone Crusher Stout` -- and quietly picking one would hang the wrong
+    producer, the wrong flavour profile and the wrong town off the can in somebody's hand.
+
+    Digits may be ADDED by the catalog but not by the typist: a typed "Lagavulin" can be the
+    16-year-old, while a typed "Lagavulin 16" is not the row called plain "Lagavulin". Ages are
+    identity, so a typed age that names three different bottles comes back as three.
+    """
+    typed = _prep({"id": "typed", "name": name, "brand": maker or ""})
+    if not typed["nt"]:
+        return []
+    out: list[str] = []
+    for p in products:
+        cand = _prep(p)
+        if not typed["dig"] <= cand["dig"]:
+            continue
+        if not _brand_compatible(typed, cand):
+            continue
+        if not _covered_allowing_typos(typed, cand):
+            continue
+        # What they have in common has to include a word that identifies a product. Sharing
+        # only "ipa" and "double" is sharing a category.
+        shared = {t for t in typed["nt"] if any(same_word(t, s) for s in cand["full"])}
+        if not (shared - _STYLE):
+            continue
+        out.append(p["id"])
+    return out
 
 
 def find_substring_merges(products: Iterable[dict],
