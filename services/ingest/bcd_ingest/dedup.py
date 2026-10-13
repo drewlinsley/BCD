@@ -54,6 +54,12 @@ _TYPO_SIM = 0.80
 #: likely to collide with an unrelated one -- "bock"/"back", "gose"/"rose".
 _TYPO_MIN_LEN = 5
 
+#: And a typo does not change how long a word is. One edit moves the length by at most one, so
+#: two is already generous -- while `difflib` rewards one word being contained in another, which
+#: is how "crusher" and "funcrusher" score 0.824 and read as the same word mistyped. They are
+#: two words. A compound is not a slipped thumb.
+_TYPO_MAX_LEN_GAP = 2
+
 # Age statements written in different languages. The only words allowed to be present on
 # one side and absent on the other: "Lagavulin 16 ans" is "Lagavulin 16 Year Old".
 _AGE_EQUIV = {"ans", "ano", "anos", "año", "años", "anni", "jahre", "jahren",
@@ -121,9 +127,15 @@ _STYLE = {
 
 
 def _tokens(s: str) -> set[str]:
+    return set(_word_list(s))
+
+
+def _word_list(s: str) -> list[str]:
+    """`_tokens`, in the order they were written. For the one question a set cannot answer:
+    whether a name reads as a phrase inside another name."""
     d = unicodedata.normalize("NFKD", s or "")
     a = "".join(c for c in d if not unicodedata.combining(c)).casefold()
-    return set(_WORD.findall(a))
+    return _WORD.findall(a)
 
 
 def _digits(s: str) -> frozenset[str]:
@@ -187,6 +199,8 @@ def same_word(a: str, b: str) -> bool:
         return True
     if len(a) < _TYPO_MIN_LEN or len(b) < _TYPO_MIN_LEN:
         return False
+    if abs(len(a) - len(b)) > _TYPO_MAX_LEN_GAP:
+        return False
     return difflib.SequenceMatcher(None, a, b).ratio() >= _TYPO_SIM
 
 
@@ -199,6 +213,32 @@ def _covered_allowing_typos(sub: dict, sup: dict) -> bool:
     if not uncovered <= _AGE_EQUIV:
         return False
     return bool((sub["nt"] - uncovered) - _STYLE)
+
+
+def _reads_as_a_phrase_in(want: list[str], phrase: list[str]) -> bool:
+    """Whether `want` appears in `phrase` as consecutive words, typos allowed.
+
+    What a set of tokens cannot see, and the thing that made containment too generous for
+    common words. "Hazy Little Thing" and "Juicy Little Thing Hazy IPA" share every word of
+    the former, so set containment called them the same drink -- but the words are not
+    together and not in that order, and in the second one "Hazy" is a description while
+    "Juicy" is the name. Measured on the live catalog, requiring the phrase drops a typed
+    "Hazy Little Thing" from 5 candidate rows to 3, and the two it drops are the two that
+    were not that beer.
+
+    A product name is a phrase, and the words a person types off a label come in the order
+    the label prints them. Extra words on either END are fine -- that is the brand in front
+    ("Sierra Nevada Hazy Little Thing") and the style behind ("Hazy Little Thing IPA"), which
+    is exactly what a less specific name is missing.
+    """
+    if not want:
+        return True
+    if len(want) > len(phrase):
+        return False
+    for i in range(len(phrase) - len(want) + 1):
+        if all(same_word(w, phrase[i + j]) for j, w in enumerate(want)):
+            return True
+    return False
 
 
 def match_typed_name(name: str, maker: str | None,
@@ -223,6 +263,7 @@ def match_typed_name(name: str, maker: str | None,
     typed = _prep({"id": "typed", "name": name, "brand": maker or ""})
     if not typed["nt"]:
         return []
+    typed_seq = _word_list(name)
     out: list[str] = []
     for p in products:
         cand = _prep(p)
@@ -236,6 +277,15 @@ def match_typed_name(name: str, maker: str | None,
         # only "ipa" and "double" is sharing a category.
         shared = {t for t in typed["nt"] if any(same_word(t, s) for s in cand["full"])}
         if not (shared - _STYLE):
+            continue
+        # And it has to read as a phrase, not merely consist of the same words. Dropping the
+        # words that appear nowhere first, which `_covered_allowing_typos` has already
+        # certified are only age statements -- "Lagavulin 16 ans" still reaches "Lagavulin 16
+        # Year Old" on "lagavulin", with the French word gone rather than demanded in place.
+        absent = {t for t in typed["nt"] if not any(same_word(t, s) for s in cand["full"])}
+        want = [t for t in typed_seq if t not in absent]
+        phrase = _word_list(search_name(str(p.get("name") or ""), p.get("brand") or None))
+        if not _reads_as_a_phrase_in(want, phrase):
             continue
         out.append(p["id"])
     return out

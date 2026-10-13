@@ -114,6 +114,55 @@ def test_a_different_brewery_with_the_same_beer_name_is_not_a_match():
                             [_row("ttb:1", "Natur Radler", "Hoepfner")]) == []
 
 
+def test_a_name_must_read_as_a_phrase_not_just_share_words():
+    """The looseness this had. "Hazy Little Thing" and "Juicy Little Thing Hazy IPA" share
+    every word of the former, so set containment called them one drink -- but the words are
+    neither together nor in that order, and in the second one "Hazy" is a description while
+    "Juicy" is the name. On the live catalog this took a typed "Hazy Little Thing" from 5
+    candidate rows to 3, dropping the two that were not that beer."""
+    assert match_typed_name("Hazy Little Thing", None,
+                            [_row("off:1", "Juicy Little Thing Hazy IPA", "sierra nevada")]) == []
+    assert match_typed_name(
+        "Hazy Little Thing", None,
+        [_row("ttb:1", "My Favorite Thing Little Big Star Hazy Double India Pale Ale")]) == []
+
+
+def test_extra_words_at_either_end_are_still_fine():
+    """Which is the whole point of containment: a brand in front and a style behind are what a
+    less specific name is missing."""
+    assert match_typed_name("Hazy Little Thing", None,
+                            [_row("ttb:1", "Sierra Nevada Hazy Little Thing")]) == ["ttb:1"]
+    assert match_typed_name("Hazy Little Thing", None,
+                            [_row("off:1", "Hazy Little Thing IPA")]) == ["off:1"]
+    assert match_typed_name("Hazy Little Thing", None,
+                            [_row("ttb:2", "Sierra Nevada Nitro Hazy Little Thing")]) == ["ttb:2"]
+
+
+def test_the_brand_may_be_the_words_in_front():
+    """A label reads "TITO'S HANDMADE VODKA" and the catalog splits it into a brand row and a
+    product named "Handmade Vodka", so the phrase has to be built the way `search_name` builds
+    it before the words can be looked for in order."""
+    assert match_typed_name("Titos Handmade Vodka", None,
+                            [_row("ttb:1", "Handmade Vodka", "Titos")]) == ["ttb:1"]
+
+
+def test_reordering_the_words_is_not_a_match_and_that_is_the_trade():
+    """"Branca Fernet" will not reach "Fernet Branca", and a window that allowed any order
+    would not fix the bug above: in "Juicy Little Thing Hazy IPA" the words of "Hazy Little
+    Thing" DO occupy three consecutive positions. Order is what separates them. A reordered
+    typing reads as new, which the two-account gate then holds for a person to look at."""
+    assert match_typed_name("Branca Fernet", None, [_row("ttb:1", "Fernet Branca")]) == []
+
+
+def test_a_compound_word_is_not_a_typo():
+    """`difflib` rewards one word being contained in another, so "crusher" and "funcrusher"
+    score 0.824 and read as the same word mistyped. They are two words."""
+    assert not same_word("crusher", "funcrusher")
+    assert match_typed_name("Crusher", None, [_row("ttb:1", "Funcrusher")]) == []
+    # A plural still is a typo's distance away, and is the same drink.
+    assert same_word("banger", "bangers")
+
+
 def test_short_words_must_match_exactly():
     """Measured: at 0.80 fuzzy matching catches half the typos in a four-letter word at three
     to five times the false-pair rate, so under five letters a word has to be right."""
