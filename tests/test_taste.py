@@ -10,10 +10,12 @@ from bcd_api.resolver import Resolver
 from bcd_api.taste import (
     _rating_weight,
     build_profile,
+    interest_from_events,
     load_profile,
     rated_products,
     rebuild_profile,
     save_profile,
+    sightings_from_events,
     signals_from_events,
 )
 from bcd_ingest.merge import put_redirect
@@ -269,13 +271,16 @@ def test_reason_does_not_claim_a_match_it_did_not_find(store):
     assert "outside your usual" in weak_reason
 
 
-def test_seed_profile_answers_for_any_new_install(monkeypatch):
-    """A real install id must still get the seed profile until it has rated something.
+def test_the_probe_answers_for_any_new_install(monkeypatch):
+    """A real install id must still get the seed as a PROBE until it has rated something.
 
     The fallback used to be keyed on the user id, so it only ever matched the literal
     "demo". That was invisible while the client sent no id at all; the moment it started
     sending its own, every fresh install matched no seed, got `None`, and scored a flat
     0.5 on the entire catalog.
+
+    Still load-bearing after the split: with no vector to look from, `rank_catalog` falls
+    back to reading all 534k gold rows, measured at about 69 minutes.
     """
     # `bcd_api.__init__` re-exports the FastAPI instance under the name `app`, which
     # shadows the submodule — reach the module itself rather than the instance.
@@ -284,9 +289,35 @@ def test_seed_profile_answers_for_any_new_install(monkeypatch):
     monkeypatch.setitem(api._state, "store", _EmptyStore())
     monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
 
-    seeded = api._profile_for("9f3c-not-demo")
+    seeded = api._probe_profile("9f3c-not-demo")
     assert seeded is not None
     assert seeded.sensory_ideal is not None
+
+
+def test_the_seed_is_never_anybody_own_profile(monkeypatch):
+    """The other half of the split. Everything that SHOWS a number asks `_own_profile`, and
+    for someone who has said nothing the honest answer is that there is no answer."""
+    api = importlib.import_module("bcd_api.app")
+
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+
+    assert api._own_profile("9f3c-not-demo") is None
+
+
+def test_a_profile_with_no_centroid_is_not_a_taste(monkeypatch):
+    """Answer "no" to all eight quiz questions and a profile row exists with nothing in it.
+    It is not somebody's taste, so it must not be scored against either."""
+    api = importlib.import_module("bcd_api.app")
+
+    empty = TasteProfile(user_id="mine", version=1, sensory_ideal=None)
+    monkeypatch.setitem(api._state, "profiles", {"demo": api._demo_profile()})
+    monkeypatch.setattr(api, "load_profile", lambda store, uid: empty)
+    monkeypatch.setitem(api._state, "store", _EmptyStore())
+
+    assert api._own_profile("mine") is None
+    # And the probe still has somewhere to look from.
+    assert api._probe_profile("mine").user_id == "demo"
 
 
 def test_learned_profile_beats_the_seed(monkeypatch):
@@ -306,8 +337,10 @@ def test_learned_profile_beats_the_seed(monkeypatch):
     monkeypatch.setattr(api, "load_profile", lambda store, uid: learned if uid == "mine" else None)
     monkeypatch.setitem(api._state, "store", _EmptyStore())
 
-    assert api._profile_for("mine") is learned
-    assert api._profile_for("someone-else").user_id == "demo"
+    assert api._own_profile("mine") is learned
+    assert api._probe_profile("mine") is learned
+    assert api._own_profile("someone-else") is None
+    assert api._probe_profile("someone-else").user_id == "demo"
 
 
 class _EmptyStore:
@@ -419,3 +452,190 @@ def test_one_installs_withdrawal_cannot_clear_anothers_verdict():
         _ev(name="rating_withdrawn", product_id="p:ipa", install="someone-else"),
     ]
     assert signals_from_events(events, "demo") == {"p:ipa": 1.0}
+
+
+
+# ---- scans ------------------------------------------------------------------------------
+
+# What someone goes to look at is what they are considering: standing in front of it reading
+# the label, or typing its name. Weaker than a verdict and weaker than a stated preference, and
+# the only one of the three that costs the drinker nothing — so it is what keeps learning after
+# the quiz's eight questions are over (2026-10-08).
+#
+# It does NOT reach someone who skipped the quiz, which an earlier version of this comment
+# claimed: skipping grants no consent, and the client drops a personalization-tier event before
+# it is ever queued.
+
+
+_N = 0
+
+
+def _scan(pid, install="demo", tier="personalization", event_id=None):
+    global _N
+    _N += 1
+    return _ev(name="scan_resolved", install=install, tier=tier, product_id=pid,
+               event_id=event_id or f"ev-{_N}")
+
+
+def _search(pid, install="demo", tier="personalization", event_id=None):
+    global _N
+    _N += 1
+    return _ev(name="search_result_opened", install=install, tier=tier, product_id=pid,
+               event_id=event_id or f"ev-{_N}")
+
+
+def test_a_scanned_product_is_a_small_positive():
+    weights = interest_from_events([_scan("p:ipa")], "demo")
+    assert weights == {"p:ipa": pytest.approx(0.15)}
+    # Positive, always. You cannot read a dislike off a glance.
+    assert all(w > 0 for w in weights.values())
+
+
+def test_looking_at_it_twice_counts_twice_even_on_one_trip():
+    """Putting a bottle down, looking at two others and picking it up again is someone
+    deliberating — the strongest thing a camera can say about a drink they have not tasted.
+    A thirty-minute gate used to collapse this and it was wrong (user, 2026-10-08)."""
+    events = [_scan("p:ipa"), _scan("p:ipa")]
+    assert sightings_from_events(events, "demo") == {"p:ipa": 2}
+    assert interest_from_events(events, "demo") == {"p:ipa": pytest.approx(0.30)}
+
+
+def test_one_steady_look_is_one_look_however_many_ticks_it_took():
+    """Decided on the client, which can see it: a product already on the HUD is not reported
+    again, so the 350ms redraw never reaches here as a second look."""
+    assert sightings_from_events([_scan("p:ipa")], "demo") == {"p:ipa": 1}
+
+
+def test_a_batch_sent_twice_is_not_two_looks():
+    """What the time gate was really guarding against, done exactly instead of by heuristic:
+    a retransmission carries the same event id."""
+    once = _scan("p:ipa", event_id="ev-fixed")
+    assert sightings_from_events([once, dict(once)], "demo") == {"p:ipa": 1}
+
+
+def test_an_event_with_no_id_still_counts():
+    """The client has always sent one. Losing a real look to a missing field is the worse
+    failure."""
+    bare = _ev(name="scan_resolved", install="demo", tier="personalization",
+               product_id="p:ipa")
+    assert sightings_from_events([bare, dict(bare)], "demo") == {"p:ipa": 2}
+
+
+def test_a_scan_is_worth_far_less_than_a_rating_or_a_quiz_answer():
+    """Scanning is how you ask what something IS, so plenty of scans are of drinks that go
+    straight back on the shelf. The ordering is the whole safety of the signal."""
+    scan = interest_from_events([_scan("p:ipa")], "demo")["p:ipa"]
+    chugged = signals_from_events([_ev(product_id="p:ipa", rating=5.0)], "demo")["p:ipa"]
+    assert scan < 0.5, "a scan must sit below a quiz answer's weight"
+    assert scan < abs(chugged)
+
+
+def test_scans_are_consent_gated_exactly_as_everything_else_is():
+    assert interest_from_events([_scan("p:ipa", tier="analytics")], "demo") == {}
+
+
+def test_another_installs_scans_are_not_yours():
+    assert interest_from_events([_scan("p:ipa", install="someone-else")], "demo") == {}
+
+
+def test_a_verdict_on_a_scanned_drink_replaces_the_glance_at_it(store):
+    """You scanned it, then you drank it and said what you thought. The rating is the better
+    evidence and must not be averaged with the look that preceded it."""
+    looked = rebuild_profile(store, [_scan("p:ipa")], "demo")
+    assert looked.sensory_ideal is not None
+    assert looked.sensory_ideal.axes.get("bitterness", 0) > 0
+
+    both = rebuild_profile(store, [_scan("p:ipa"),
+                                   _ev(product_id="p:ipa", rating=1.0)], "demo-2")
+    # A spat-out IPA is a dislike, not a dislike softened by the look that came before it.
+    assert both.sensory_ideal is None
+
+
+def test_scanning_never_bars_a_drink_from_being_recommended(store):
+    """The reason you scanned it is that you might buy it. `rated_products` keeps judged
+    drinks out of "For you"; a scanned one must stay in, or the signal would hide the very
+    thing it is evidence of."""
+    assert rated_products(store, [_scan("p:ipa")], "demo") == set()
+
+
+def test_scanning_alone_builds_a_profile_for_someone_who_said_nothing(store):
+    """The point of the whole signal. No quiz, no ratings — just a camera pointed at two
+    IPAs — and there is somewhere to recommend from."""
+    profile = rebuild_profile(store, [_scan("p:ipa"), _scan("p:ddh")], "demo")
+    assert profile.sensory_ideal is not None
+    axes = profile.sensory_ideal.axes
+    assert axes.get("citrus", 0) > axes.get("smoky_peat", 0), axes
+
+
+# ---- searches ---------------------------------------------------------------------------
+
+# Typing a name asks the same question as pointing a camera at the label, from the sofa rather
+# than the aisle. It is the other half of listening to what someone goes to look at, and the
+# user asked for it on the same grounds (2026-10-08).
+
+
+def test_looking_a_drink_up_by_name_is_a_signal_too():
+    assert interest_from_events([_search("p:ipa")], "demo") == {"p:ipa": pytest.approx(0.15)}
+
+
+def test_a_search_and_a_scan_of_the_same_drink_are_two_considerations():
+    """One tally, not two. Splitting them would make going to look at the same bottle a fourth
+    time count for less than the third, purely because of which door it came through."""
+    events = [_scan("p:widow"), _scan("p:widow"), _scan("p:widow"), _search("p:widow")]
+    assert interest_from_events(events, "demo") == {"p:widow": pytest.approx(0.60)}
+
+
+def test_a_search_is_worth_the_same_as_one_look():
+    """Neither is a verdict, and there is no principled reason to rank one glance above the
+    other. If anything search is the more deliberate of the two -- a camera draws whatever is
+    in frame -- so it is not discounted."""
+    assert (interest_from_events([_search("p:ipa")], "demo")["p:ipa"]
+            == interest_from_events([_scan("p:ipa")], "demo")["p:ipa"])
+
+
+def test_a_search_is_not_a_sighting():
+    """The one place the two must part. `sightings_from_events` feeds the ranking boost that
+    puts what is on the shelf in front of them first, and a search is no evidence the bottle
+    is in reach -- someone curious on a train is not someone holding it."""
+    events = [_search("p:ipa"), _scan("p:ddh")]
+    assert sightings_from_events(events, "demo") == {"p:ddh": 1}
+
+
+def test_searches_are_consent_gated_exactly_as_everything_else_is():
+    assert interest_from_events([_search("p:ipa", tier="analytics")], "demo") == {}
+
+
+def test_another_installs_searches_are_not_yours():
+    assert interest_from_events([_search("p:ipa", install="someone-else")], "demo") == {}
+
+
+def test_a_search_batch_sent_twice_is_not_two_searches():
+    once = _search("p:ipa", event_id="ev-search-fixed")
+    assert interest_from_events([once, dict(once)], "demo") == {"p:ipa": pytest.approx(0.15)}
+
+
+def test_searching_alone_builds_a_profile(store):
+    """Someone who never opens the camera: they turned personalization on, looked two IPAs up
+    by name, and there is somewhere to recommend from."""
+    profile = rebuild_profile(store, [_search("p:ipa"), _search("p:ddh")], "demo")
+    assert profile.sensory_ideal is not None
+    axes = profile.sensory_ideal.axes
+    assert axes.get("citrus", 0) > axes.get("smoky_peat", 0), axes
+
+
+def test_a_verdict_on_a_searched_drink_replaces_the_look_at_it(store):
+    both = rebuild_profile(store, [_search("p:ipa"),
+                                   _ev(product_id="p:ipa", rating=1.0)], "demo")
+    assert both.sensory_ideal is None
+
+
+def test_searching_never_bars_a_drink_from_being_recommended(store):
+    assert rated_products(store, [_search("p:ipa")], "demo") == set()
+
+
+def test_the_search_event_is_replayed_from_the_log():
+    """A profile is rebuilt from the log on every restart, so an event missing from
+    `TASTE_EVENTS` is a signal that works until the server bounces and then silently does
+    not."""
+    from bcd_api.taste import TASTE_EVENTS
+    assert "search_result_opened" in TASTE_EVENTS

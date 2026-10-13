@@ -215,3 +215,58 @@ def test_style_catalog_reports_what_is_really_filed():
         assert s.style_catalog() == [("beer", "Hazy IPA"), ("spirit", "Peated Scotch")]
     finally:
         s.close()
+
+
+
+# ---- what is on the shelf in front of them ---------------------------------------------
+
+def test_a_scanned_bottle_leads_its_shelf(store):
+    """A scan happens in the shop. The scanned set is the buyable set, so it leads — and a
+    shelf that opens with a drink they cannot get today answers a question nobody asked
+    (user, 2026-10-08)."""
+    resolver = Resolver(store)
+    rows = [store.get_gold(pid) for pid in
+            ("gin:citrus", "gin:juniper", "gin:floor0", "gin:floor1", "gin:floor2")]
+
+    plain = rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=5)
+    assert plain["results"][0]["product_id"] != "gin:floor2"
+
+    lifted = rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=5,
+                         sightings={"gin:floor2": 1})
+    assert lifted["results"][0]["product_id"] == "gin:floor2"
+
+
+def test_the_one_they_went_back_to_leads_the_one_they_glanced_at(store):
+    resolver = Resolver(store)
+    rows = [store.get_gold(pid) for pid in ("gin:citrus", "gin:juniper", "gin:floor0")]
+    shelf = rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=3,
+                        sightings={"gin:citrus": 1, "gin:floor0": 4})
+    assert [r["product_id"] for r in shelf["results"]][:2] == ["gin:floor0", "gin:citrus"]
+
+
+def test_lifting_the_scanned_row_does_not_reshuffle_the_rest(store):
+    """Stable: this only lifts. Everything else keeps the order the store gave it, so the
+    shelf does not rearrange itself around one glance."""
+    resolver = Resolver(store)
+    rows = [store.get_gold(pid) for pid in
+            ("gin:citrus", "gin:juniper", "gin:floor0", "gin:floor1", "gin:floor2")]
+    after = [r["product_id"] for r in
+             rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=5,
+                         sightings={"gin:floor1": 2})["results"]]
+    assert after == ["gin:floor1", "gin:citrus", "gin:juniper"]
+
+
+def test_the_scanned_row_represents_its_own_vector_group(store):
+    """The three registry gins carry one vector and collapse to one entry. Which one stands
+    for them matters: the drinker scanned `floor1`, so naming `floor0` back at them would
+    answer their question with a different bottle — the same rule `rank_catalog` applies when
+    it picks the plainest-named sibling, except that a bottle they actually held beats plain."""
+    resolver = Resolver(store)
+    rows = [store.get_gold(pid) for pid in ("gin:floor0", "gin:floor1", "gin:floor2")]
+
+    unseen = rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=5)
+    assert [r["product_id"] for r in unseen["results"]] == ["gin:floor0"]
+
+    held = rank_family(store, resolver, None, rows, personal=False, rated_in=False, limit=5,
+                       sightings={"gin:floor2": 1})
+    assert [r["product_id"] for r in held["results"]] == ["gin:floor2"]

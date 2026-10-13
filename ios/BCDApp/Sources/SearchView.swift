@@ -40,7 +40,7 @@ struct SearchView: View {
                 if new.isEmpty { results = []; submitted = nil; recents = env.recents.all() }
             }
             .task { recents = env.recents.all() }
-            .sheet(item: $detail) { ProductDetailView(candidate: $0) }
+            .sheet(item: $detail) { ProductDetailView(candidate: $0, referrer: .search) }
         }
     }
 

@@ -38,7 +38,12 @@ struct RootView: View {
                 .tabItem { Label("You", systemImage: "person.crop.circle") }
         }
         .tint(Brand.amber)
-        .task { try? await env.telemetry.log("session_start", tier: .analytics) }
+        .task {
+            try? await env.telemetry.log("session_start", tier: .analytics)
+            // Who the app thinks it is talking to, asked once on launch. Everything that
+            // decides between "your taste" and "somewhere to start" reads the answer.
+            await env.refreshProfile()
+        }
         // The one screen that comes before the app. A drinker with no profile gets
         // recommendations built from a seed that is somebody else's taste, and the list says
         // "matches your tropical preference" to someone who has never said anything.
@@ -48,8 +53,14 @@ struct RootView: View {
         // cold start, and rating anything builds the same profile by the same path.
         .fullScreenCover(isPresented: .init(get: { !quizAsked },
                                             set: { if !$0 { quizAsked = true } })) {
-            QuizView { quizAsked = true }
+            // Answered or skipped, ask the server again before the app appears behind it:
+            // eight answers are a profile, and the screens underneath decide what to call
+            // their lists by whether one exists.
+            // `consent` as well as `env`: answering the quiz is what grants personalization,
+            // so the screen needs the real store and not a fresh one.
+            QuizView { quizAsked = true; Task { await env.refreshProfile() } }
                 .environmentObject(env)
+                .environmentObject(env.consent)
         }
     }
 }

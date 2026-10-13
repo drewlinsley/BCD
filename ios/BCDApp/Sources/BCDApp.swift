@@ -63,7 +63,30 @@ final class AppEnvironment: ObservableObject {
     /// A rating reached the profile. Called by the picker, not by the local log: what moves
     /// the ranking is the server accepting it, and a verdict kept on the phone changes
     /// nothing the list would show.
-    func ratingAccepted() { ratingsVersion += 1 }
+    func ratingAccepted() {
+        ratingsVersion += 1
+        Task { await refreshProfile() }
+    }
+
+    /// Whether the server holds a taste centroid for this account — whether the app knows
+    /// whose taste it is showing.
+    ///
+    /// Asked of the server rather than counted on the phone. The app used to decide this with
+    /// `ReactionLog.count`, the number of products rated on THIS install, and that stopped
+    /// being the same question the moment the quiz shipped: a quiz answer names a family, not
+    /// a product, so it writes nothing to that log. Someone could answer all eight questions,
+    /// get a list built from their own centroid, and still be shown it under "Somewhere to
+    /// start" with every shelf dark (2026-10-08). The profile is the server's, so the server
+    /// is who to ask.
+    @Published private(set) var knowsYou = false
+
+    /// Ask. Quiet on failure: not reaching the server is not evidence that nobody is known,
+    /// and flipping this to false offline would relabel a drinker's own list as a stranger's.
+    func refreshProfile() async {
+        guard let profile = try? await api.profile() else { return }
+        let known = profile.sensoryIdeal != nil
+        await MainActor.run { self.knowsYou = known }
+    }
 
     init(api: APIClientProtocol, llm: LLMProvider, telemetry: TelemetryQueue,
          makeScanEngine: @escaping () -> ScanEngine,

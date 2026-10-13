@@ -140,7 +140,7 @@ struct ScanView: View {
             }
         }
         .sheet(item: $selected) { cand in
-            ProductDetailView(candidate: cand)
+            ProductDetailView(candidate: cand, referrer: .scan)
         }
     }
 

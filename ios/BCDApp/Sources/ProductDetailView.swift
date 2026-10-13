@@ -18,8 +18,20 @@ import BCDKit
 // and the strength carry it, and everything else is an line that either appears or
 // doesn't.
 
+/// Which door the drinker came through. Was a literal `"scan"` typed into the telemetry call,
+/// on every open from all four doors, so the analytics said every drink in the app was found by
+/// camera -- and there was no way to tell the one door that is a taste signal from the three
+/// that are the app's own suggestions.
+///
+/// No default value. A default is how the wrong answer got sent from four call sites for weeks;
+/// without one the compiler names every door that forgets to say which it is.
+enum ProductReferrer: String {
+    case scan, search, recommend, similar, list, alert
+}
+
 struct ProductDetailView: View {
     let candidate: ScoredCandidate
+    let referrer: ProductReferrer
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var reactions: ReactionLog
 
@@ -28,6 +40,10 @@ struct ProductDetailView: View {
     /// rather than flashing an empty card on every open.
     @State private var similar: [SimilarProduct]?
     @State private var openingSimilar: String?
+    /// The server's answer to "would this reader like it", for a drink that arrived without
+    /// one. Nil until it answers, so the seal holds its unscored state rather than flashing a
+    /// number in.
+    @State private var fetchedScore: PersonalScore?
     /// A neighbour opened from this screen. Presented rather than pushed: this view owns a
     /// `NavigationStack`, and nesting one inside another costs the back button.
     @State private var drilldown: ScoredCandidate?
@@ -39,6 +55,21 @@ struct ProductDetailView: View {
     /// copied into `@State` when the sheet closes: the Seal and the verdict line both change
     /// the moment one is given or taken back, and the log is the thing that knows.
     private var myReaction: Reaction? { reactions.reaction(for: product.id) }
+
+    // What the screen predicts, whoever worked it out. A recommendation arrives already
+    // scored; a drink found by name, picked out of the scan's "is it this one?" list, or
+    // opened from another drink's Similar profile arrives with nothing, and three of the four
+    // doors onto this screen are those. The seal said "not scored for you yet" about beers the
+    // server would have called a 91% match — nothing was wrong with the score, nothing had
+    // asked for it (2026-10-08).
+
+    private var personalScore: Double? {
+        candidate.personalScore ?? fetchedScore?.personalScore
+    }
+
+    private var reason: String? { candidate.reason ?? fetchedScore?.reason }
+
+    private var coldStart: Bool { candidate.coldStart || (fetchedScore?.coldStart ?? false) }
 
     private var producerName: String { DisplayName.producer(producer.name) }
     private var productName: String {
@@ -68,7 +99,13 @@ struct ProductDetailView: View {
             .task(id: product.id) {
                 similar = (try? await env.api.similar(to: product.id, limit: 6))?.results ?? []
             }
-            .sheet(item: $drilldown) { ProductDetailView(candidate: $0) }
+            // Only when the drink arrived without one: a recommendation already carries the
+            // answer, and asking again would be the same cosine computed twice.
+            .task(id: product.id) {
+                guard candidate.personalScore == nil else { return }
+                fetchedScore = try? await env.api.productScore(for: product.id)
+            }
+            .sheet(item: $drilldown) { ProductDetailView(candidate: $0, referrer: .similar) }
             .task {
                 // Opening a product is the deliberate act that earns it a place in the Rate
                 // queue; merely crossing the viewfinder does not.
@@ -76,7 +113,15 @@ struct ProductDetailView: View {
                                             producer: producerName,
                                             abvPct: product.spec.abvPct?.value))
                 try? await env.telemetry.log("product_view", tier: .analytics,
-                    ["product_id": .string(product.id), "referrer": .string("scan")])
+                    ["product_id": .string(product.id),
+                     "referrer": .string(referrer.rawValue)])
+                // Looking a drink up by name and opening it is a taste signal, weighed with
+                // what the camera saw. Only this door: the others are lists this app built, and
+                // weighing a tap on its own suggestion would teach it that it was right.
+                if referrer == .search {
+                    try? await env.telemetry.log("search_result_opened", tier: .personalization,
+                                                 ["product_id": .string(product.id)])
+                }
             }
         }
     }
@@ -118,7 +163,7 @@ struct ProductDetailView: View {
                     Button { rating = true } label: { Seal(rated: mine) }
                         .buttonStyle(.plain)
                         .accessibilityHint("Change your rating")
-                } else if let score = candidate.personalScore {
+                } else if let score = personalScore {
                     Seal(score: score)
                 } else {
                     Seal()
@@ -194,14 +239,14 @@ struct ProductDetailView: View {
     @ViewBuilder private var verdict: some View {
         if myReaction != nil {
             EmptyView()
-        } else if candidate.personalScore != nil {
+        } else if personalScore != nil {
             VStack(alignment: .leading, spacing: 6) {
-                if let reason = candidate.reason {
+                if let reason {
                     Text(reason.prefix(1).uppercased() + reason.dropFirst())
                         .font(.subheadline)
                         .foregroundStyle(Brand.text)
                 }
-                if candidate.coldStart {
+                if coldStart {
                     Text("Scored from its recipe and style — no personal reviews.")
                         .font(.caption)
                         .foregroundStyle(Brand.textMuted)
