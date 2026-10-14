@@ -4,7 +4,7 @@ tier: A
 categories:
 - all
 access:
-  method: bulk
+  method: api
   auth: none
   robots_allows: null
   rate_limit_rps: null
@@ -13,11 +13,15 @@ legal_basis: open_license
 provides:
 - producer
 - ownership
+- abv
 refresh: monthly
 est_records: null
 priority: 2
-status: planned
+status: active
 urls:
   home: https://www.wikidata.org
+  data: https://query.wikidata.org/sparql
 notes: 'Brand/producer entities, aliases, ownership graphs. Entity-resolution backbone (who owns whom:
-  ABI, Constellation, Diageo).'
+  ABI, Constellation, Diageo). Also 18,536 drinks state an alcohol by volume (P2665) -- SPARQL, no key;
+  ask for labels in "mul" as well as a language, because a brand name is language-agnostic and the standard
+  label service hides those behind the QID. Read by scripts/fill_abv_from_open_data.py.'
