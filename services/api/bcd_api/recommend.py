@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 
 from bcd_ingest.store import Store
 from bcd_schema import Product, SensorySource, SensoryVector, TasteProfile
@@ -60,11 +60,26 @@ def evidence_tier(sensory: SensoryVector | None) -> int:
     return GUESSED
 
 
-def rank_key(score: float, product: Product) -> tuple:
-    """Sort key, ascending: the band first, then the evidence, then the score itself. Two rows
-    alike on all three sort by the vector's confidence, then by name, so a run is repeatable."""
+def rank_key(score: float, product: Product, sightings: int = 0) -> tuple:
+    """Sort key, ascending: the band first, then what is in front of them, then the evidence,
+    then the score. Two rows alike on all of it sort by the vector's confidence, then by name,
+    so a run is repeatable.
+
+    `sightings` is how many separate times they have pointed a camera at this drink, and it
+    comes second because of where scanning happens. A scan means standing in the shop holding
+    the bottle, so the scanned set is the BUYABLE set: a recommendation the drinker cannot act
+    on today is worth less than one they can, however good the cosine. Ranking a drink they
+    have never seen above the one in their hand answers a question nobody asked.
+
+    More sightings rank higher still, because going back to a bottle is the drink they cannot
+    decide about -- exactly the question a recommendation is for.
+
+    It sits UNDER the band, not over it. Scanning something is not evidence of liking it: plenty
+    of scans are of drinks that go straight back on the shelf, and a bottle that does not match
+    must not be promoted into "for you" just because it was looked at.
+    """
     sensory = product.sensory
-    return (match_band(score), evidence_tier(sensory), -score,
+    return (match_band(score), -sightings, evidence_tier(sensory), -score,
             -(sensory.confidence if sensory else 0.0), product.name or "")
 
 
@@ -111,7 +126,9 @@ def _legible(name: str) -> int:
 
 
 def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None, *,
-                 limit: int = 10, exclude: Collection[str] = ()) -> list[dict]:
+                 limit: int = 10, exclude: Collection[str] = (),
+                 sightings: Mapping[str, int] | None = None,
+                 theirs: bool = True) -> list[dict]:
     """The `limit` products to recommend, best first, each with its maker, its score, its
     one-line reason, the cold-start flag and what the evidence behind it is.
 
@@ -119,6 +136,13 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
     whole vector groups rather than to the rows named in it, because this module's own rule
     is that rows sharing a vector are the same recommendation: dropping only the rated row
     would put a sibling in its place, which is the same suggestion under another name.
+
+    `theirs=False` says the profile is a probe and not the reader's -- the seed one, for
+    someone who has told us nothing. The order still comes from it, because a coherent
+    starting shelf beats an arbitrary one and because the alternative is a full-catalog scan.
+    The NUMBERS do not come back: a score and "matches your tropical preference" are claims
+    about the reader, and there is no reader here. Enforced in here rather than at the call
+    site, because this is the function that emits them and a caller can forget.
     """
     if profile is not None and profile.sensory_ideal is not None:
         ideal = profile.sensory_ideal.to_array()
@@ -139,11 +163,13 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
         # No taste vector yet: the mild style-affinity prior, over the catalog.
         candidates = list(store.iter_gold("product"))
 
+    seen_count = sightings or {}
     scored: list[tuple[tuple, Product, float, str, bool]] = []
     for rec in candidates:
         product = Product.model_validate(rec)
         score, reason, cold = resolver.score(product, profile)
-        scored.append((rank_key(score, product), product, score, reason, cold))
+        scored.append((rank_key(score, product, seen_count.get(product.id, 0)),
+                       product, score, reason, cold))
 
     # One entry per vector: the members are the same recommendation, so the best-evidenced
     # and then plainest-named stands for them, and the representatives are ranked.
@@ -162,7 +188,10 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
 
     def _plainness(entry: tuple[tuple, Product, float, str, bool]) -> tuple:
         # the rank key up to (not including) the name, then whether the name can stand for the
-        # others at all, then the plainness, then the name
+        # others at all, then the plainness, then the name. The rank key now leads with the
+        # band and the sighting count, so the row the drinker actually scanned represents its
+        # group -- picking the plainest-named sibling would answer their question with a
+        # different bottle's name.
         name = entry[1].name or ""
         plain = _plain_name(name, _maker(entry[1]))
         return (*entry[0][:-1], _legible(name), len(plain.split()), len(plain), name)
@@ -174,7 +203,12 @@ def rank_catalog(store: Store, resolver: Resolver, profile: TasteProfile | None,
     chosen.sort(key=lambda e: e[0])
 
     return [{"product_id": product.id, "name": product.name, "producer": _maker(product),
-             "score": score, "reason": reason, "cold_start": cold,
+             # Absent, not zero, when the profile behind the order is not the reader's. A key
+             # the client reads as 0 would print a confident "0" beside every drink, which is
+             # a worse answer than no answer.
+             "score": score if theirs else None,
+             "reason": reason if theirs else None,
+             "cold_start": cold if theirs else None,
              "evidence": EVIDENCE[evidence_tier(product.sensory)]}
             for _key, product, score, reason, cold in chosen[:limit]]
 
@@ -212,7 +246,8 @@ def shelf_vector(profile: TasteProfile | None, *, rated_in: bool,
 
 def rank_family(store: Store, resolver: Resolver, profile: TasteProfile | None,
                 rows: Collection[dict], *, personal: bool, rated_in: bool, limit: int = 6,
-                exclude: Collection[str] = ()) -> dict:
+                exclude: Collection[str] = (),
+                sightings: Mapping[str, int] | None = None) -> dict:
     """One family's picks, from rows the caller has already fetched (see `shelf_vector` and
     `Store.shelves_many` -- twenty-two shelves are fetched together, so the query does not
     belong in here). Returns `{"basis": ..., "results": [...]}`.
@@ -223,7 +258,11 @@ def rank_family(store: Store, resolver: Resolver, profile: TasteProfile | None,
       - `"unrated"`  - not ranked for anyone. Best-evidenced first, and no score is returned,
                        because there is no number here that would mean anything about them.
     """
-    rows = list(rows)
+    # What they have scanned leads the shelf, most-revisited first. A scan happens in the
+    # shop, so these are the ones on the shelf in front of them; the rest keep the order the
+    # store gave them. Stable, so this only lifts -- it never reshuffles.
+    seen_count = sightings or {}
+    rows = sorted(rows, key=lambda r: -seen_count.get(r.get("id", ""), 0))
     skip = set(exclude)
     seen: set[object] = set()
     out: list[dict] = []

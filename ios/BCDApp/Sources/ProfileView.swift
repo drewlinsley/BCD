@@ -27,10 +27,16 @@ struct ProfileView: View {
     @EnvironmentObject var consent: ConsentStore
     /// The provenance line counts them, so it has to be told when the count changes.
     @EnvironmentObject var reactions: ReactionLog
+    /// Whether the quiz was answered on this install — the other thing the card is built
+    /// from, and one the profile itself does not record.
+    @AppStorage("bcd.quizAnswered") private var quizAnswered = false
     /// nil until the fetch settles. `loadFailed` is separate on purpose: a profile that came
     /// back empty and a profile that never arrived look identical if you only track one.
     @State private var profile: TasteProfile?
     @State private var loadFailed = false
+    /// Whether the quiz is open over this screen. The only way back to it: it is presented
+    /// once on first launch and never again, and the screen it points at is this one.
+    @State private var retakingQuiz = false
     @State private var authState: AuthStore.State?
     @State private var signingIn = false
     @State private var signInError: String?
@@ -40,7 +46,10 @@ struct ProfileView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Your taste") { taste }
+                Section("Your taste") {
+                    taste
+                    quiz
+                }
                 Section("Account") { account }
                 Section("Privacy") {
                     Toggle("Analytics", isOn: $consent.analytics)
@@ -66,7 +75,46 @@ struct ProfileView: View {
             // screen is open only if the switch above changes what may be collected. Re-read
             // on that rather than on every appearance.
             .onChange(of: consent.personalization) { _, _ in Task { await load() } }
+            // A sheet, not a `fullScreenCover`. On first launch the quiz is a screen that
+            // comes before the app; reached from here it is one more thing in a settings
+            // list, and taking the whole screen for it would overstate it.
+            //
+            // `env` and `consent` are handed over explicitly, exactly as `RootView` does:
+            // answering is what grants personalization, so the sheet needs the real store.
+            .sheet(isPresented: $retakingQuiz) {
+                QuizView { retakingQuiz = false; Task { await load() } }
+                    .environmentObject(env)
+                    .environmentObject(consent)
+            }
         }
+    }
+
+    /// The way back to the quiz, and the only one.
+    ///
+    /// It is presented once, from a `fullScreenCover` gated on `bcd.quizAsked`, and that flag
+    /// is set by answering OR skipping OR dismissing — so skipping it put it out of reach for
+    /// the life of the install. Two pieces of copy already promised otherwise, including the
+    /// one shown when the server is unreachable: "you can answer this later under You". The
+    /// case where the quiz most needs a second chance was the case that promised one and had
+    /// none (2026-10-08).
+    ///
+    /// Retaking is supported underneath without anything new: a later answer supersedes
+    /// rather than accumulates, the same rule a re-rate follows.
+    @ViewBuilder private var quiz: some View {
+        Button { retakingQuiz = true } label: {
+            HStack(spacing: 8) {
+                // Not "Retake" for someone who never took it — a skipper would be being
+                // asked to do again a thing they have not done.
+                Text(quizAnswered ? "Retake the quiz" : "Tell us what you drink")
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Brand.textMuted)
+            }
+            .font(.callout)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - account
@@ -201,11 +249,22 @@ struct ProfileView: View {
 
     /// Where this came from, in one line. The rating count is the local one: it is what the
     /// drinker did, and it says whether a confident-sounding memo rests on three verdicts.
+    ///
+    /// The quiz is named alongside it, because it is the other thing that builds this card and
+    /// counting only ratings misdescribed it: answer eight questions, rate nothing, and the
+    /// line read "Built from your 0 ratings" under a page of real leanings (2026-10-08). The
+    /// third screen to make the same mistake — a quiz answer is a family, so it writes no
+    /// rating, and anything that measures the drinker by `ReactionLog.count` cannot see it.
     private func provenance(_ p: TasteProfile) -> String {
         let n = reactions.count
-        let ratings = n == 1 ? "1 rating" : "\(n) ratings"
-        guard let when = Self.updated(p.updatedAt) else { return "Built from your \(ratings)." }
-        return "Built from your \(ratings) · updated \(when)."
+        let sources = [quizAnswered ? "your quiz answers" : nil,
+                       n > 0 ? (n == 1 ? "1 rating" : "\(n) ratings") : nil].compactMap { $0 }
+        // Neither, and yet a card: not reachable today, but a profile is the server's and this
+        // count is the phone's, so they can disagree after a reinstall.
+        let built = sources.isEmpty ? "Built from your taste so far"
+                                    : "Built from " + sources.joined(separator: " and ")
+        guard let when = Self.updated(p.updatedAt) else { return built + "." }
+        return "\(built) · updated \(when)."
     }
 
     private static func updated(_ iso: String?) -> String? {

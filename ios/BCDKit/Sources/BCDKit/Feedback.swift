@@ -98,6 +98,42 @@ public struct QuizDrink: Decodable, Sendable, Equatable, Identifiable {
 
 struct QuizDrinks: Decodable { let drinks: [QuizDrink] }
 
+/// How much of a drink family someone actually drinks — the quiz's answer scale.
+///
+/// Three rungs, not five. The rating scale is a verdict on a drink you had; this is the much
+/// coarser question of what you reach for, and offering five would invite a precision nobody
+/// has about a whole category.
+///
+/// There is no neutral, and `sometimes` is not one. A neutral would be the absence of an
+/// opinion, and that is still said by not answering — the server stores no zero. "Sometimes"
+/// is an opinion: nobody answers it meaning never. So it is a yes with less conviction, at
+/// half a yes's weight, which is exactly the relation `Reaction.weight` gives `pinkieOut`
+/// against `chuggedIt`.
+///
+/// Lives here rather than in the view because it is wire semantics: the number travels to the
+/// server and moves a centroid, and a rung whose weight can be changed by editing a button is
+/// not a scale.
+public enum QuizLean: Double, CaseIterable, Sendable {
+    case no = -1, sometimes = 0.5, yes = 1
+
+    /// What the button says. "No" rather than "Not for me", which is what two rungs could
+    /// afford: three buttons and a drink's name do not share a phone's width, and at "Wheat
+    /// beer" the long one wrapped to two lines while "Sometimes" hyphenated, making that row
+    /// taller than the other seven.
+    public var label: String {
+        switch self {
+        case .no: "No"
+        case .sometimes: "Sometimes"
+        case .yes: "Yes"
+        }
+    }
+
+    /// This rung's answer for one family, ready to send.
+    public func answer(for family: String) -> QuizAnswer {
+        QuizAnswer(family: family, weight: rawValue)
+    }
+}
+
 /// One answer. `weight` is signed like a rating's and the server scales it down — saying what
 /// you reach for is weaker evidence than saying what you thought of something you drank.
 public struct QuizAnswer: Encodable, Sendable, Equatable {

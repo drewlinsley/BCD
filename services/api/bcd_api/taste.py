@@ -19,7 +19,7 @@ identical whether their ratings arrived via the client's batch upload or the con
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,9 +50,51 @@ _QUIZ_EVENT = "taste_quiz_answered"
 _LIST_EVENT = "list_add"
 _LIST_WEIGHTS = {"cellar": 0.6, "had_it": 0.5, "wishlist": 0.3, "want_to_try": 0.3}
 
+#: A product the HUD drew. Weaker evidence than anything else here and the only kind that is
+#: free: pointing a camera at a bottle is not a verdict on it, but it is not nothing either --
+#: you are standing in front of it deciding. So it counts, positively, at a fraction of a
+#: stated preference.
+#:
+#: What it reaches that the quiz does not: all twenty-two shelves rather than eight, and the
+#: drinks themselves rather than their families. It does NOT reach someone who skipped the
+#: quiz -- skipping grants nothing, and the client drops a personalization-tier event before
+#: it is ever queued -- so the person with no profile at all is still the person who declined
+#: to have one.
+#:
+#: There is no negative. You cannot read a dislike off a glance, and the shelf you walked past
+#: sends no event at all.
+_SCAN_EVENT = "scan_resolved"
+
+#: And looking one up by name. Typing "widow jane" asks the same question as pointing a camera
+#: at it, from the sofa instead of the aisle -- more deliberately, if anything: a camera draws
+#: whatever is in frame, while search returns only what was asked for.
+#:
+#: Only the search door, of the four onto the product screen. Opening a drink from Discover, or
+#: from another drink's Similar profile, is deliberate too, and weighing it would train the
+#: profile on the app's own output: suggest an IPA, watch it get tapped, conclude they like
+#: IPAs. Search is the one door where the drinker supplies the name.
+_SEARCH_EVENT = "search_result_opened"
+
+#: What one of those is worth against a rating's 1.0 and a quiz answer's 0.5. Low on purpose:
+#: going to look at something is how you ask what it IS, so plenty of them are drinks the
+#: drinker will put straight back.
+_INTEREST_WEIGHT = 0.15
+
+#: And what a drink they keep going back to is worth. Picking the same bottle up on three
+#: separate trips, or looking it up again a week later, is a stronger question than doing it
+#: once -- it is the drink they cannot decide about. Capped below a rating's 1.0, because they
+#: still have not drunk it.
+_INTEREST_MAX = 0.6
+
+#: Counted on one tally, because they are one act: going to look at one specific drink. Three
+#: looks on the shelf and a search at home is four considerations of the same bottle, and
+#: splitting them would make the fourth one worth less than the third.
+_INTEREST_EVENTS = frozenset({_SCAN_EVENT, _SEARCH_EVENT})
+
 #: The only events a profile is ever built from — used to filter the log on replay. The
 #: withdrawal belongs here or replay would drop it and the rating it retracts would return.
-TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _QUIZ_EVENT, _LIST_EVENT})
+TASTE_EVENTS = frozenset({_RATING_EVENT, _WITHDRAWN_EVENT, _QUIZ_EVENT, _LIST_EVENT,
+                          *_INTEREST_EVENTS})
 
 # Consent tiers under which a profile may be built at all (see telemetry/events.yaml).
 _PERSONALIZATION_CONSENT = frozenset({"personalization", "data_sharing"})
@@ -138,6 +180,87 @@ def quiz_from_events(
         if family in QUIZ_DRINKS and isinstance(weight, (int, float)):
             out[family] = max(-1.0, min(1.0, float(weight)))
     return {f: w for f, w in out.items() if w}
+
+
+def _considerations(
+    events: Iterable[dict[str, Any]], install_id: str, names: Collection[str]
+) -> dict[str, int]:
+    """How many separate times this person went to look at each product, over `names`.
+
+    There is no time rule here. There was one, a thirty-minute gate meant to stop a tab switch
+    reading as a second trip, and it threw away the same-trip revisit along with it. What it
+    was really guarding against is a batch sent twice, and that is exact rather than
+    heuristic: a retransmission carries the same `event_id`, so the ids are what get counted.
+
+    An event with no id counts on its own, since the client has always sent one and the
+    alternative is losing a real look to a missing field.
+
+    Read exactly as ratings and quiz answers are: consent-gated, this install only.
+    """
+    seen_ids: set[str] = set()
+    out: dict[str, int] = {}
+    for ev in events:
+        if ev.get("name") not in names or ev.get("install_id") != install_id:
+            continue
+        if ev.get("consent_tier") not in _PERSONALIZATION_CONSENT:
+            continue
+        pid = ev.get("product_id")
+        if not pid:
+            continue
+        event_id = ev.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            if event_id in seen_ids:
+                continue
+            seen_ids.add(event_id)
+        out[pid] = out.get(pid, 0) + 1
+    return out
+
+
+def sightings_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, int]:
+    """How many separate times this person looked at each product THROUGH THE CAMERA.
+
+    A look is decided where it can be seen: the client reports one when a product appears on
+    the HUD after being off it, so a can held steadily in frame is one look however many
+    350ms ticks it takes, and putting a bottle down, looking at two others and picking it up
+    again is two. Twice on one trip still counts twice -- that is someone deliberating, which
+    is the strongest thing a camera can say about a drink they have not tasted.
+
+    Searches are deliberately absent, and this is the one place they are. A scan says the
+    bottle is within arm's reach, which is what earns the ranking boost this count feeds; a
+    search says someone was curious on a train. Both say what they like, and only one says
+    they can buy it today.
+    """
+    return _considerations(events, install_id, {_SCAN_EVENT})
+
+
+def interest_from_events(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> dict[str, float]:
+    """Products this person went to look at, by camera or by name, weighted by how often.
+
+    One consideration is `_INTEREST_WEIGHT`; each further one adds another, to `_INTEREST_MAX`.
+    Linear and capped rather than flat, because going back to a bottle three times is a
+    stronger question than glancing at it once -- and capped below a rating, because they still
+    have not drunk it.
+
+    Not weighted by how LONG it was on screen. Dwell measures how hard the label was to read
+    as much as it measures interest; putting it down and picking it up again does not.
+    """
+    return {pid: min(_INTEREST_WEIGHT * n, _INTEREST_MAX)
+            for pid, n in _considerations(events, install_id, _INTEREST_EVENTS).items()}
+
+
+def considered_products(
+    events: Iterable[dict[str, Any]], install_id: str
+) -> set[str]:
+    """Every drink they went to look at, scanned or searched, however many times.
+
+    For the shelf bar, which asks how many DIFFERENT drinks on a shelf drew them rather than
+    how hard any one of them did.
+    """
+    return set(_considerations(events, install_id, _INTEREST_EVENTS))
 
 
 def rated_products(
@@ -420,7 +543,13 @@ def rebuild_profile(
     # One pass of the log, read twice: `_canonical` resolves merge tombstones and is not
     # free, and the quiz carries no product id to resolve.
     canonical = list(_canonical(store, events))
-    signals = signals_from_events(canonical, install_id)
+    # Interest first, so a real verdict on the same drink overwrites having looked at it. It
+    # goes in through `signals` rather than beside it because a drink someone went to look at
+    # IS a product and carries its own vector: look at five IPAs and the centroid becomes
+    # IPA-shaped out of what those five actually taste like, which is better evidence than the
+    # style's average and works for all twenty-two shelves rather than the quiz's eight.
+    signals = {**interest_from_events(canonical, install_id),
+               **signals_from_events(canonical, install_id)}
     quiz = quiz_from_events(canonical, install_id)
     profile = build_profile(install_id, signals, store, previous=previous, quiz=quiz)
     save_profile(store, profile)

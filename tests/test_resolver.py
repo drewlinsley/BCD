@@ -876,12 +876,24 @@ def test_a_reading_is_answered_by_the_row_it_names_not_a_piece_of_it(store):
     assert r.resolve_reading("Pliny The Elder") is None
 
 
-def test_a_reading_carries_a_score_and_its_place_in_the_frame(store):
+def test_a_reading_carries_its_place_in_the_frame_and_a_score_only_if_asked_about_someone(store):
+    """It used to carry one unconditionally, and for a caller with no profile that number was
+    `score`'s flat style prior: 0.5, printed on the chip as a prediction, about nobody. The
+    seed hid it, by making sure every caller had SOME profile (2026-10-12)."""
     r = Resolver(store)
     cand = r.resolve_reading("Heady Topper", index=2)
     assert cand.detection_index == 2
     assert 0 < cand.match_score <= 1.0
-    assert cand.personal_score is not None       # scored for the caller, like every other path
+    assert cand.personal_score is None
+    assert cand.reason is None
+
+    mine = TasteProfile(user_id="mine", version=2,
+                        sensory_ideal=SensoryVector(source=SensorySource.RECONCILED,
+                                                    confidence=0.9,
+                                                    axes={"bitterness": 0.8, "citrus": 0.7}))
+    asked = r.resolve_reading("Heady Topper", index=2, profile=mine)
+    assert asked.personal_score is not None
+    assert asked.reason
 
 
 # --- objects: one can, one verdict ------------------------------------------------------
