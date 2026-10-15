@@ -20,6 +20,7 @@ class ExtractionMethod(str, Enum):
     REGULATORY_FILING = "regulatory_filing"  # TTB COLA, EU e-label, etc.
     LABEL_OCR = "label_ocr"  # read off the physical label
     RETAILER_LISTING = "retailer_listing"  # shop/menu product page
+    OPEN_DATABASE = "open_database"  # a row in a citable open database (Wikidata, a dataset)
     COMMUNITY_CLONE = "community_clone"  # homebrew clone recipe
     REVIEW_CONSENSUS = "review_consensus"  # aggregated from reviews
     LLM_RECALLED = "llm_recalled"  # what a language model remembers of the product; unverified
@@ -34,6 +35,7 @@ METHOD_CONFIDENCE_CEILING: dict[ExtractionMethod, float] = {
     ExtractionMethod.REGULATORY_FILING: 1.0,
     ExtractionMethod.LABEL_OCR: 0.9,
     ExtractionMethod.RETAILER_LISTING: 0.8,
+    ExtractionMethod.OPEN_DATABASE: 0.75,
     ExtractionMethod.COMMUNITY_CLONE: 0.6,
     ExtractionMethod.REVIEW_CONSENSUS: 0.6,
     ExtractionMethod.LLM_RECALLED: 0.6,

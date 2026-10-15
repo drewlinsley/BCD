@@ -125,10 +125,14 @@ SOURCES = [
       jurisdiction="US", home="https://www.ars-grin.gov", refresh="static", priority=3,
       notes="Varietal lineage + acreage/production volume."),
     S("wikidata", "Wikidata / DBpedia", "A", ["all"],
-      ["producer", "ownership"], "bulk", "none", "cc0", "open_license",
-      home="https://www.wikidata.org", refresh="monthly", priority=2,
+      ["producer", "ownership", "abv"], "api", "none", "cc0", "open_license",
+      home="https://www.wikidata.org", data="https://query.wikidata.org/sparql",
+      refresh="monthly", priority=2, status="active",
       notes="Brand/producer entities, aliases, ownership graphs. Entity-resolution backbone "
-            "(who owns whom: ABI, Constellation, Diageo)."),
+            "(who owns whom: ABI, Constellation, Diageo). Also 18,536 drinks state an alcohol "
+            "by volume (P2665) -- SPARQL, no key; ask for labels in \"mul\" as well as a "
+            "language, because a brand name is language-agnostic and the standard label "
+            "service hides those behind the QID. Read by scripts/fill_abv_from_open_data.py."),
     S("openstreetmap", "OpenStreetMap + Overture", "A", ["venues"],
       ["venue"], "bulk", "none", "odbl", "open_license", home="https://www.openstreetmap.org",
       refresh="weekly", priority=2,
@@ -155,6 +159,16 @@ SOURCES = [
       ["review", "rating"], "bulk", "none", "academic-research-only", "academic_release",
       home="https://cseweb.ucsd.edu/~jmcauley/datasets.html", priority=2, refresh="static",
       notes="Canonical source for the SNAP beer corpora + more."),
+    S("craft-beers-dataset", "Craft Beers dataset (CraftCans scrape)", "B", ["beer"],
+      ["product", "producer", "abv"], "bulk", "none", "mit", "open_license",
+      home="https://github.com/nickhould/craft-beers-dataset",
+      data="https://raw.githubusercontent.com/nickhould/craft-beers-dataset/master/"
+           "data/processed/beers.csv",
+      est_records=2410, priority=3, refresh="static", status="active",
+      notes="2,410 canned craft beers with ABV and IBU, 558 breweries, scraped from "
+            "CraftCans.com in January 2017 for a teaching notebook. Static and dated, and "
+            "the only free list that pairs a US craft can with its strength. Read by "
+            "scripts/fill_abv_from_open_data.py."),
     S("kaggle-brewers-friend", "Kaggle Brewer's Friend recipes", "B", ["beer"],
       ["recipe", "ingredients", "process"], "bulk", "account", "kaggle-dataset-terms",
       "academic_release", home="https://www.kaggle.com/datasets/jtrofe/beer-recipes",

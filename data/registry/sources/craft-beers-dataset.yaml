@@ -1,0 +1,26 @@
+id: craft-beers-dataset
+name: Craft Beers dataset (CraftCans scrape)
+tier: B
+categories:
+- beer
+access:
+  method: bulk
+  auth: none
+  robots_allows: null
+  rate_limit_rps: null
+license: mit
+legal_basis: open_license
+provides:
+- product
+- producer
+- abv
+refresh: static
+est_records: 2410
+priority: 3
+status: active
+urls:
+  home: https://github.com/nickhould/craft-beers-dataset
+  data: https://raw.githubusercontent.com/nickhould/craft-beers-dataset/master/data/processed/beers.csv
+notes: 2,410 canned craft beers with ABV and IBU, 558 breweries, scraped from CraftCans.com in January
+  2017 for a teaching notebook. Static and dated, and the only free list that pairs a US craft can with
+  its strength. Read by scripts/fill_abv_from_open_data.py.

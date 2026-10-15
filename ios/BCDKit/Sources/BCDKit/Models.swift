@@ -13,6 +13,7 @@ public enum ExtractionMethod: String, Codable, Sendable {
     case regulatoryFiling = "regulatory_filing"
     case labelOCR = "label_ocr"
     case retailerListing = "retailer_listing"
+    case openDatabase = "open_database"
     case communityClone = "community_clone"
     case reviewConsensus = "review_consensus"
     case llmRecalled = "llm_recalled"
@@ -31,7 +32,7 @@ public enum ExtractionMethod: String, Codable, Sendable {
     public var trustRank: Int {
         switch self {
         case .statedByProducer, .regulatoryFiling: return 3
-        case .labelOCR, .retailerListing: return 2
+        case .labelOCR, .retailerListing, .openDatabase: return 2
         case .communityClone, .reviewConsensus, .userContributed: return 1
         case .llmRecalled, .llmInferredFromStylePrior: return 0
         }
