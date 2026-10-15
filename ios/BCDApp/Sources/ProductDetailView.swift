@@ -212,13 +212,28 @@ struct ProductDetailView: View {
     private var eyebrow: String {
         let category = product.category.rawValue
         let style = product.style?.value.trimmingCharacters(in: .whitespaces) ?? ""
-        let what = style.isEmpty || style.caseInsensitiveCompare(category) == .orderedSame
-            ? category : style
+        let what = usable(style, category) ? style : category
         return [what, knownProducer?.region]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
             .uppercased()
+    }
+
+    /// Whether the style is worth the eyebrow: it has to exist, and it has to say something
+    /// the card does not already say. A row filed as "Beer" under category beer repeats the
+    /// category; "Pale Ale" on `Little Creatures Pale Ale` repeats the name, in a bigger face
+    /// two lines below. `DisplayName.product` drops a producer the name already carries for
+    /// the same reason -- a fact earns one place on a label.
+    private func usable(_ style: String, _ category: String) -> Bool {
+        if style.isEmpty || style.caseInsensitiveCompare(category) == .orderedSame {
+            return false
+        }
+        let words = Set(productName.lowercased().split { !$0.isLetter && !$0.isNumber }
+                                                .map(String.init))
+        let styleWords = style.lowercased().split { !$0.isLetter && !$0.isNumber }
+                                           .map(String.init)
+        return !styleWords.allSatisfy(words.contains)
     }
 
     /// "THE ALCHEMIST · STOWE".
@@ -471,14 +486,20 @@ private struct Seal: View {
                         .tracking(1.1)
                         .foregroundStyle(tint)
                 }
+            // What to do about it, not what is missing. The seal is unscored because this
+            // READER has no taste profile yet -- `_own_profile` has nothing to score against
+            // -- not because the drink wants for ratings, so the words name the reader's
+            // move. No question mark: it said what "NOT YET" said twice over, it collided
+            // with the one the strength slot now carries, and at 7.5pt beside it "RATE MORE"
+            // ran into the ring on both sides. The words take the whole stamp (user,
+            // 2026-10-15).
             case .unscored:
-                VStack(spacing: 1) {
-                    Text("?")
-                        .font(.system(size: 19, weight: .bold, design: .rounded))
-                    Text("NOT YET")
-                        .font(.system(size: 7.5, weight: .bold))
-                        .tracking(1.1)
+                VStack(spacing: 0) {
+                    Text("RATE")
+                    Text("MORE")
                 }
+                .font(.system(size: 13, weight: .bold))
+                .tracking(0.5)
                 .foregroundStyle(tint)
             }
         }
@@ -492,7 +513,7 @@ private struct Seal: View {
         switch verdict {
         case .predicted(let score): "\(Int(score * 100)) percent likely you'll like it"
         case .rated(let reaction): "You rated this \(reaction.label.lowercased())"
-        case .unscored: "Not scored for you yet"
+        case .unscored: "Not scored for you yet. Rate a few drinks and this fills in."
         }
     }
 }
