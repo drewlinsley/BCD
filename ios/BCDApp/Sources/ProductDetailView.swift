@@ -36,14 +36,20 @@ struct ProductDetailView: View {
     @EnvironmentObject var reactions: ReactionLog
 
     @State private var rating = false
-    /// Neighbours in the sensory space. Nil until asked, so the section can stay off the screen
-    /// rather than flashing an empty card on every open.
-    @State private var similar: [SimilarProduct]?
+    /// Neighbours in the sensory space. `waiting` until asked, so the section can stay off
+    /// the screen rather than flashing an empty card on every open -- and `failed` kept apart
+    /// from an empty answer, because they are different facts. They were one value until
+    /// 2026-10-15: `(try? ...)?.results ?? []` turned a dropped connection into an empty list,
+    /// an empty list means "this drink has no neighbours", and the tile vanished off a drink
+    /// that has six. That is the Similar profile section that came and went.
+    @State private var similar: Asked<[SimilarProduct]> = .waiting
     @State private var openingSimilar: String?
     /// The server's answer to "would this reader like it", for a drink that arrived without
-    /// one. Nil until it answers, so the seal holds its unscored state rather than flashing a
-    /// number in.
-    @State private var fetchedScore: PersonalScore?
+    /// one. `waiting` until it answers, so the seal holds its unscored state rather than
+    /// flashing a number in -- and `failed` separate from that, because the unscored seal says
+    /// RATE MORE, which is a sentence about this reader's taste profile. A request that failed
+    /// is the one case where we do not know what their profile says.
+    @State private var fetchedScore: Asked<PersonalScore> = .waiting
     /// A neighbour opened from this screen. Presented rather than pushed: this view owns a
     /// `NavigationStack`, and nesting one inside another costs the back button.
     @State private var drilldown: ScoredCandidate?
@@ -64,12 +70,14 @@ struct ProductDetailView: View {
     // asked for it (2026-10-08).
 
     private var personalScore: Double? {
-        candidate.personalScore ?? fetchedScore?.personalScore
+        candidate.personalScore ?? fetchedScore.answer?.personalScore
     }
 
-    private var reason: String? { candidate.reason ?? fetchedScore?.reason }
+    private var reason: String? { candidate.reason ?? fetchedScore.answer?.reason }
 
-    private var coldStart: Bool { candidate.coldStart || (fetchedScore?.coldStart ?? false) }
+    private var coldStart: Bool {
+        candidate.coldStart || (fetchedScore.answer?.coldStart ?? false)
+    }
 
     /// Nil when the API sent its stand-in rather than a maker, so the label leaves the line
     /// out instead of printing the word UNKNOWN where a brewery goes.
@@ -110,14 +118,12 @@ struct ProductDetailView: View {
             .sheet(isPresented: $rating) {
                 RatingSheet(productId: product.id, productName: productName)
             }
-            .task(id: product.id) {
-                similar = (try? await env.api.similar(to: product.id, limit: 6))?.results ?? []
-            }
+            .task(id: product.id) { await askForSimilar() }
             // Only when the drink arrived without one: a recommendation already carries the
             // answer, and asking again would be the same cosine computed twice.
             .task(id: product.id) {
                 guard candidate.personalScore == nil else { return }
-                fetchedScore = try? await env.api.productScore(for: product.id)
+                await askForScore()
             }
             .sheet(item: $drilldown) {
                 ProductDetailView(candidate: $0, referrer: .similar)
@@ -184,6 +190,14 @@ struct ProductDetailView: View {
                         .accessibilityHint("Change your rating")
                 } else if let score = personalScore {
                     Seal(score: score)
+                } else if fetchedScore.hasFailed {
+                    // Asked, and never answered. The unscored stamp would read RATE MORE here,
+                    // which is a sentence about this reader's taste profile -- and what their
+                    // profile says is precisely what we failed to find out. Pressing it asks
+                    // again.
+                    Button { Task { await askForScore() } } label: { Seal.unanswered }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Ask again")
                 } else {
                     Seal()
                 }
@@ -378,22 +392,27 @@ struct ProductDetailView: View {
     /// About the bottle, not about you — so no score and no "matches your…" line. Two people
     /// reading this screen see the same list, which is what separates it from Discover.
     ///
-    /// Silent when the server says `style_only`. 507,341 of 534,103 rows carry their style's
+    /// Silent when the server says `style_only`. 507,342 of 534,104 rows carry their style's
     /// average rather than a vector of their own, and for those the nearest rows are simply
     /// every other row of that style. A section listing them would be a style filter claiming
-    /// to be a similarity, so there is no section.
+    /// to be a similarity, so there is no section. (Little Creatures is one of them, its whole
+    /// lineup -- nobody has profiled the brewery, so the catalog holds the average Pale Ale
+    /// where its vector goes and there is nothing for it to be near.)
+    ///
+    /// Not silent when the asking failed, which is the one case that is not about the drink.
     @ViewBuilder private var similarProfile: some View {
-        if let similar, !similar.isEmpty {
+        switch similar {
+        case .answered(let rows) where !rows.isEmpty:
             // Shut until asked for, like Ingredients: the screen's job is still the choice in
             // front of you, and six other drinks open on the page is an argument for leaving.
             // The count in the header is the invitation.
-            DisclosureTile(title: "Similar profile", count: similar.count) {
-                ForEach(similar) { row in
+            DisclosureTile(title: "Similar profile", count: rows.count) {
+                ForEach(rows) { row in
                     Button { Task { await openSimilar(row) } } label: {
                         SimilarRow(row: row, busy: openingSimilar == row.productId)
                     }
                     .buttonStyle(.plain)
-                    if row.id != similar.last?.id {
+                    if row.id != rows.last?.id {
                         Divider().overlay(Brand.hairline)
                     }
                 }
@@ -402,7 +421,51 @@ struct ProductDetailView: View {
                     .foregroundStyle(Brand.textMuted)
                     .padding(.top, 8)
             }
+        // Said rather than hidden. An absent tile means "no neighbours", which is true of 95%
+        // of the catalog, so a tile absent because the server could not be reached was
+        // invisible -- and it is the only version of this tile a reader could do anything
+        // about.
+        case .failed:
+            Tile(title: "Similar profile") {
+                Button { Task { await askForSimilar() } } label: {
+                    HStack(spacing: 8) {
+                        Text("Couldn't load.")
+                            .font(.subheadline)
+                            .foregroundStyle(Brand.text)
+                        Text("Try again")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Brand.amber)
+                        Spacer(minLength: 8)
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Brand.amber)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        case .waiting, .answered:
+            EmptyView()
         }
+    }
+
+    /// What else tastes like this, asked for.
+    ///
+    /// Asked again on a blip, because the failure this screen actually meets is a sheet opening
+    /// before the phone's radio is back. Held as `failed` when the attempts are spent, so the
+    /// tile can say so rather than disappear like a drink with no neighbours.
+    private func askForSimilar() async {
+        similar = .waiting
+        similar = await Asked.asking {
+            try await env.api.similar(to: product.id, limit: 6).results
+        }
+    }
+
+    /// The prediction for a drink that arrived without one. Same reasoning, with more at stake:
+    /// the state this used to collapse into is the one the seal words as RATE MORE.
+    private func askForScore() async {
+        fetchedScore = .waiting
+        fetchedScore = await Asked.asking { try await env.api.productScore(for: product.id) }
     }
 
     /// A neighbour is a name and an id; the screen this opens wants the whole product. Same
@@ -443,6 +506,11 @@ private struct Seal: View {
         /// no score for this reader, and the spot has to hold that rather than go empty --
         /// a label with a hole where its stamp goes looks broken, not silent.
         case unscored
+        /// Asked for, and never answered. The opposite claim to `unscored`, which is the
+        /// server saying there is no profile to score this against: here the server said
+        /// nothing at all. It drew as `unscored` until 2026-10-15, which stamped RATE MORE on
+        /// the label of a reader who may have rated fifty drinks (user, 2026-10-15).
+        case unanswered
     }
 
     let verdict: Verdict
@@ -450,6 +518,11 @@ private struct Seal: View {
     init(score: Double) { self.verdict = .predicted(score) }
     init(rated reaction: Reaction) { self.verdict = .rated(reaction) }
     init() { self.verdict = .unscored }
+    private init(verdict: Verdict) { self.verdict = verdict }
+
+    /// Asked and never answered. A value rather than an init so the call site reads as the
+    /// state it is, beside `Seal(score:)` and `Seal(rated:)` which carry something.
+    static let unanswered = Seal(verdict: .unanswered)
 
     private var tint: Color {
         switch verdict {
@@ -459,8 +532,8 @@ private struct Seal: View {
         case .rated(let reaction):
             reaction.tint
         // Muted, and the same grey the card's own secondary lines use: an absence should not
-        // be as loud as an answer.
-        case .unscored:
+        // be as loud as an answer. Both absences take it -- neither is a verdict.
+        case .unscored, .unanswered:
             Brand.cream.opacity(0.45)
         }
     }
@@ -501,6 +574,13 @@ private struct Seal: View {
                 .font(.system(size: 13, weight: .bold))
                 .tracking(0.5)
                 .foregroundStyle(tint)
+            // No words. The stamp has nothing to report and there is nothing to tell the
+            // reader to do about their own ratings -- the only useful move is another go, so
+            // the mark is the affordance, the way the rated seal is the way to change it.
+            case .unanswered:
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(tint)
             }
         }
         .frame(width: 68, height: 68)
@@ -514,6 +594,7 @@ private struct Seal: View {
         case .predicted(let score): "\(Int(score * 100)) percent likely you'll like it"
         case .rated(let reaction): "You rated this \(reaction.label.lowercased())"
         case .unscored: "Not scored for you yet. Rate a few drinks and this fills in."
+        case .unanswered: "Not scored — the server could not be reached. Tap to try again."
         }
     }
 }
