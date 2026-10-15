@@ -490,10 +490,14 @@ private struct SourcedStrength: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(String(format: "%.1f", abv.value))
+            // With the sign: a label prints "5.2% ALC/VOL", and the caption underneath was
+            // carrying the unit for a figure that read as a bare number. Figure and sign both
+            // take the eyebrow's amber, so the strength and the category are the card's two
+            // coloured marks and the name is the only thing set in cream.
+            Text(String(format: "%.1f%%", abv.value))
                 .font(.system(size: 34, weight: .semibold, design: .serif))
                 .monospacedDigit()
-                .foregroundStyle(Brand.cream)
+                .foregroundStyle(Brand.amber)
             Text("ALC / VOL")
                 .font(.system(size: 9.5, weight: .semibold))
                 .tracking(1.3)
