@@ -205,10 +205,16 @@ struct ProductDetailView: View {
         .environment(\.colorScheme, .dark)
     }
 
-    /// "BEER · VERMONT" — category is on every product, region on most of the ones that
-    /// have any location at all.
+    /// "IPA · AUSTRALIA" — what it is and where it is from. The style when the row has one,
+    /// because it answers the same question as the category and answers it more exactly;
+    /// the category when it does not, or when the style is only the category again (a row
+    /// filed as "Beer" under category beer says it twice otherwise).
     private var eyebrow: String {
-        [product.category.rawValue, knownProducer?.region]
+        let category = product.category.rawValue
+        let style = product.style?.value.trimmingCharacters(in: .whitespaces) ?? ""
+        let what = style.isEmpty || style.caseInsensitiveCompare(category) == .orderedSame
+            ? category : style
+        return [what, knownProducer?.region]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
@@ -224,22 +230,34 @@ struct ProductDetailView: View {
             .uppercased()
     }
 
-    /// ABV set as a label sets it, with the provenance receipt one tap away.
+    /// ABV set as a label sets it. This spot means strength and nothing else.
+    ///
+    /// It used to fall back to the style, "on the rare product that has one" -- true of a
+    /// catalog of 915 products with 9 styles between them. The catalog has inverted since:
+    /// 530,419 of 534,104 rows carry a style and 16,933 carry an ABV, so the rare fallback
+    /// was what 96.7% of drinks showed, and the foot of the card said how strong one drink
+    /// was and what kind the next one was, in a different size, at the same spot. A slot
+    /// that answers two questions answers neither (user, 2026-10-15). The style moved up to
+    /// the eyebrow, which is the line that classifies.
     @ViewBuilder private var strength: some View {
         if let abv = product.spec.abvPct {
             SourcedStrength(abv: abv)
-        } else if let style = product.style {
-            // No strength on record: the style, on the rare product that has one, is the
-            // next most label-like fact and keeps the foot of the card from collapsing.
-            VStack(alignment: .leading, spacing: 5) {
-                Text(style.value)
-                    .font(.system(size: 17, weight: .semibold, design: .serif))
-                    .foregroundStyle(Brand.cream)
-                Text("STYLE")
+        } else {
+            // Said, not skipped. A label with nothing where the strength goes looks broken;
+            // this looks like a label whose strength we do not have, which is the truth.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("?")
+                    .font(.system(size: 34, weight: .semibold, design: .serif))
+                    .foregroundStyle(Brand.amber.opacity(0.45))
+                // The caption is the same on every drink, so the question mark is read
+                // against it: this is the strength, and we do not have it.
+                Text("ALC / VOL")
                     .font(.system(size: 9.5, weight: .semibold))
                     .tracking(1.3)
                     .foregroundStyle(Brand.cream.opacity(0.6))
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Alcohol by volume not on record")
         }
     }
 
