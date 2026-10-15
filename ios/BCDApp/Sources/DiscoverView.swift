@@ -55,7 +55,10 @@ struct DiscoverView: View {
                 // because nothing asks again. Also how the screen reorganises itself the
                 // moment the quiz is answered, with the cover still sliding away.
                 .onChange(of: env.knowsYou) { _, _ in Task { await load() } }
-                .sheet(item: $detail) { ProductDetailView(candidate: $0, referrer: .recommend) }
+                .sheet(item: $detail) {
+                    ProductDetailView(candidate: $0, referrer: .recommend)
+                        .presentationDragIndicator(.visible)
+                }
         }
     }
 
