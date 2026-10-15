@@ -2,7 +2,9 @@
 
 Every recovered field in BCD carries one of these. It records *where* a fact came
 from, *how* we extracted it, the exact supporting text, and how much we trust it.
-The iOS app surfaces this as tappable chips on the product 'receipt'.
+The app does not draw it (user, 2026-10-14): a second claim, about the datum,
+beside a figure whose job is to be read at a glance. It is still what decides whether a
+fact may be written at all -- see `_fillable` in the ABV passes.
 """
 
 from __future__ import annotations

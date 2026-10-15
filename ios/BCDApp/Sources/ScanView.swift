@@ -141,6 +141,7 @@ struct ScanView: View {
         }
         .sheet(item: $selected) { cand in
             ProductDetailView(candidate: cand, referrer: .scan)
+                .presentationDragIndicator(.visible)
         }
     }
 

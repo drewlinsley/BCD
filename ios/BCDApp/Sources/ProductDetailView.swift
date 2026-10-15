@@ -71,7 +71,12 @@ struct ProductDetailView: View {
 
     private var coldStart: Bool { candidate.coldStart || (fetchedScore?.coldStart ?? false) }
 
-    private var producerName: String { DisplayName.producer(producer.name) }
+    /// Nil when the API sent its stand-in rather than a maker, so the label leaves the line
+    /// out instead of printing the word UNKNOWN where a brewery goes.
+    private var knownProducer: Producer? { producer.isPlaceholder ? nil : producer }
+    private var producerName: String {
+        knownProducer.map { DisplayName.producer($0.name) } ?? ""
+    }
     private var productName: String {
         DisplayName.product(DisplayName.label(product.name, brand: candidate.resolved.brand.name),
                             producer: producer.name)
@@ -80,7 +85,7 @@ struct ProductDetailView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 22) {
                     label
                     verdict
                     rateButton
@@ -88,11 +93,20 @@ struct ProductDetailView: View {
                     similarProfile
                     if !product.recipe.ingredients.isEmpty { ingredients }
                 }
-                .padding(16)
+                .padding(.horizontal, 16)
+                // Not flush to the sheet's edge: deleting the navigation bar gave back 77
+                // points, and taking all of them put the label under the status bar's chin.
+                .padding(.top, 52)
+                .padding(.bottom, 16)
             }
             .background(Brand.surface)
-            .navigationTitle(productName)
-            .navigationBarTitleDisplayMode(.inline)
+            // No navigation title: it was the product's name, set in the bar directly above a
+            // card whose largest element is the product's name. The bar carried nothing else --
+            // this screen is presented as a sheet from all four doors, so there is no back
+            // button in it -- so hiding it says the name once and gives the label the 77 points
+            // the duplicate was using. The sheets that present this show a drag indicator, which
+            // is now the thing that says you can get out (2026-10-14).
+            .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $rating) {
                 RatingSheet(productId: product.id, productName: productName)
             }
@@ -105,7 +119,10 @@ struct ProductDetailView: View {
                 guard candidate.personalScore == nil else { return }
                 fetchedScore = try? await env.api.productScore(for: product.id)
             }
-            .sheet(item: $drilldown) { ProductDetailView(candidate: $0, referrer: .similar) }
+            .sheet(item: $drilldown) {
+                ProductDetailView(candidate: $0, referrer: .similar)
+                    .presentationDragIndicator(.visible)
+            }
             .task {
                 // Opening a product is the deliberate act that earns it a place in the Rate
                 // queue; merely crossing the viewfinder does not.
@@ -142,11 +159,13 @@ struct ProductDetailView: View {
                 .minimumScaleFactor(0.62)
                 .padding(.top, 10)
 
-            Text(origin)
-                .font(.system(size: 10.5, weight: .semibold))
-                .tracking(1.5)
-                .foregroundStyle(Brand.cream.opacity(0.62))
-                .padding(.top, 8)
+            if !origin.isEmpty {
+                Text(origin)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(1.5)
+                    .foregroundStyle(Brand.cream.opacity(0.62))
+                    .padding(.top, 8)
+            }
 
             HStack(alignment: .bottom) {
                 strength
@@ -189,7 +208,7 @@ struct ProductDetailView: View {
     /// "BEER · VERMONT" — category is on every product, region on most of the ones that
     /// have any location at all.
     private var eyebrow: String {
-        [product.category.rawValue, producer.region]
+        [product.category.rawValue, knownProducer?.region]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
@@ -198,7 +217,7 @@ struct ProductDetailView: View {
 
     /// "THE ALCHEMIST · STOWE".
     private var origin: String {
-        [producerName, producer.city]
+        [producerName, knownProducer?.city]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
@@ -460,31 +479,27 @@ private struct Seal: View {
     }
 }
 
-/// ABV in label type, tappable for its receipt.
+/// ABV in label type.
+///
+/// Where the number came from is not drawn here any more (user, 2026-10-14). It was a tinted
+/// `checkmark.seal.fill`, then the words, and both put a second claim -- about the datum --
+/// beside a figure whose job is to be read at a glance. The provenance still arrives with
+/// every fact and is still what the catalog is built on; this screen just does not argue it.
 private struct SourcedStrength: View {
     let abv: Sourced<Double>
-    @State private var showProvenance = false
 
     var body: some View {
-        Button { showProvenance = true } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(format: "%.1f", abv.value))
-                    .font(.system(size: 34, weight: .semibold, design: .serif))
-                    .monospacedDigit()
-                    .foregroundStyle(Brand.cream)
-                HStack(spacing: 5) {
-                    Text("ALC / VOL")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .tracking(1.3)
-                    ProvenanceChip(provenance: abv.provenance)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(format: "%.1f", abv.value))
+                .font(.system(size: 34, weight: .semibold, design: .serif))
+                .monospacedDigit()
+                .foregroundStyle(Brand.cream)
+            Text("ALC / VOL")
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(1.3)
                 .foregroundStyle(Brand.cream.opacity(0.6))
-            }
         }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showProvenance) {
-            ProvenanceCard(provenance: abv.provenance).presentationCompactAdaptation(.popover)
-        }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(String(format: "%.1f percent alcohol by volume", abv.value))
     }
 }
@@ -639,46 +654,6 @@ struct IngredientRow: View {
                     .font(.caption).foregroundStyle(Brand.textMuted)
             }
             Spacer()
-            ProvenanceChip(provenance: ingredient.provenance)
         }
-    }
-}
-
-struct ProvenanceChip: View {
-    let provenance: Provenance
-    private var color: Color {
-        switch provenance.method.trustRank {
-        case 3: .green
-        case 2: .blue
-        case 1: .orange
-        default: .gray
-        }
-    }
-    var body: some View {
-        Image(systemName: "checkmark.seal.fill")
-            .font(.caption)
-            .foregroundStyle(color)
-            .accessibilityLabel("Provenance: \(provenance.method.rawValue)")
-    }
-}
-
-struct ProvenanceCard: View {
-    let provenance: Provenance
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(provenance.method.rawValue.replacingOccurrences(of: "_", with: " "),
-                  systemImage: "checkmark.seal.fill").font(.headline)
-            Text("Source: \(provenance.sourceId)").font(.subheadline)
-            Text("Confidence: \(Int(provenance.confidence * 100))%").font(.subheadline)
-            if let quote = provenance.quote {
-                Text("\u{201C}\(quote)\u{201D}").font(.footnote).italic()
-                    .foregroundStyle(.secondary)
-            }
-            if let url = provenance.url {
-                Text(url).font(.caption).foregroundStyle(.blue).lineLimit(1)
-            }
-        }
-        .padding()
-        .frame(maxWidth: 280)
     }
 }

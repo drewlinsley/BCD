@@ -58,6 +58,14 @@ public struct Sourced<Value: Codable & Sendable>: Codable, Sendable {
 }
 
 public struct Producer: Codable, Sendable, Identifiable {
+    /// The API's stand-in for a row that names no maker. `ResolvedProduct.producer` is not
+    /// optional, so a product whose `producer_id` is empty -- a TTB import permit names an
+    /// importer, not a brewery -- comes back as `Producer(id: "unknown", name: "Unknown")`.
+    /// A screen that prints that gets the word UNKNOWN where a brewery should be, which is
+    /// worse than printing nothing: it reads as a fact about the drink.
+    public static let placeholderId = "unknown"
+    public var isPlaceholder: Bool { id == Self.placeholderId }
+
     public let id: String
     public let name: String
     public let kind: String?
