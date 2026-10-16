@@ -10,6 +10,21 @@ struct RootView: View {
     /// forgetting them. @AppStorage so it survives a relaunch, which is the point.
     @AppStorage("bcd.quizAsked") private var quizAsked = false
 
+    /// Launches on which the questions could not be fetched. A quiz that never arrived was
+    /// never put to anybody, so `quizAsked` stays false and the next launch tries again --
+    /// but not without end. An install that cannot reach the server would otherwise meet this
+    /// screen every single time, and the quiz is reachable from You whenever they want it.
+    @AppStorage("bcd.quizUnreachable") private var quizUnreachable = 0
+
+    /// Closed for this launch. Separate from `quizAsked`, which persists: the unreachable
+    /// quiz has to close now and still be there next time, and a presentation driven by the
+    /// persistent flag alone would leave "Go on in" with nothing to close.
+    @State private var quizDismissed = false
+
+    /// How many launches may lose the quiz to an unreachable server before the app stops
+    /// offering it. Three, which covers a blip, a server restart and a bad morning.
+    private static let lostAskings = 3
+
     var body: some View {
         // Five, because iPhone shows five and hides the rest behind a "More" list. Alerts is
         // the one that gives: every alert in it is `SentinelAlert.demo` and both its buttons
@@ -48,17 +63,32 @@ struct RootView: View {
         // recommendations built from a seed that is somebody else's taste, and the list says
         // "matches your tropical preference" to someone who has never said anything.
         //
-        // A sheet, not a gate: it carries its own Skip, and dismissing it for any reason
-        // marks it asked. A first run nobody can get past would be a worse failure than a
-        // cold start, and rating anything builds the same profile by the same path.
-        .fullScreenCover(isPresented: .init(get: { !quizAsked },
-                                            set: { if !$0 { quizAsked = true } })) {
+        // A sheet, not a gate: it carries its own Skip. A first run nobody can get past would
+        // be a worse failure than a cold start, and rating anything builds the same profile by
+        // the same path.
+        //
+        // What marks it asked is now what happened, not merely that it closed. Answering and
+        // skipping are decisions about the quiz; a screen that could not load the questions
+        // asked nothing, and spending the one asking on it cost that drinker the cold-start
+        // fix for the life of the install (2026-10-16).
+        .fullScreenCover(isPresented: .init(get: { !quizAsked && !quizDismissed },
+                                            set: { if !$0 { quizDismissed = true } })) {
             // Answered or skipped, ask the server again before the app appears behind it:
             // eight answers are a profile, and the screens underneath decide what to call
             // their lists by whether one exists.
             // `consent` as well as `env`: answering the quiz is what grants personalization,
             // so the screen needs the real store and not a fresh one.
-            QuizView { quizAsked = true; Task { await env.refreshProfile() } }
+            QuizView { outcome in
+                quizDismissed = true
+                switch outcome {
+                case .answered, .skipped:
+                    quizAsked = true
+                case .unreachable:
+                    quizUnreachable += 1
+                    if quizUnreachable >= Self.lostAskings { quizAsked = true }
+                }
+                Task { await env.refreshProfile() }
+            }
                 .environmentObject(env)
                 .environmentObject(env.consent)
         }

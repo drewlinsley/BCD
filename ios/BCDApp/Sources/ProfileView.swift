@@ -82,7 +82,10 @@ struct ProfileView: View {
             // `env` and `consent` are handed over explicitly, exactly as `RootView` does:
             // answering is what grants personalization, so the sheet needs the real store.
             .sheet(isPresented: $retakingQuiz) {
-                QuizView { retakingQuiz = false; Task { await load() } }
+                // The outcome is the first-run caller's business: `bcd.quizAsked` is already
+                // true by the time anyone can reach this button, so a retake has no flag to
+                // set either way.
+                QuizView { _ in retakingQuiz = false; Task { await load() } }
                     .environmentObject(env)
                     .environmentObject(consent)
             }
@@ -92,11 +95,12 @@ struct ProfileView: View {
     /// The way back to the quiz, and the only one.
     ///
     /// It is presented once, from a `fullScreenCover` gated on `bcd.quizAsked`, and that flag
-    /// is set by answering OR skipping OR dismissing — so skipping it put it out of reach for
-    /// the life of the install. Two pieces of copy already promised otherwise, including the
-    /// one shown when the server is unreachable: "you can answer this later under You". The
-    /// case where the quiz most needs a second chance was the case that promised one and had
-    /// none (2026-10-08).
+    /// is set by answering OR skipping — so skipping it put it out of reach for the life of
+    /// the install. Two pieces of copy already promised otherwise, including the one shown
+    /// when the server is unreachable: "you can answer this later under You". The case where
+    /// the quiz most needs a second chance was the case that promised one and had none
+    /// (2026-10-08). Since 2026-10-16 an unreachable server does not set the flag at all for
+    /// the first three launches, so that case keeps its first chance too.
     ///
     /// Retaking is supported underneath without anything new: a later answer supersedes
     /// rather than accumulates, the same rule a re-rate follows.
