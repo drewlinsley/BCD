@@ -254,12 +254,28 @@ struct RatingSheet: View {
         // write is what tells every drawn glyph to go back to "not rated".
         reactions.remove(for: productId)
         Task {
-            // Best effort, and deliberately not reverted on failure. A withdrawal that does
-            // not reach the server leaves a rating in the profile the drinker has been told
-            // is gone -- but putting the face back on screen to say so would be worse, and the
-            // next drain of the telemetry queue carries the same event anyway.
-            _ = try? await env.api.withdrawFeedback(productId: productId)
+            // Queued BEFORE it is asked for, and the queue is the copy that survives: it is
+            // disk-backed and holds an event across launches until the collector accepts it.
+            //
+            // This line is what the comment here used to claim already happened -- "the next
+            // drain of the telemetry queue carries the same event anyway". Nothing enqueued a
+            // withdrawal. So a withdrawal that did not reach the server was simply lost: the
+            // rating stayed in the profile, `rated_products` went on barring the drink from
+            // "For you", and the face was already off this screen, so there was nothing left
+            // to take off a second time. The server folds `rating_withdrawn` out of the batch
+            // exactly as it folds the one the route writes, which is why two copies converge
+            // instead of conflicting, and withdrawing twice is a no-op either way.
+            await env.telemetry.log("rating_withdrawn", tier: .personalization,
+                                    ["product_id": .string(productId)])
+            // And asked for directly as well, so the profile is right now rather than at the
+            // next drain. Retried on a blip, and a failure is survivable here only because of
+            // the line above.
+            _ = await Asked.asking { try await env.api.withdrawFeedback(productId: productId) }
             await MainActor.run {
+                // The profile has moved, so anything ranking with it is stale -- the same
+                // thing a rating does, which the rating path has always said and this one
+                // never did.
+                env.ratingAccepted()
                 removing = false
                 dismiss()
             }

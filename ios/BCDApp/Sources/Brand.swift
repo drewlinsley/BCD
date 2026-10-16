@@ -43,3 +43,19 @@ extension Reaction {
         Image(size <= Brand.GlyphSize.recall ? "Reaction\(rawValue)Small" : "Reaction\(rawValue)")
     }
 }
+
+/// The sixth face, and the one that is not a verdict.
+///
+/// Drawn in the same hand as the five -- the same circle at the same place, the same 30%
+/// cheeks, the same tapered glass -- because it has to read as one of the set. What it does
+/// not have is a rung. Where the five put a level in the glass, this one puts a question mark:
+/// the five say what a drink was like, and this says we do not know what the drink IS (user,
+/// 2026-10-16). The brows are up and the mouth is the neutral line off level, which is the
+/// face a person makes before saying they could not tell you.
+enum Shrug {
+    /// Same threshold as the ramp: the heavier 2.0 cut below 24pt, where the display weight
+    /// thins out. The question mark in the glass is cut heavier with it.
+    static func glyph(at size: CGFloat) -> Image {
+        Image(size <= Brand.GlyphSize.recall ? "ShrugSmall" : "Shrug")
+    }
+}

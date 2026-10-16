@@ -4,6 +4,9 @@ import BCDKit
 struct RootView: View {
     @EnvironmentObject var env: AppEnvironment
 
+    /// Watched so the telemetry queue gets drained on the way out and on the way back in.
+    @Environment(\.scenePhase) private var scenePhase
+
     /// Whether the first-run quiz has been put to this install — answered OR skipped. Its own
     /// flag rather than `reactions.count == 0`, because someone who answered and then removed
     /// their only rating has already been asked, and being asked twice reads as the app
@@ -58,6 +61,17 @@ struct RootView: View {
             // Who the app thinks it is talking to, asked once on launch. Everything that
             // decides between "your taste" and "somewhere to start" reads the answer.
             await env.refreshProfile()
+        }
+        // The queue's only other drain is twenty events deep: `TelemetryQueue.log` flushes
+        // when the backlog reaches its threshold and nothing in the app had ever called
+        // `flush` otherwise. For most events that is fine -- they are analytics and arriving
+        // late costs nothing -- but a rating WITHDRAWN while the server was unreachable sat
+        // behind twenty unrelated events before anyone was told the verdict was taken back.
+        // Leaving the app and coming back to it are both moments worth trying, and the cost
+        // of trying is nothing: `flush` returns immediately on an empty queue and clears only
+        // what the collector accepts, so a refused batch stays owed (2026-10-16).
+        .onChange(of: scenePhase) { _, _ in
+            Task { try? await env.telemetry.flush() }
         }
         // The one screen that comes before the app. A drinker with no profile gets
         // recommendations built from a seed that is somebody else's taste, and the list says
