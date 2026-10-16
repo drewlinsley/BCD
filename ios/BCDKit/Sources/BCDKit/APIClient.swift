@@ -34,6 +34,9 @@ public protocol APIClientProtocol: Sendable {
     /// A drink the catalog could not place, as the drinker described it. The one call that sends
     /// authored data rather than asking for data.
     func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck
+    /// One fact about a drink the catalog already has. The other authoring call, and the one
+    /// that gets used far more often: the drink is on the screen and a field on it is blank.
+    func contributeFact(_ fact: DrinkFact) async throws -> ContributionAck
 }
 
 extension APIClientProtocol {
@@ -79,6 +82,12 @@ extension APIClientProtocol {
     /// Reports the route as unimplemented rather than acknowledging something it never sent —
     /// an ack here would tell `ContributionUploader` to delete what the drinker typed.
     public func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck {
+        throw APIError.http(501)
+    }
+
+    /// Same reasoning, one step softer: an ack here would not delete anything, but it would
+    /// mark a fact as sent that nothing sent, and the drain would never try it again.
+    public func contributeFact(_ fact: DrinkFact) async throws -> ContributionAck {
         throw APIError.http(501)
     }
 
@@ -233,6 +242,10 @@ public final class APIClient: APIClientProtocol, @unchecked Sendable {
     /// only that the claim is recorded.
     public func contribute(_ contribution: DrinkContribution) async throws -> ContributionAck {
         try await post("/v1/contribute", body: ContributionWire(contribution))
+    }
+
+    public func contributeFact(_ fact: DrinkFact) async throws -> ContributionAck {
+        try await post("/v1/contribute/fact", body: DrinkFactWire(fact))
     }
 
     public func similar(to productId: String, limit: Int = 6) async throws -> SimilarResponse {
