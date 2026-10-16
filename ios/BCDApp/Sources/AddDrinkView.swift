@@ -19,6 +19,15 @@ struct AddDrinkView: View {
     /// the name and is offered as one-tap fills. Empty is normal — the vision path only runs
     /// with label-photo consent, and the form stands on its own without it.
     let sightings: [String]
+    /// A name the caller already has, which seeds the field outright. The search door has one:
+    /// the drinker just typed the name of the drink the catalog could not produce, and making
+    /// them type it a second time is how people give up. `var` with a default so the camera
+    /// door, where `sightings` does this job and says so on screen, need not mention it.
+    ///
+    /// Kept separate from `sightings` deliberately: that strip is headed "The camera read" and
+    /// the field travels to the server as a record of what the phone actually saw, so a typed
+    /// query in it would be a lie in both places.
+    var typedName: String = ""
     /// Hand the finished contribution back to the caller to persist and log. The view owns the
     /// fields and the dismissal; the caller owns where it goes.
     let onSubmit: (DrinkContribution) -> Void
@@ -385,6 +394,8 @@ struct AddDrinkView: View {
     /// strip lets the user re-point them.
     private func seed() {
         guard name.isEmpty else { return }
+        let typed = typedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { name = typed; return }
         if let first = sightings.first { name = first }
         if sightings.count > 1 { maker = sightings[1] }
     }

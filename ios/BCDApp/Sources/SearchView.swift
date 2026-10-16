@@ -18,7 +18,11 @@ struct SearchView: View {
     /// verdict, and a row that cannot hear the log goes stale behind it.
     @EnvironmentObject var reactions: ReactionLog
     @State private var query = ""
-    @State private var results: [ResolvedProduct] = []
+    /// `waiting` before a search, `answered` with whatever came back -- including nothing,
+    /// which is a fact about the catalog -- and `failed` when the asking did not work. Three
+    /// states, because the empty state now offers to add the drink, and "we do not have it"
+    /// is the one thing a failed request does not establish.
+    @State private var results: Asked<[ResolvedProduct]> = .waiting
     @State private var searching = false
     /// The query the results belong to, or nil when nothing has been searched yet. Typing is
     /// not searching: keyed on `query` alone the screen told you "No matches" for a word you
@@ -26,6 +30,14 @@ struct SearchView: View {
     @State private var submitted: String?
     @State private var recents: [String] = []
     @State private var detail: ScoredCandidate?
+    /// Describing a drink the catalog could not produce. Reached from the empty state, which
+    /// until now was a dead end: `AddDrinkView` had exactly one door, the scan HUD, so a
+    /// drink you could name but not photograph could not be added at all (user, 2026-10-16).
+    @State private var adding = false
+    /// A match recognised inside the add sheet -- it was in the catalog under another
+    /// spelling. Opened after that sheet closes, because two presentations overlapping is
+    /// what reliably drops both.
+    @State private var picked: ResolvedProduct?
 
     var body: some View {
         NavigationStack {
@@ -37,14 +49,42 @@ struct SearchView: View {
             .onSubmit(of: .search) { Task { await run(query) } }
             // Clearing the field puts the history back rather than leaving a stale list.
             .onChange(of: query) { _, new in
-                if new.isEmpty { results = []; submitted = nil; recents = env.recents.all() }
+                if new.isEmpty {
+                    results = .waiting; submitted = nil; recents = env.recents.all()
+                }
             }
             .task { recents = env.recents.all() }
             .sheet(item: $detail) {
                 ProductDetailView(candidate: $0, referrer: .search)
                     .presentationDragIndicator(.visible)
             }
+            // The same sheet the scan HUD opens, from the other door. `onDismiss` rather than
+            // setting `detail` from inside it, for the same reason ScanView does: a drink
+            // recognised in the match list has to replace this sheet, not sit under it.
+            .sheet(isPresented: $adding, onDismiss: openPickedMatch) {
+                AddDrinkView(sightings: [],
+                             typedName: submitted ?? query,
+                             onSubmit: submitContribution,
+                             search: { term in
+                                 (try? await env.api.searchProducts(term)) ?? []
+                             },
+                             onPick: { picked = $0 })
+            }
         }
+    }
+
+    private func openPickedMatch() {
+        guard let match = picked else { return }
+        picked = nil
+        open(match)
+    }
+
+    /// Write it down first -- the log is the record of truth and has to survive a failed
+    /// upload -- then try to send it. Same two steps `ScanView` takes, deliberately: a
+    /// contribution from the search box and one from the camera are the same claim.
+    private func submitContribution(_ contribution: DrinkContribution) {
+        env.contributions.add(contribution)
+        Task { await env.contributionUploader.drain() }
     }
 
     // MARK: - what you looked up before
@@ -94,7 +134,7 @@ struct SearchView: View {
     // MARK: - results
 
     private var resultsList: some View {
-        List(results) { rp in
+        List(results.answer ?? []) { rp in
             Button { open(rp) } label: {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -116,15 +156,74 @@ struct SearchView: View {
             .buttonStyle(.plain)
         }
         .overlay {
-            if searching {
+            switch results {
+            case _ where searching:
                 ProgressView()
-            } else if results.isEmpty {
-                ContentUnavailableView(
-                    "No matches for “\(submitted ?? "")”",
-                    systemImage: "magnifyingglass",
-                    description: Text("Try fewer words — the registry files a lot of near-names."))
+            case .answered(let found) where found.isEmpty:
+                nothingFound
+            case .failed:
+                // Not the shrug. The shrug says the catalog does not have this drink and
+                // offers to be told about it, and a request that never arrived has not
+                // established that -- offering to add a drink we may well already hold would
+                // be the app's own failure dressed up as the catalog's gap.
+                ContentUnavailableView {
+                    Label("Couldn't search", systemImage: "arrow.clockwise")
+                } description: {
+                    Text("The catalog couldn't be reached.")
+                } actions: {
+                    Button("Try again") { Task { await run(submitted ?? query) } }
+                }
+            case .waiting, .answered:
+                EmptyView()
             }
         }
+    }
+
+    /// The catalog really does not have it.
+    ///
+    /// The shrug is the sixth face in the taster set: the same circle and the same glass as
+    /// the five verdicts, with a question mark where the level goes. It says what the five
+    /// cannot -- not how a drink was, but that we do not know what the drink is -- and it is
+    /// drawn rather than borrowed, like every other mark in the app that carries meaning.
+    ///
+    /// Under it, the way out of the dead end. This screen used to say "try fewer words", which
+    /// is advice for the case where the catalog has the drink; when it genuinely does not, the
+    /// only person who can fix that is the one holding the can (user, 2026-10-16).
+    private var nothingFound: some View {
+        VStack(spacing: 18) {
+            Shrug.glyph(at: Brand.GlyphSize.display)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: Brand.GlyphSize.display, height: Brand.GlyphSize.display)
+                .foregroundStyle(Brand.amber)
+
+            VStack(spacing: 6) {
+                Text("No matches for “\(submitted ?? "")”")
+                    .font(.headline)
+                    .foregroundStyle(Brand.text)
+                    .multilineTextAlignment(.center)
+                Text("Try fewer words — the registry files a lot of near-names.")
+                    .font(.subheadline)
+                    .foregroundStyle(Brand.textMuted)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button { adding = true } label: {
+                Text("TELL US MORE")
+                    .font(.system(size: 12, weight: .bold))
+                    .tracking(1.6)
+                    .foregroundStyle(Brand.ink)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+                    .background(Capsule().fill(Brand.amber))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Brand.surface)
     }
 
     /// A search result is already the whole product, so this opens straight from what is on
@@ -141,7 +240,7 @@ struct SearchView: View {
         searching = true
         submitted = trimmed
         defer { searching = false }
-        results = (try? await env.api.searchProducts(trimmed)) ?? []
+        results = await Asked.asking { try await env.api.searchProducts(trimmed) }
         // Recorded whatever came back: "no matches" is a thing you may well want to try again
         // later, spelled differently, and hiding it makes the history a record of the app's
         // successes rather than of what you were after.
