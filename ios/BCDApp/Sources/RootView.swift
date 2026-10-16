@@ -61,6 +61,11 @@ struct RootView: View {
             // Who the app thinks it is talking to, asked once on launch. Everything that
             // decides between "your taste" and "somewhere to start" reads the answer.
             await env.refreshProfile()
+            await env.factUploader.drain()
+            // Contributions have the same gap and it is the same line: `drain` was called
+            // only from the tap that made one, so a drink described while the server was down
+            // waited for the next drink to be described.
+            await env.contributionUploader.drain()
         }
         // The queue's only other drain is twenty events deep: `TelemetryQueue.log` flushes
         // when the backlog reaches its threshold and nothing in the app had ever called
@@ -72,6 +77,10 @@ struct RootView: View {
         // what the collector accepts, so a refused batch stays owed (2026-10-16).
         .onChange(of: scenePhase) { _, _ in
             Task { try? await env.telemetry.flush() }
+            // And anything the drinker told us about a drink that has not reached the server.
+            // Draining only on the tap that made it meant a fact given while the server was
+            // down waited for the NEXT fact to be given, which on most installs is never.
+            Task { await env.factUploader.drain() }
         }
         // The one screen that comes before the app. A drinker with no profile gets
         // recommendations built from a seed that is somebody else's taste, and the list says

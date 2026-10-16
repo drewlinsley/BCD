@@ -19,6 +19,9 @@ struct BCDApp: App {
                 // outer one, so a row drawing a glyph has to observe the log itself --
                 // see `ReactionLog`.
                 .environmentObject(env.reactions)
+                // Same reasoning: the label card shows a strength this phone supplied, and
+                // has to redraw the moment one is given.
+                .environmentObject(env.facts)
         }
     }
 }
@@ -46,6 +49,12 @@ final class AppEnvironment: ObservableObject {
     /// Sends those to the server and clears them from the log once it has. Built here rather
     /// than inside the log so the log stays pure storage and the upload can be stubbed.
     let contributionUploader: ContributionUploader
+    /// What this install has told us about drinks the catalog already HAS — a strength on a
+    /// row whose strength was blank. Unlike contributions these are kept after upload, because
+    /// the label card shows the drinker their own answer until the catalog earns one of its
+    /// own: a typed number needs a second account to agree before it may be written.
+    let facts: DrinkFactLog
+    let factUploader: DrinkFactUploader
     /// Pseudonymous per-install id. Still the id telemetry is filed under -- it is what the
     /// event spec declares -- but no longer what the server keys a PROFILE on: that is the
     /// account behind `auth`, which the server mints and the app proves with a token.
@@ -95,6 +104,7 @@ final class AppEnvironment: ObservableObject {
          seen: SeenLog = SeenLog(),
          recents: RecentSearches = RecentSearches(),
          contributions: ContributionLog = ContributionLog(),
+         facts: DrinkFactLog = DrinkFactLog(),
          installId: String = InstallIdentity.current,
          auth: AuthStore = AuthStore(baseURL: AppEnvironment.apiBaseURL())) {
         self.api = api
@@ -107,6 +117,8 @@ final class AppEnvironment: ObservableObject {
         self.recents = recents
         self.contributions = contributions
         self.contributionUploader = ContributionUploader(log: contributions, api: api)
+        self.facts = facts
+        self.factUploader = DrinkFactUploader(log: facts, api: api)
         self.installId = installId
         self.auth = auth
     }

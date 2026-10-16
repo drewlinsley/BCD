@@ -25,6 +25,7 @@ from bcd_schema import (
     Category,
     ContributionRequest,
     ContributionResponse,
+    FactRequest,
     FeedbackRequest,
     FeedbackResponse,
     LexiconResponse,
@@ -844,6 +845,55 @@ def contribute(req: ContributionRequest, who: Caller) -> ContributionResponse:
     payload["account_id"] = who.id
     payload["received_at"] = datetime.now(UTC).isoformat()
     store.put_bronze(BronzeDoc(id=did, source_id=CONTRIBUTION_SOURCE, natural_key=natural_key,
+                               fetched_at=payload["received_at"], url=None, payload=payload))
+    seen.add(req.id)
+    return ContributionResponse(accepted=True, doc_id=did, duplicate=duplicate)
+
+
+#: Facts about rows the catalog already has, filed apart from claims towards new ones. Two
+#: different kinds of claim with two different promotion rules should not share a source: one
+#: asks "does this drink exist", the other "is this number right about a drink that does".
+USER_FACT_SOURCE = "user_fact"
+
+
+@app.post("/v1/contribute/fact", response_model=ContributionResponse)
+def contribute_fact(req: FactRequest, who: Caller) -> ContributionResponse:
+    """Record one fact about a drink the catalog already holds.
+
+    The other half of `contribute`. That route exists for a drink nothing could place; this one
+    for the far commoner case -- the drink is right there on the screen and a field on it is
+    blank. 517,171 of 534,104 products carry no strength, and the question mark the label prints
+    over that gap could not be answered by anybody (user, 2026-10-16).
+
+    Bronze, like every other claim, and promoted by the same gates a contributed drink is: two
+    different accounts must agree, and `user_contributed` sits at 0.7 in the ladder, so a typed
+    number may fill an empty slot and can never overwrite a filing. Nothing the resolver draws
+    from changes here.
+
+    The product must exist. A fact about a row that does not is not a fact about a row -- it is
+    a claim that a drink exists, which is what `contribute` is for, and filing it here would put
+    a claim in bronze that no promotion pass could ever attach to anything.
+
+    Idempotent on the client's id, for the reason `contribute` is: the phone may upload, lose
+    the answer and upload again, and that must leave one document.
+    """
+    store: Store = _state["store"]
+    if get_product(store, req.product_id) is None:
+        raise HTTPException(status_code=404, detail="no such product")
+
+    submitted = _state.setdefault("facts_by_account", {})
+    seen: set[str] = submitted.setdefault(who.id, set())
+    if len(seen) >= CONTRIBUTION_CAP and req.id not in seen:
+        raise HTTPException(status_code=429, detail="too many contributions")
+
+    natural_key = f"{who.id}::{req.id}"
+    did = doc_id(USER_FACT_SOURCE, natural_key)
+    duplicate = store.get_bronze(did) is not None
+
+    payload = req.model_dump(mode="json")
+    payload["account_id"] = who.id
+    payload["received_at"] = datetime.now(UTC).isoformat()
+    store.put_bronze(BronzeDoc(id=did, source_id=USER_FACT_SOURCE, natural_key=natural_key,
                                fetched_at=payload["received_at"], url=None, payload=payload))
     seen.add(req.id)
     return ContributionResponse(accepted=True, doc_id=did, duplicate=duplicate)
