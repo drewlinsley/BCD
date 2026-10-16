@@ -136,6 +136,14 @@ public actor TelemetryQueue {
 
     private func persist() {
         guard let storeURL, let data = try? JSONEncoder().encode(pending) else { return }
+        // The directory first. On iOS `Library/Application Support` does not exist until
+        // something creates it, and this wrote into it through `try?` -- so the queue
+        // described above as disk-backed and offline-safe, whose events "are never dropped",
+        // had been purely in memory since it shipped. Every queued event was lost on the next
+        // launch. Nothing caught it because no test had ever passed a `storeURL`, and on the
+        // simulator the container simply had no `Application Support` at all (2026-10-16).
+        try? FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
         try? data.write(to: storeURL, options: .atomic)
     }
 }
