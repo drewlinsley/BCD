@@ -34,8 +34,14 @@ struct ProductDetailView: View {
     let referrer: ProductReferrer
     @EnvironmentObject var env: AppEnvironment
     @EnvironmentObject var reactions: ReactionLog
+    /// What this install has told us about rows the catalog already has. Observed in its own
+    /// right, not reached through `env`: a nested `ObservableObject` publishes nothing to
+    /// whoever holds the outer one, so a card drawing a strength has to hear the log itself.
+    @EnvironmentObject var facts: DrinkFactLog
 
     @State private var rating = false
+    /// Being asked for the strength the catalog does not have.
+    @State private var askingStrength = false
     /// Neighbours in the sensory space. `waiting` until asked, so the section can stay off
     /// the screen rather than flashing an empty card on every open -- and `failed` kept apart
     /// from an empty answer, because they are different facts. They were one value until
@@ -117,6 +123,12 @@ struct ProductDetailView: View {
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $rating) {
                 RatingSheet(productId: product.id, productName: productName)
+            }
+            .sheet(isPresented: $askingStrength) {
+                StrengthSheet(productId: product.id, productName: productName,
+                              current: facts.value(for: product.id))
+                    .presentationDetents([.height(380)])
+                    .presentationDragIndicator(.visible)
             }
             .task(id: product.id) { await askForSimilar() }
             // Only when the drink arrived without one: a recommendation already carries the
@@ -271,22 +283,40 @@ struct ProductDetailView: View {
     @ViewBuilder private var strength: some View {
         if let abv = product.spec.abvPct {
             SourcedStrength(abv: abv)
+        } else if let mine = facts.value(for: product.id) {
+            // Your own answer, shown back to you and to nobody else. The catalog has not
+            // earned this number yet -- `user_contributed` needs a second account to agree
+            // before it may be written to the row everyone reads -- but the person who took
+            // the trouble to type it should not be shown a question mark about it afterwards
+            // (user, 2026-10-16).
+            Button { askingStrength = true } label: { OwnStrength(value: mine) }
+                .buttonStyle(.plain)
+                .accessibilityHint("Change what you told us")
         } else {
             // Said, not skipped. A label with nothing where the strength goes looks broken;
             // this looks like a label whose strength we do not have, which is the truth.
-            VStack(alignment: .leading, spacing: 4) {
-                Text("?")
-                    .font(.system(size: 34, weight: .semibold, design: .serif))
-                    .foregroundStyle(Brand.amber.opacity(0.45))
-                // The caption is the same on every drink, so the question mark is read
-                // against it: this is the strength, and we do not have it.
-                Text("ALC / VOL")
-                    .font(.system(size: 9.5, weight: .semibold))
-                    .tracking(1.3)
-                    .foregroundStyle(Brand.cream.opacity(0.6))
+            //
+            // And now it is a question somebody can answer. 517,171 of 534,104 rows carry no
+            // strength, which is to say this mark is on the overwhelming majority of cards,
+            // and until now it was inert on every one of them.
+            Button { askingStrength = true } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("?")
+                        .font(.system(size: 34, weight: .semibold, design: .serif))
+                        .foregroundStyle(Brand.amber.opacity(0.45))
+                    // The caption is the same on every drink, so the question mark is read
+                    // against it: this is the strength, and we do not have it.
+                    Text("ALC / VOL")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .tracking(1.3)
+                        .foregroundStyle(Brand.cream.opacity(0.6))
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Alcohol by volume not on record")
+            .accessibilityHint("Tell us the strength")
         }
     }
 
@@ -596,6 +626,134 @@ private struct Seal: View {
         case .unscored: "Not scored for you yet. Rate a few drinks and this fills in."
         case .unanswered: "Not scored — the server could not be reached. Tap to try again."
         }
+    }
+}
+
+/// A strength the drinker told us, on a row the catalog has none for.
+///
+/// The same figure in the same amber as a catalog strength, because it is not a lesser number:
+/// somebody read it off the tin. What differs is the caption, which carries who said so --
+/// until a second account agrees, this is on this phone and nowhere else, and a card that said
+/// it plainly would be claiming the catalog knows something it does not.
+private struct OwnStrength: View {
+    let value: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(format: "%.1f%%", value))
+                .font(.system(size: 34, weight: .semibold, design: .serif))
+                .monospacedDigit()
+                .foregroundStyle(Brand.amber)
+            Text("ALC / VOL · YOU TOLD US")
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(1.3)
+                .foregroundStyle(Brand.cream.opacity(0.6))
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            String(format: "%.1f percent alcohol by volume, as you told us", value))
+    }
+}
+
+/// Being asked for a strength the catalog does not have.
+///
+/// One number, because that is all this is: the figure printed on the tin in your hand. The
+/// same two steps every other authored thing in this app takes -- written down here first,
+/// because the log is the record of truth and has to survive a failed upload, then sent.
+///
+/// What it does NOT do is edit the catalog. The claim lands in bronze and is promoted only
+/// when a second account agrees, which the copy says outright: a sheet that implied otherwise
+/// would be promising an edit the server is deliberately built not to make.
+private struct StrengthSheet: View {
+    let productId: String
+    let productName: String
+    /// What this install said last time, so changing your mind starts from your own answer.
+    let current: Double?
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject var env: AppEnvironment
+    @EnvironmentObject var facts: DrinkFactLog
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    /// A comma is a decimal point in most of the places this catalog's labels come from.
+    private var parsed: Double? {
+        let t = text.replacingOccurrences(of: ",", with: ".")
+                    .trimmingCharacters(in: .whitespaces)
+        guard let value = Double(t), value >= 0, value <= 100 else { return nil }
+        return value
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("What does the label say?")
+                    .font(.headline)
+                    .foregroundStyle(Brand.text)
+
+                HStack(spacing: 6) {
+                    TextField("ABV", text: $text)
+                        .keyboardType(.decimalPad)
+                        .focused($focused)
+                        .font(.system(size: 28, weight: .semibold, design: .serif))
+                        .monospacedDigit()
+                        .frame(maxWidth: 120)
+                    Text("% ALC / VOL")
+                        .font(.caption.weight(.semibold))
+                        .tracking(0.8)
+                        .foregroundStyle(Brand.textMuted)
+                    Spacer(minLength: 0)
+                }
+                .padding(14)
+                .background(Brand.tile)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Brand.hairline, lineWidth: 0.5))
+
+                Text("Kept against this drink for you straight away. It goes on the "
+                     + "catalog's copy once somebody else tells us the same.")
+                    .font(.caption)
+                    .foregroundStyle(Brand.textMuted)
+                    // Two lines, and it must be allowed both: inside a sized detent a `Text`
+                    // takes the height it is given and truncates rather than wrapping.
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: save) {
+                    Text("Tell us")
+                        .font(.headline)
+                        .foregroundStyle(parsed == nil ? Brand.textMuted : Brand.ink)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(Capsule()
+                            .fill(parsed == nil ? Brand.hairline : Brand.amber))
+                }
+                .buttonStyle(.plain)
+                .disabled(parsed == nil)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .background(Brand.surface)
+            .navigationTitle(productName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .onAppear {
+            if let current { text = String(format: "%.1f", current) }
+            focused = true
+        }
+    }
+
+    private func save() {
+        guard let value = parsed else { return }
+        facts.record(DrinkFact(productId: productId, value: value))
+        Task { await env.factUploader.drain() }
+        dismiss()
     }
 }
 
