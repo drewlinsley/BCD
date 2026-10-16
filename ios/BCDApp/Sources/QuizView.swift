@@ -17,16 +17,33 @@ import BCDKit
 // screen never has to know a flavour vector exists.
 
 struct QuizView: View {
+    /// How the quiz ended. "It is over" and "we never got to ask" are not the same thing, and
+    /// the flag that stops the app asking twice is only entitled to the first: a quiz that
+    /// never loaded has not been put to anyone. One blip on a first launch used to spend the
+    /// one asking this install was ever going to get (2026-10-16).
+    enum Outcome {
+        /// Answers sent, profile built.
+        case answered
+        /// They saw the questions and chose to move on. Skip is a decision.
+        case skipped
+        /// The questions never arrived, so nothing was asked. Getting past this screen is not
+        /// a verdict on a quiz nobody saw.
+        case unreachable
+    }
+
     @EnvironmentObject var env: AppEnvironment
     /// Answering is the moment personalization is agreed to, so this screen has to be able
     /// to set it — and to read whether it has already been given, on a retake.
     @EnvironmentObject var consent: ConsentStore
-    /// Called once the profile exists, so whoever presented this can get out of the way.
-    var onDone: () -> Void
+    /// Called once the profile exists, so whoever presented this can get out of the way. It
+    /// is handed what happened, because the first-run caller's flag depends on it and a retake
+    /// does not care.
+    var onDone: (Outcome) -> Void
 
-    @State private var drinks: [QuizDrink] = []
+    /// The questions. `failed` kept apart from an empty answer: the screen said "Can't reach
+    /// the catalog" for both, and -- worse -- leaving either way marked the quiz as asked.
+    @State private var drinks: Asked<[QuizDrink]> = .waiting
     @State private var answers: [String: Double] = [:]
-    @State private var loading = true
     @State private var sending = false
     @State private var failed = false
     /// That this install answered, which `bcd.quizAsked` does not say — that one covers
@@ -44,9 +61,18 @@ struct QuizView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if loading { ProgressView().controlSize(.large) }
-                else if drinks.isEmpty { unavailable }
-                else { questions }
+                switch drinks {
+                case .waiting:
+                    ProgressView().controlSize(.large)
+                // Nothing to ask. `load` is already getting out of the way, so this holds the
+                // spinner rather than flashing an empty form on its way past.
+                case .answered(let got) where got.isEmpty:
+                    ProgressView().controlSize(.large)
+                case .answered(let got):
+                    questions(got)
+                case .failed:
+                    unavailable
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Brand.surface)
@@ -57,14 +83,17 @@ struct QuizView: View {
                     // Always escapable. A first run that cannot be got past is a worse
                     // failure than a cold start, and the drinker can answer this later from
                     // You — rating anything builds the same profile by the same path.
-                    Button("Skip") { onDone() }.disabled(sending)
+                    // Always `.skipped`, whatever is on screen: the word on the button is the
+                    // decision. The unreachable card's own way out is the one that decides
+                    // nothing, because that screen never asked anything.
+                    Button("Skip") { onDone(.skipped) }.disabled(sending)
                 }
             }
         }
         .task { await load() }
     }
 
-    private var questions: some View {
+    private func questions(_ drinks: [QuizDrink]) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("So the first thing we show you is yours, not a stranger's.")
@@ -161,13 +190,23 @@ struct QuizView: View {
     }
 
     /// The server could not be asked. Not a wall: the quiz is an accelerant, not a gate.
+    ///
+    /// Two ways out, and they mean different things. Trying again is the one most people
+    /// want -- the request has already been retried three times, but a server coming back up
+    /// takes longer than a second -- and going in reports `unreachable`, so the asking is not
+    /// spent on a screen that never asked.
     private var unavailable: some View {
         VStack(spacing: 12) {
             Text("Can't reach the catalog right now.")
                 .font(.headline).foregroundStyle(Brand.text)
             Text("Rate anything you drink and this builds itself.")
                 .font(.subheadline).foregroundStyle(Brand.textMuted)
-            Button("Go on in") { onDone() }.font(.headline).foregroundStyle(Brand.amber)
+                .multilineTextAlignment(.center)
+            Button("Try again") { Task { await load() } }
+                .font(.headline).foregroundStyle(Brand.amber)
+                .padding(.top, 4)
+            Button("Go on in") { onDone(.unreachable) }
+                .font(.subheadline).foregroundStyle(Brand.textMuted)
         }
         .padding(28)
     }
@@ -187,8 +226,11 @@ struct QuizView: View {
     }
 
     private func load() async {
-        defer { loading = false }
-        drinks = (try? await env.api.quizDrinks()) ?? []
+        drinks = await Asked.asking { try await env.api.quizDrinks() }
+        // An answer of no questions is still an answer, and it spends the asking: the question
+        // set is the server's, and a client that treated "none" as "ask me again" would meet
+        // this screen on every launch for the life of the install.
+        if case .answered(let got) = drinks, got.isEmpty { onDone(.skipped) }
     }
 
     private func submit() async {
@@ -202,17 +244,27 @@ struct QuizView: View {
         let payload = answers.compactMap { family, weight in
             QuizLean(rawValue: weight)?.answer(for: family)
         }
-        do {
-            // The server records one `taste_quiz_answered` per answer as it builds the
-            // profile, so there is nothing for the client to log here: a second copy carrying
-            // a different shape would be the same quiz counted twice.
-            _ = try await env.api.submitQuiz(payload)
+        // The server records one `taste_quiz_answered` per answer as it builds the profile,
+        // so there is nothing for the client to log here: a second copy carrying a different
+        // shape would be the same quiz counted twice.
+        //
+        // Retried like a read, which a POST normally would not be. This one supersedes rather
+        // than accumulates -- the profile takes the last weight per family -- so a send that
+        // reached the server and lost its answer builds the identical centroid the second
+        // time. Against that, losing a first-run drinker's eight answers to one blip is the
+        // cold start this screen exists to prevent.
+        switch await Asked.asking({ try await env.api.submitQuiz(payload) }) {
+        case .answered:
             quizAnswered = true
-            onDone()
-        } catch {
+            onDone(.answered)
+        case .failed:
             // Kept on screen rather than dropped: these are the only answers we will get,
             // and letting them through to an empty profile would be the cold start again.
+            // Start is still live, so the line is an invitation to press it again.
             failed = true
+        case .waiting:
+            // Cancelled -- the sheet is going away. Nothing to report and nobody to report to.
+            break
         }
     }
 }
