@@ -6,6 +6,7 @@ a future codegen step can emit the Swift from these, same as telemetry events.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -202,6 +203,46 @@ class ContributionRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
     sightings: list[str] = Field(default_factory=list, max_length=24)
     created_at: str | None = None  # when the phone captured it; the server records its own too
+
+
+class FactField(str, Enum):
+    """Which fact about a row is being claimed.
+
+    One member today, and it is keyed on rather than implied, because agreement is counted per
+    (product, field): two accounts saying 5.2% is a fact earned, two accounts saying different
+    things about different fields is nothing. A field added later must not retroactively change
+    what an existing bronze doc was a claim about.
+    """
+
+    ABV_PCT = "abv_pct"
+
+
+class FactRequest(BaseModel):
+    """One fact about a drink the catalog ALREADY has, as told by someone holding the bottle.
+
+    The sibling of `ContributionRequest`, and deliberately a different shape: that one is a
+    claim *towards* a row, this is a claim *about* one. 517,171 of 534,104 products carry no
+    strength at all, and until now the question mark the card prints over that gap was inert --
+    the only way to tell us anything was to describe a drink we already held (user, 2026-10-16).
+
+    Lands in bronze under its own source and changes nothing the resolver draws from. It is
+    promoted on the gates a contributed drink is promoted on: two different accounts have to
+    agree, and `user_contributed` sits at 0.7, below `open_database` and far below a regulatory
+    filing, so a typed number can fill an empty slot and can never overwrite a filed one.
+
+    `id` is the client's own, for the same reason it is on `ContributionRequest`: the bronze doc
+    id is derived from it, so a phone that uploads and loses the answer may upload again and
+    still leave one document.
+
+    `value` is a float because the one field this route takes is a strength. A fact whose value
+    is text will carry its own field rather than widening this one into a bag of anys.
+    """
+
+    id: str = Field(..., min_length=1, max_length=64)
+    product_id: str = Field(..., min_length=1, max_length=128)
+    field: FactField
+    value: float = Field(..., ge=0.0, le=100.0)
+    created_at: str | None = None  # the phone's clock; the server records its own too
 
 
 class ContributionResponse(BaseModel):
